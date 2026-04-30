@@ -1,0 +1,19 @@
+[package]
+name = "dumpster_fire_engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.17.3"
+slotmap = "1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "component_storage"
+harness = false
+
+[[bench]]
+name = "arena_iteration"
+harness = false
