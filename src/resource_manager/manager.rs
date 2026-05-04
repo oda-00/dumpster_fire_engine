@@ -12,6 +12,33 @@ new_key_type! {
     pub struct SubEntityKey;
 }
 
+
+pub struct Handle<Tag>  {
+    pub idx: u32,
+    pub gen: u32,
+    _t: PhantomData<fn() -> Tag>,
+}
+
+pub struct LevelTag;
+pub struct StageTag;
+pub struct ActorTag;
+pub struct SubEntityTag;
+
+pub type LevelHandle = Handle<LevelTag>;
+pub type StageHandle = Handle<StageTag>;
+pub type ActorHandle = Handle<ActorTag>;
+pub type SubEntityHandle = Handle<SubEntityTag>;
+
+struct Slot<T>{ gen:u32 val Option<T> }
+
+pub struct Arena <Tag, T> {
+    slots: Vec<Slot<T>>,
+    free: ThinVec<u32>,
+    len: u32,
+    _tag: PhantomData<fn() -> Tag>,
+}
+
+
 pub struct Id<T>(pub i64, PhantomData<fn() -> T>);
 
 impl<T> Id<T> {
@@ -147,13 +174,18 @@ pub struct Utility {
 }
 
 pub enum ActorType {
-    Character(Character),
-    Environment(Environment),
-    Item(Item),
-    Utility(Utility),
+    Character(Character) = 0,
+    Environment(Environment) = 1,
+    Item(Item) = 2,
+    Utility(Utility) = 3,
 }
 
 impl ActorType {
+    pub const COUNT: usize = 4;
+
+    #[inline]
+    pub const fn index(self) -> usize { self as usize }
+
     pub fn subtype_id(&self) -> SubtypeId {
         match self {
             ActorType::Character(c)   => SubtypeId::Character(c.id),
@@ -178,7 +210,7 @@ pub struct SubEntity {
     pub local: Transform,
     pub world: Transform,
     pub dirty: bool,
-    pub components: [Option<Component>; ComponentType::COUNT],
+    pub components: [Vec<Component>; ComponentType::COUNT],
     pub parent: ActorKey,
 }
 
@@ -186,6 +218,7 @@ impl SubEntity {
     pub fn sub_entity_id(&self) -> SubtypeId {
         self.actor_type.subtype_id()
     }
+    
 
     pub fn name(&self) -> &str {
         self.actor_type.name()
@@ -219,5 +252,5 @@ pub struct Actor {
     pub world: Transform,
     pub dirty: bool,
     pub parent: StageKey,
-    pub children: HashMap<SubtypeId, SubEntityKey>,
+    pub children: [Vec<SubEntityKey>; ActorType::COUNT],
 }
