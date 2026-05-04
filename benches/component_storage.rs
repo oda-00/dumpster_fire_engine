@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use dumpster_fire_engine::resource_manager::comps::*;
+use dumpster_fire_engine::resource_manager::component::*;
 
 const N: usize = 10_000;
 

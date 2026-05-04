@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cpal = "0.17.3"
-slotmap = "1"
+thin-vec = "0.2"
+glam = "0.29"
 
 [dev-dependencies]
+slotmap = "1"
 criterion = "0.5"
 
 [[bench]]
