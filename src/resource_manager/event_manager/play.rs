@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use glam::Affine3A;
 use thin_vec::ThinVec;
 use crate::resource_manager::manager::{Arena, Handle, Id, LevelHandle, StageHandle};
 use crate::resource_manager::world_manager::stage::StageId;
 use crate::resource_manager::world_manager::world::World;
 use super::scene::{
-    BtState, EvalCtx, Effect, Event, Handler, Scene, SceneHandle, SceneId, SceneKind, SceneTag,
+    BtNode, BtState, EvalCtx, Effect, Event, Handler, Scene, SceneHandle, SceneId,
+    SceneKind, SceneTag, TroupeId,
 };
 use super::script::{Script, ScriptId};
 
@@ -53,6 +55,12 @@ pub struct Play {
     pub handlers: ThinVec<Handler>,
     pub queue:    ThinVec<Event>,
 
+    /// Troupes whose authored cues are entirely IDENTITY (or which never appear
+    /// as a CueTroupe target at all). Computed at instantiate time. Stage's
+    /// cue_troupe_direct uses this to skip the scratch fill + dirty walk for
+    /// cues that won't move anything.
+    pub static_troupes: ThinVec<crate::resource_manager::event_manager::TroupeId>,
+
     /// Filled by World::apply_effect when an Effect::ScheduleTransition fires;
     /// consumed by post_tick_bookkeeping during pass 3.
     pub pending_transition: Option<TransitionRecord>,
@@ -91,6 +99,13 @@ impl Play {
             .map(|(_, h)| *h)
             .expect("Script::entry must reference a scene that was added via add_scene");
 
+        // Static-troupe analysis: collect every troupe id that appears in the
+        // script (either declared by a SceneDef or named by a CueTroupe effect),
+        // then subtract the troupes that receive at least one non-identity cue.
+        // What's left is the set of "static" troupes whose cues are guaranteed
+        // not to move any actor — Stage::cue_troupe_direct can skip them.
+        let static_troupes = compute_static_troupes(script);
+
         let mut play = Play {
             id,
             name: name.into(),
@@ -105,6 +120,7 @@ impl Play {
             by_id,
             handlers: script.handlers.iter().cloned().collect(),
             queue: ThinVec::new(),
+            static_troupes,
             pending_transition: None,
             pending_mealy: Vec::new(),
             paused: false,
@@ -361,6 +377,82 @@ impl Play {
             let id = self.scenes[leaf].id;
             if !enter_chain.iter().any(|&h| self.scenes[h].id == id) {
                 self.queue.push(Event::SceneEntered(id));
+            }
+        }
+    }
+}
+
+// ── Static-troupe analysis ──────────────────────────────────────────────────
+//
+// At instantiate time we walk every authored Effect (BT leaves, on_enter,
+// on_exit, transition.effects, recursively in Mealy chains) and bucket every
+// `Effect::CueTroupe` by its `delta`. Troupes that only ever receive identity
+// cues — or never appear at all — are returned as "static". Stage's
+// cue_troupe_direct fast-paths these to a no-op without even filling
+// cue_scratch.
+
+fn compute_static_troupes(script: &Script) -> ThinVec<TroupeId> {
+    // Engine pattern: flat ThinVec with linear-scan dedup, matching how
+    // Stage::cache and Level::cache are stored. Troupe counts are tiny (<<100),
+    // so .contains() beats HashSet hashing here.
+    let mut all_troupes: ThinVec<TroupeId> = ThinVec::new();
+    let mut moving:      ThinVec<TroupeId> = ThinVec::new();
+
+    for def in script.scenes.iter() {
+        for t in def.troupes.iter() {
+            if !all_troupes.contains(t) { all_troupes.push(*t); }
+        }
+        scan_effects(&def.on_enter, &mut all_troupes, &mut moving);
+        scan_effects(&def.on_exit,  &mut all_troupes, &mut moving);
+        for tr in def.transitions.iter() {
+            scan_effects(&tr.effects, &mut all_troupes, &mut moving);
+        }
+        scan_bt(&def.root, &mut all_troupes, &mut moving);
+    }
+
+    // static = all_troupes \ moving.
+    all_troupes.into_iter().filter(|t| !moving.contains(t)).collect()
+}
+
+fn scan_effects(
+    effects: &[Effect],
+    all_troupes: &mut ThinVec<TroupeId>,
+    moving:      &mut ThinVec<TroupeId>,
+) {
+    for e in effects {
+        match e {
+            Effect::CueTroupe { troupe, delta, .. } => {
+                if !all_troupes.contains(troupe) { all_troupes.push(*troupe); }
+                if *delta != Affine3A::IDENTITY && !moving.contains(troupe) {
+                    moving.push(*troupe);
+                }
+            }
+            Effect::ScheduleTransition { mealy, .. } => scan_effects(mealy, all_troupes, moving),
+            _ => {}
+        }
+    }
+}
+
+fn scan_bt(
+    node: &BtNode,
+    all_troupes: &mut ThinVec<TroupeId>,
+    moving:      &mut ThinVec<TroupeId>,
+) {
+    match node {
+        BtNode::Sequence(cs) | BtNode::Selector(cs) => {
+            for c in cs { scan_bt(c, all_troupes, moving) }
+        }
+        BtNode::Parallel { children, .. } => {
+            for c in children { scan_bt(c, all_troupes, moving) }
+        }
+        BtNode::Repeat { child, .. } => scan_bt(child, all_troupes, moving),
+        BtNode::Decorator { child, .. } => scan_bt(child, all_troupes, moving),
+        BtNode::Leaf(op) => {
+            if let Effect::CueTroupe { troupe, delta, .. } = &op.effect {
+                if !all_troupes.contains(troupe) { all_troupes.push(*troupe); }
+                if *delta != Affine3A::IDENTITY && !moving.contains(troupe) {
+                    moving.push(*troupe);
+                }
             }
         }
     }

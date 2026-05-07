@@ -8,9 +8,7 @@
 //
 //   cargo bench --bench game_tick
 
-use std::time::{Duration, Instant};
-
-use criterion::{black_box, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use glam::{Affine3A, Vec3};
 use thin_vec::thin_vec;
 
@@ -27,10 +25,10 @@ struct Scale {
 }
 
 impl Scale {
-    const fn small()  -> Self { Scale { levels: 1, stages_per_level: 1, actors_per_stage: 16,  bt_leaves: 4 } }
-    const fn medium() -> Self { Scale { levels: 2, stages_per_level: 2, actors_per_stage: 32,  bt_leaves: 6 } }
-    const fn large()  -> Self { Scale { levels: 2, stages_per_level: 4, actors_per_stage: 64,  bt_leaves: 8 } }
-    const fn xlarge() -> Self { Scale { levels: 4, stages_per_level: 4, actors_per_stage: 128, bt_leaves: 8 } }
+    const fn small()  -> Self { Scale { levels: 1, stages_per_level: 1, actors_per_stage: 50,  bt_leaves: 4 } }
+    const fn medium() -> Self { Scale { levels: 2, stages_per_level: 2, actors_per_stage: 500,  bt_leaves: 6 } }
+    const fn large()  -> Self { Scale { levels: 2, stages_per_level: 4, actors_per_stage: 1000,  bt_leaves: 8 } }
+    const fn xlarge() -> Self { Scale { levels: 4, stages_per_level: 4, actors_per_stage: 10000, bt_leaves: 8 } }
 
     fn label(&self) -> String {
         let total = self.levels * self.stages_per_level * self.actors_per_stage;
@@ -421,102 +419,10 @@ fn bench_tick_phases(c: &mut Criterion) {
     g.finish();
 }
 
-// ── Custom realistic-game report ───────────────────────────────────────────
-//
-// Criterion gives you statistically-rigorous timings of one tick in isolation.
-// This second pass measures a long sustained run the way a game would actually
-// run: many ticks back-to-back with no resampling between them. We report
-// p50/p95/p99 latency, throughput in ticks/sec, and the 60-Hz real-time budget.
-
-fn percentile(sorted: &[Duration], p: f64) -> Duration {
-    let idx = ((sorted.len() as f64) * p / 100.0).floor() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
-
-fn fmt_dur(d: Duration) -> String {
-    let ns = d.as_nanos();
-    if ns >= 1_000_000      { format!("{:>8.3} ms", ns as f64 / 1e6) }
-    else if ns >= 1_000     { format!("{:>8.3} µs", ns as f64 / 1e3) }
-    else                    { format!("{:>8} ns", ns) }
-}
-
-fn realistic_report(scale: Scale, warmup_ticks: usize, measure_ticks: usize) {
-    println!();
-    println!("=== realistic-run report — scale {} ===", scale.label());
-
-    let build_t0 = Instant::now();
-    let (mut world, handles) = build_world(scale);
-    let build_d = build_t0.elapsed();
-    println!("build:    {} ({} stages with Plays)", fmt_dur(build_d), handles.len());
-
-    let warmup_t0 = Instant::now();
-    for _ in 0..warmup_ticks { world.tick(DT); }
-    let warmup_d = warmup_t0.elapsed();
-    println!("warmup:   {} ({} ticks → {}/tick)",
-        fmt_dur(warmup_d), warmup_ticks,
-        fmt_dur(warmup_d / warmup_ticks.max(1) as u32));
-
-    let mut samples: Vec<Duration> = Vec::with_capacity(measure_ticks);
-    let measure_t0 = Instant::now();
-    for _ in 0..measure_ticks {
-        let t = Instant::now();
-        world.tick(DT);
-        samples.push(t.elapsed());
-    }
-    let measure_d = measure_t0.elapsed();
-
-    let total: Duration = samples.iter().sum();
-    let mean = total / samples.len() as u32;
-    let mut sorted = samples.clone();
-    sorted.sort();
-    let p50 = percentile(&sorted, 50.0);
-    let p95 = percentile(&sorted, 95.0);
-    let p99 = percentile(&sorted, 99.0);
-    let min = *sorted.first().unwrap();
-    let max = *sorted.last().unwrap();
-    let throughput = measure_ticks as f64 / measure_d.as_secs_f64();
-    let realtime_mult = throughput * DT as f64;
-
-    println!();
-    println!("ticks:    {}", measure_ticks);
-    println!("wall:     {}", fmt_dur(measure_d));
-    println!("rate:     {:>8.1} ticks/sec", throughput);
-    println!("budget:   {:>8.2}× real-time at 60 Hz   ({:.1}% of 16.667 ms frame)",
-        realtime_mult, mean.as_secs_f64() * 1000.0 / 16.667 * 100.0);
-    println!();
-    println!("per-tick latency");
-    println!("  min:    {}", fmt_dur(min));
-    println!("  mean:   {}", fmt_dur(mean));
-    println!("  p50:    {}", fmt_dur(p50));
-    println!("  p95:    {}", fmt_dur(p95));
-    println!("  p99:    {}", fmt_dur(p99));
-    println!("  max:    {}", fmt_dur(max));
-
-    // Sentinel access to defeat dead-code elimination of the tick loop and
-    // give the user evidence the bench actually ran.
-    let sample_actor = handles[0].actors[0].1;
-    let pos = world.levels[handles[0].lh].stages[handles[0].sh]
-        .actors[sample_actor].world.translation;
-    println!();
-    println!("end-of-run sentinel actor world pos: {:?}", pos);
-}
-
-// ── Custom main: criterion suite, then realistic report ────────────────────
-
-fn main() {
-    let mut crit = Criterion::default().configure_from_args();
-    bench_world_build(&mut crit);
-    bench_tick_steady(&mut crit);
-    bench_tick_scaling(&mut crit);
-    bench_tick_phases(&mut crit);
-    crit.final_summary();
-
-    // Skip the realistic report when criterion is in --test mode (e.g. CI
-    // dry runs `cargo test --benches`); otherwise the long sustained run
-    // would dominate the test budget.
-    let in_test_mode = std::env::args().any(|a| a == "--test");
-    if !in_test_mode {
-        realistic_report(Scale::medium(), 500, 5_000);
-        realistic_report(Scale::large(),  500, 5_000);
-    }
-}
+criterion_group!(benches,
+    bench_world_build,
+    bench_tick_steady,
+    bench_tick_scaling,
+    bench_tick_phases,
+);
+criterion_main!(benches);

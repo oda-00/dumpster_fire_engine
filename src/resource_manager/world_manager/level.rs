@@ -131,12 +131,14 @@ impl Level {
 
     // ── Transform propagation ─────────────────────────────────────────────
 
+    #[inline]
     pub fn set_actor_local(&mut self, stage_h: StageHandle, actor_h: ActorHandle, t: Affine3A) {
         if let Some(stage) = self.stages.get_mut(stage_h) {
             stage.set_actor_local(actor_h, t);
         }
     }
 
+    #[inline]
     pub fn set_sub_entity_local(
         &mut self,
         stage_h: StageHandle,

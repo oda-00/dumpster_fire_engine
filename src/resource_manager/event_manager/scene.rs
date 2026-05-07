@@ -140,13 +140,10 @@ pub enum Effect {
         variant_idx: usize,
         local:       Affine3A,
     },
-    AddComponent {
-        level_h:     LevelHandle,
-        stage_h:     StageHandle,
-        actor_h:     ActorHandle,
-        variant_idx: usize,
-        component:   Component,
-    },
+    /// Boxed: `Component` is large (~80 B) and AddComponent is rare on the hot
+    /// path. Boxing keeps the inline `Effect` discriminant slim so the per-tick
+    /// `Vec<Effect>` working set fits more entries per cache line.
+    AddComponent(Box<AddComponentEffect>),
     RemoveComponent {
         level_h:        LevelHandle,
         stage_h:        StageHandle,
@@ -160,13 +157,9 @@ pub enum Effect {
         id:      ActorId,
         local:   Affine3A,
     },
-    SpawnSubEntity {
-        level_h:    LevelHandle,
-        stage_h:    StageHandle,
-        actor_h:    ActorHandle,
-        actor_type: ActorType,
-        local:      Affine3A,
-    },
+    /// Boxed: `ActorType` is a large enum + 64 B Affine3A. Same rationale as
+    /// AddComponent — rare emit, big payload, no need to bloat the inline size.
+    SpawnSubEntity(Box<SpawnSubEntityEffect>),
     DespawnActor {
         level_h: LevelHandle,
         stage_h: StageHandle,
@@ -203,6 +196,24 @@ pub enum Effect {
     },
 }
 
+/// Heap-allocated payload for the rare `AddComponent` effect.
+pub struct AddComponentEffect {
+    pub level_h:     LevelHandle,
+    pub stage_h:     StageHandle,
+    pub actor_h:     ActorHandle,
+    pub variant_idx: usize,
+    pub component:   Component,
+}
+
+/// Heap-allocated payload for the rare `SpawnSubEntity` effect.
+pub struct SpawnSubEntityEffect {
+    pub level_h:    LevelHandle,
+    pub stage_h:    StageHandle,
+    pub actor_h:    ActorHandle,
+    pub actor_type: ActorType,
+    pub local:      Affine3A,
+}
+
 impl Clone for Effect {
     fn clone(&self) -> Self {
         match self {
@@ -210,14 +221,19 @@ impl Clone for Effect {
                 Effect::SetActorLocal { level_h: *level_h, stage_h: *stage_h, actor_h: *actor_h, local: *local },
             Effect::SetSubEntityLocal { level_h, stage_h, actor_h, variant_idx, local } =>
                 Effect::SetSubEntityLocal { level_h: *level_h, stage_h: *stage_h, actor_h: *actor_h, variant_idx: *variant_idx, local: *local },
-            Effect::AddComponent { level_h, stage_h, actor_h, variant_idx, component } =>
-                Effect::AddComponent { level_h: *level_h, stage_h: *stage_h, actor_h: *actor_h, variant_idx: *variant_idx, component: clone_component(component) },
+            Effect::AddComponent(b) =>
+                Effect::AddComponent(Box::new(AddComponentEffect {
+                    level_h: b.level_h, stage_h: b.stage_h, actor_h: b.actor_h,
+                    variant_idx: b.variant_idx,
+                    component: clone_component(&b.component),
+                })),
             Effect::RemoveComponent { level_h, stage_h, actor_h, variant_idx, component_type } =>
                 Effect::RemoveComponent { level_h: *level_h, stage_h: *stage_h, actor_h: *actor_h, variant_idx: *variant_idx, component_type: *component_type },
             Effect::SpawnActor { level_h, stage_h, id, local } =>
                 Effect::SpawnActor { level_h: *level_h, stage_h: *stage_h, id: *id, local: *local },
-            Effect::SpawnSubEntity { .. } => panic!(
-                "Effect::SpawnSubEntity is not Clone — author it directly into a Transition or fire it once via on_enter"
+            Effect::SpawnSubEntity(_) => panic!(
+                "Effect::SpawnSubEntity is not Clone — ActorType holds non-Clone fields. \
+                 Author it directly into a Transition or fire it once via on_enter."
             ),
             Effect::DespawnActor { level_h, stage_h, actor_h } =>
                 Effect::DespawnActor { level_h: *level_h, stage_h: *stage_h, actor_h: *actor_h },
@@ -367,8 +383,9 @@ fn actor_world_pos(ctx: &EvalCtx<'_>, id: ActorId) -> Option<Vec3> {
     // Find ActiveActor first (cheap — small troupes), then resolve handle.
     let active = ctx.actors.iter_all().find(|a| a.actor_id == id)?;
     let stage  = ctx.world.levels.get(active.level_h)?.stages.get(active.stage_h)?;
-    let actor  = stage.actors.get(active.actor_h)?;
-    Some(actor.world.translation.into())
+    // Generation-gate via the Arena, then index the SoA `worlds` array.
+    if !stage.actors.contains(active.actor_h) { return None }
+    Some(stage.worlds[active.actor_h.idx as usize].translation.into())
 }
 
 fn actor_has_component(ctx: &EvalCtx<'_>, id: ActorId, ct: ComponentType) -> bool {

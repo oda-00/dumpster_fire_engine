@@ -24,11 +24,18 @@ pub struct World {
     pub id:     WorldId,
     pub levels: Arena<LevelTag, Level>,
     pub roots:  ThinVec<LevelHandle>,
+    /// Reusable per-tick effect buffer — keeps allocation out of the hot path.
+    tick_effects: Vec<crate::resource_manager::event_manager::Effect>,
 }
 
 impl World {
     pub fn new(id: WorldId) -> Self {
-        Self { id, levels: Arena::new(), roots: ThinVec::new() }
+        Self {
+            id,
+            levels: Arena::new(),
+            roots: ThinVec::new(),
+            tick_effects: Vec::new(),
+        }
     }
 
     // ── Levels ────────────────────────────────────────────────────────────
@@ -147,6 +154,7 @@ impl World {
 
     // ── Transforms ───────────────────────────────────────────────────────
 
+    #[inline]
     pub fn set_actor_local(
         &mut self,
         level_h: LevelHandle,
@@ -159,6 +167,7 @@ impl World {
         }
     }
 
+    #[inline]
     pub fn set_sub_entity_local(
         &mut self,
         level_h: LevelHandle,
@@ -189,7 +198,10 @@ impl World {
     //   4. propagate transforms (existing behavior)
 
     pub fn tick(&mut self, dt: f32) {
-        let mut effects: Vec<crate::resource_manager::event_manager::Effect> = Vec::new();
+        // Take the pooled buffer out so we can hold &mut self while it's full.
+        // Reuses prior capacity — fresh tick reads no allocator.
+        let mut effects = std::mem::take(&mut self.tick_effects);
+        effects.clear();
 
         // Pass 2-prelude: drain Mealy effects from the previous tick's transitions.
         for level in self.levels.values_mut() {
@@ -217,6 +229,9 @@ impl World {
 
         // Pass 4 — transforms.
         self.propagate_transforms();
+
+        // Restore the (now-empty, but capacity-preserving) buffer.
+        self.tick_effects = effects;
     }
 
     pub fn apply_effect(&mut self, eff: crate::resource_manager::event_manager::Effect) {
@@ -228,7 +243,10 @@ impl World {
             Effect::SetSubEntityLocal { level_h, stage_h, actor_h, variant_idx, local } => {
                 self.set_sub_entity_local(level_h, stage_h, actor_h, variant_idx, local);
             }
-            Effect::AddComponent { level_h, stage_h, actor_h, variant_idx, component } => {
+            Effect::AddComponent(b) => {
+                let crate::resource_manager::event_manager::AddComponentEffect {
+                    level_h, stage_h, actor_h, variant_idx, component,
+                } = *b;
                 if let Some(level) = self.levels.get_mut(level_h) {
                     level.add_component(stage_h, actor_h, variant_idx, component);
                 }
@@ -241,7 +259,10 @@ impl World {
             Effect::SpawnActor { level_h, stage_h, id, local } => {
                 self.spawn_actor(level_h, stage_h, id, local);
             }
-            Effect::SpawnSubEntity { level_h, stage_h, actor_h, actor_type, local } => {
+            Effect::SpawnSubEntity(b) => {
+                let crate::resource_manager::event_manager::SpawnSubEntityEffect {
+                    level_h, stage_h, actor_h, actor_type, local,
+                } = *b;
                 self.spawn_sub_entity(level_h, stage_h, actor_h, actor_type, local);
             }
             Effect::DespawnActor { level_h, stage_h, actor_h } => {
@@ -251,29 +272,13 @@ impl World {
                 self.despawn_sub_entity(level_h, stage_h, actor_h, variant_idx);
             }
             Effect::CueTroupe { level_h, stage_h, troupe, delta } => {
-                // Resolve every actor in the named troupe across the stage's
-                // active scenes and apply delta * actor.local.
-                let mut targets: Vec<(crate::resource_manager::manager::ActorHandle, glam::Affine3A)> = Vec::new();
-                if let Some(level) = self.levels.get(level_h) {
-                    if let Some(stage) = level.stages.get(stage_h) {
-                        if let Some(play) = stage.play.as_ref() {
-                            for &leaf in play.active_leaves.iter() {
-                                let scene = &play.scenes[leaf];
-                                if let Some(idx) = scene.troupe_idx(troupe) {
-                                    if let Some(group) = scene.actors.group(idx) {
-                                        for a in group {
-                                            if let Some(actor) = stage.actors.get(a.actor_h) {
-                                                targets.push((a.actor_h, delta * actor.local));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                // Direct-write fast path — bypasses per-actor World→Level→Stage
+                // routing. Stage holds a reusable scratch buffer to keep the
+                // fan-out allocation-free.
+                if let Some(level) = self.levels.get_mut(level_h) {
+                    if let Some(stage) = level.stages.get_mut(stage_h) {
+                        stage.cue_troupe_direct(troupe, delta);
                     }
-                }
-                for (ah, new_local) in targets {
-                    self.set_actor_local(level_h, stage_h, ah, new_local);
                 }
             }
             Effect::Emit { level_h, stage_h, target, event } => {

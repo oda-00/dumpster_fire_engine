@@ -68,9 +68,10 @@ fn main() {
     world.propagate_transforms();
 
     // Access actor through the ownership chain.
-    let actor = &world.levels[lh].stages[sh].actors[ah];
+    let stage_ref = &world.levels[lh].stages[sh];
+    let actor = &stage_ref.actors[ah];
     println!("Actor ActorId:        {:?}", actor.id);
-    println!("Actor world position: {:?}", actor.world.translation);
+    println!("Actor world position: {:?}", stage_ref.worlds[ah.idx as usize].translation);
     println!();
 
     // Iterate all sub-entities in the stage.
@@ -344,8 +345,11 @@ fn main() {
 
     world.levels[lh].stages[sh].set_play(play);
 
-    println!("Initial Bobby world pos: {:?}", world.levels[lh].stages[sh].actors[ah].world.translation);
-    println!("Initial Carol world pos: {:?}", world.levels[lh].stages[sh].actors[ah_carol].world.translation);
+    let bobby_world = |w: &World| w.levels[lh].stages[sh].worlds[ah.idx as usize].translation;
+    let carol_world = |w: &World| w.levels[lh].stages[sh].worlds[ah_carol.idx as usize].translation;
+
+    println!("Initial Bobby world pos: {:?}", bobby_world(&world));
+    println!("Initial Carol world pos: {:?}", carol_world(&world));
     println!();
 
     // Drive the cascade. 60 Hz × 2.5 s = 150 ticks.
@@ -359,25 +363,19 @@ fn main() {
             .unwrap_or_default();
 
         match tick_n {
-            0 => println!("t=  0  leaves={:?}  bobby={:?}",
-                leaves, world.levels[lh].stages[sh].actors[ah].world.translation),
-            1 => println!("t=  1  leaves={:?}  bobby={:?}",
-                leaves, world.levels[lh].stages[sh].actors[ah].world.translation),
-            30 => println!("t= 30  leaves={:?}  bobby={:?} (chorus cued)",
-                leaves, world.levels[lh].stages[sh].actors[ah].world.translation),
-            120 => println!("t=120  leaves={:?}",
-                leaves),
-            121 => println!("t=121  leaves={:?}",
-                leaves),
+            0 => println!("t=  0  leaves={:?}  bobby={:?}", leaves, bobby_world(&world)),
+            1 => println!("t=  1  leaves={:?}  bobby={:?}", leaves, bobby_world(&world)),
+            30 => println!("t= 30  leaves={:?}  bobby={:?} (chorus cued)", leaves, bobby_world(&world)),
+            120 => println!("t=120  leaves={:?}", leaves),
+            121 => println!("t=121  leaves={:?}", leaves),
             122 => println!("t=122  leaves={:?}  bobby={:?}  carol={:?}",
-                leaves,
-                world.levels[lh].stages[sh].actors[ah].world.translation,
-                world.levels[lh].stages[sh].actors[ah_carol].world.translation),
+                leaves, bobby_world(&world), carol_world(&world)),
             _ => {}
         }
     }
 
     println!();
-    println!("Final Bobby world pos: {:?}", world.levels[lh].stages[sh].actors[ah].world.translation);
-    println!("Final Carol world pos: {:?}", world.levels[lh].stages[sh].actors[ah_carol].world.translation);
+    println!("Final Bobby world pos: {:?}", bobby_world(&world));
+    println!("Final Carol world pos: {:?}", carol_world(&world));
+    println!("{}", std::mem::size_of::<Payload>());
 }
