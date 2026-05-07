@@ -4,11 +4,11 @@ use glam::{Affine3A, Vec3};
 fn main() {
     println!("=== dumpster_fire_engine scene-graph smoke test ===\n");
 
-    let mut world = World::new();
+    let mut world = World::new(WorldId::new(1));
 
     // Ownership chain: World → Level → Stage → Actor → SubEntity → Component
-    let lh = world.spawn_level("default_level");
-    let sh = world.spawn_stage(lh, "default_stage").unwrap();
+    let lh = world.spawn_level(LevelId::new(1), "default_level");
+    let sh = world.spawn_stage(lh, StageId::new(1), "default_stage").unwrap();
 
     let ah = world.spawn_actor(
         lh, sh,
@@ -156,4 +156,228 @@ fn main() {
     println!();
 
     println!("(typed-ID separation enforced at compile time)");
+    println!();
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Event-manager smoke test: HSM + BT + Mealy + Troupes + tick cascade.
+    // ─────────────────────────────────────────────────────────────────────
+    println!("=== event_manager smoke test ===");
+
+    use thin_vec::thin_vec;
+
+    // Add a second actor (Carol) so AndParallel regions have something to do.
+    let ah_carol = world.spawn_actor(
+        lh, sh,
+        ActorId::new(2),
+        Affine3A::from_translation(Vec3::ZERO),
+    ).unwrap();
+    world.spawn_sub_entity(
+        lh, sh, ah_carol,
+        ActorType::Character(Character {
+            id: CharacterId::new(2),
+            name: "carol".into(),
+            visible: true, physical: true, playable: false,
+        }),
+        Affine3A::IDENTITY,
+    );
+
+    // SceneIds for the HSM tree.
+    let s_root        = SceneId::new(100);
+    let s_act1        = SceneId::new(101);
+    let s_act2        = SceneId::new(102);
+    let s_bobby_enter = SceneId::new(103);
+    let s_carol_enter = SceneId::new(104);
+
+    let troupe_chorus = TroupeId::new(1);
+
+    // ── Act1: Atomic with a 2-leaf BT Sequence ────────────────────────────
+
+    let act1_bt = BtNode::Sequence(vec![
+        BtNode::leaf(
+            Condition::OnTick(0),
+            Effect::SetActorLocal {
+                level_h: lh, stage_h: sh, actor_h: ah,
+                local: Affine3A::from_translation(Vec3::new(50.0, 0.0, 0.0)),
+            },
+            true,
+        ),
+        BtNode::leaf(
+            Condition::AfterSeconds(0.5),
+            Effect::CueTroupe {
+                level_h: lh, stage_h: sh,
+                troupe: troupe_chorus,
+                delta: Affine3A::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+            },
+            true,
+        ),
+    ]);
+
+    let act1 = SceneDef {
+        id:             s_act1,
+        stage:          StageId::new(1),
+        parent:         Some(s_root),
+        kind:           SceneKind::Atomic,
+        troupes:        thin_vec![troupe_chorus],
+        initial_actors: thin_vec![thin_vec![
+            ActiveActor::new(lh, sh, ah, ActorId::new(1)),
+        ]],
+        root:           act1_bt,
+        on_enter:       thin_vec![],
+        on_exit:        thin_vec![],
+        handlers:       thin_vec![],
+        transitions:    thin_vec![Transition {
+            condition: Condition::AfterSeconds(2.0),
+            target:    s_act2,
+            effects:   thin_vec![],
+        }],
+    };
+
+    // ── Act2 children: BobbyEnters and CarolEnters (Atomic) ───────────────
+
+    let bobby_enters = SceneDef {
+        id:             s_bobby_enter,
+        stage:          StageId::new(1),
+        parent:         Some(s_act2),
+        kind:           SceneKind::Atomic,
+        troupes:        thin_vec![],
+        initial_actors: thin_vec![],
+        root:           BtNode::leaf(
+            Condition::OnEnter,
+            Effect::SetActorLocal {
+                level_h: lh, stage_h: sh, actor_h: ah,
+                local: Affine3A::from_translation(Vec3::new(200.0, 0.0, 0.0)),
+            },
+            true,
+        ),
+        on_enter:       thin_vec![],
+        on_exit:        thin_vec![],
+        handlers:       thin_vec![],
+        transitions:    thin_vec![],
+    };
+
+    let carol_enters = SceneDef {
+        id:             s_carol_enter,
+        stage:          StageId::new(1),
+        parent:         Some(s_act2),
+        kind:           SceneKind::Atomic,
+        troupes:        thin_vec![],
+        initial_actors: thin_vec![],
+        root:           BtNode::leaf(
+            Condition::OnEnter,
+            Effect::SetActorLocal {
+                level_h: lh, stage_h: sh, actor_h: ah_carol,
+                local: Affine3A::from_translation(Vec3::new(-200.0, 0.0, 0.0)),
+            },
+            true,
+        ),
+        on_enter:       thin_vec![],
+        on_exit:        thin_vec![],
+        handlers:       thin_vec![],
+        transitions:    thin_vec![],
+    };
+
+    // ── Act2: AndParallel with two regions (one for each actor) ───────────
+
+    let act2 = SceneDef {
+        id:             s_act2,
+        stage:          StageId::new(1),
+        parent:         Some(s_root),
+        kind:           SceneKind::AndParallel {
+            regions: thin_vec![
+                Region {
+                    children: thin_vec![s_bobby_enter],
+                    initial:  s_bobby_enter,
+                    history:  None,
+                },
+                Region {
+                    children: thin_vec![s_carol_enter],
+                    initial:  s_carol_enter,
+                    history:  None,
+                },
+            ],
+        },
+        troupes:        thin_vec![],
+        initial_actors: thin_vec![],
+        root:           BtNode::empty(),
+        on_enter:       thin_vec![],
+        on_exit:        thin_vec![],
+        handlers:       thin_vec![],
+        transitions:    thin_vec![],
+    };
+
+    // ── Root: Compound, initial = Act1 ────────────────────────────────────
+
+    let root_def = SceneDef {
+        id:             s_root,
+        stage:          StageId::new(1),
+        parent:         None,
+        kind:           SceneKind::Compound {
+            children: thin_vec![s_act1, s_act2],
+            initial:  s_act1,
+            history:  None,
+        },
+        troupes:        thin_vec![],
+        initial_actors: thin_vec![],
+        root:           BtNode::empty(),
+        on_enter:       thin_vec![],
+        on_exit:        thin_vec![],
+        handlers:       thin_vec![],
+        transitions:    thin_vec![],
+    };
+
+    // ── Build script and play ─────────────────────────────────────────────
+
+    let mut script = Script::new(ScriptId::new(1), "thespian_demo", s_root);
+    script.add_scene(root_def);
+    script.add_scene(act1);
+    script.add_scene(act2);
+    script.add_scene(bobby_enters);
+    script.add_scene(carol_enters);
+
+    let play = Play::instantiate(
+        PlayId::new(1),
+        "demo_play",
+        &script,
+        StageId::new(1),
+        lh, sh,
+    );
+
+    world.levels[lh].stages[sh].set_play(play);
+
+    println!("Initial Bobby world pos: {:?}", world.levels[lh].stages[sh].actors[ah].world.translation);
+    println!("Initial Carol world pos: {:?}", world.levels[lh].stages[sh].actors[ah_carol].world.translation);
+    println!();
+
+    // Drive the cascade. 60 Hz × 2.5 s = 150 ticks.
+    for tick_n in 0..150 {
+        world.tick(1.0 / 60.0);
+
+        let leaves: Vec<i64> = world.levels[lh].stages[sh].play.as_ref()
+            .map(|p| p.active_leaves.iter()
+                 .map(|&h| p.scenes[h].id.raw())
+                 .collect())
+            .unwrap_or_default();
+
+        match tick_n {
+            0 => println!("t=  0  leaves={:?}  bobby={:?}",
+                leaves, world.levels[lh].stages[sh].actors[ah].world.translation),
+            1 => println!("t=  1  leaves={:?}  bobby={:?}",
+                leaves, world.levels[lh].stages[sh].actors[ah].world.translation),
+            30 => println!("t= 30  leaves={:?}  bobby={:?} (chorus cued)",
+                leaves, world.levels[lh].stages[sh].actors[ah].world.translation),
+            120 => println!("t=120  leaves={:?}",
+                leaves),
+            121 => println!("t=121  leaves={:?}",
+                leaves),
+            122 => println!("t=122  leaves={:?}  bobby={:?}  carol={:?}",
+                leaves,
+                world.levels[lh].stages[sh].actors[ah].world.translation,
+                world.levels[lh].stages[sh].actors[ah_carol].world.translation),
+            _ => {}
+        }
+    }
+
+    println!();
+    println!("Final Bobby world pos: {:?}", world.levels[lh].stages[sh].actors[ah].world.translation);
+    println!("Final Carol world pos: {:?}", world.levels[lh].stages[sh].actors[ah_carol].world.translation);
 }

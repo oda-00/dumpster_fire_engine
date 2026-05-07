@@ -3,8 +3,11 @@ use glam::Affine3A;
 use thin_vec::ThinVec;
 use crate::resource_manager::component::{Component, ComponentType};
 use crate::resource_manager::manager::{
-    Actor, ActorHandle, ActorId, ActorTag, ActorType, Arena, SubEntity,
+    Actor, ActorHandle, ActorId, ActorTag, ActorType, Arena, Id, SubEntity,
 };
+
+pub struct StageMarker;
+pub type StageId = Id<StageMarker>;
 
 // ── Stage ────────────────────────────────────────────────────────────────────
 //
@@ -19,21 +22,33 @@ use crate::resource_manager::manager::{
 // propagate_transforms only visits actors that actually changed.
 
 pub struct Stage {
+    pub id:       StageId,
     pub name:     Arc<str>,
     pub actors:   Arena<ActorTag, Actor>,
     // cache[i] = handles of actors that have ≥1 sub-entity with ComponentType index i
     pub cache:    [Vec<ActorHandle>; ComponentType::COUNT],
     dirty_actors: ThinVec<ActorHandle>,
+    pub play:     Option<crate::resource_manager::event_manager::Play>,
 }
 
 impl Stage {
-    pub fn new(name: impl Into<Arc<str>>) -> Self {
+    pub fn new(id: StageId, name: impl Into<Arc<str>>) -> Self {
         Self {
+            id,
             name:         name.into(),
             actors:       Arena::new(),
             cache:        std::array::from_fn(|_| Vec::new()),
             dirty_actors: ThinVec::new(),
+            play:         None,
         }
+    }
+
+    pub fn set_play(&mut self, play: crate::resource_manager::event_manager::Play) {
+        self.play = Some(play);
+    }
+
+    pub fn take_play(&mut self) -> Option<crate::resource_manager::event_manager::Play> {
+        self.play.take()
     }
 
     // ── Spawn / despawn ───────────────────────────────────────────────────
@@ -168,6 +183,38 @@ impl Stage {
         if !actor.dirty {
             actor.dirty = true;
             self.dirty_actors.push(actor_h);
+        }
+    }
+
+    // ── Event-manager tick gears ──────────────────────────────────────────
+    //
+    // Stage drives its owned Play. Pass 1 is read-only (collect_effects);
+    // Pass 3 is mut bookkeeping. Effects target World mutators and are applied
+    // by World::apply_effect between passes.
+
+    pub fn collect_effects(
+        &self,
+        dt: f32,
+        world: &crate::resource_manager::world_manager::world::World,
+        sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
+    ) {
+        if let Some(play) = self.play.as_ref() {
+            play.collect_effects(dt, world, sink);
+        }
+    }
+
+    pub fn post_tick(&mut self, dt: f32) {
+        if let Some(play) = self.play.as_mut() {
+            play.post_tick_bookkeeping(dt);
+        }
+    }
+
+    pub fn drain_pending_mealy(
+        &mut self,
+        sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
+    ) {
+        if let Some(play) = self.play.as_mut() {
+            play.drain_pending_mealy(sink);
         }
     }
 

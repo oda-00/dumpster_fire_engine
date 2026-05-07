@@ -17,7 +17,7 @@ use super::component::{Component, ComponentType};
 pub struct Handle<Tag> {
     pub idx: u32,
     pub generation: NonZeroU32,
-    _tag: PhantomData<fn() -> Tag>,
+    pub _tag: PhantomData<fn() -> Tag>,
 }
 
 // Arena tag types — plain ZSTs, no data, no circular imports.

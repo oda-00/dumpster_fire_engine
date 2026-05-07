@@ -2,9 +2,12 @@ use std::sync::Arc;
 use glam::Affine3A;
 use crate::resource_manager::component::{Component, ComponentType};
 use crate::resource_manager::manager::{
-    ActorHandle, ActorId, ActorType, Arena, StageHandle, StageTag,
+    ActorHandle, ActorId, ActorType, Arena, Id, StageHandle, StageTag,
 };
-use super::stage::Stage;
+use super::stage::{Stage, StageId};
+
+pub struct LevelMarker;
+pub type LevelId = Id<LevelMarker>;
 
 // ── Level ────────────────────────────────────────────────────────────────────
 //
@@ -16,6 +19,7 @@ use super::stage::Stage;
 // "Give me all Physics actors across all stages in this Level" = O(matching) read.
 
 pub struct Level {
+    pub id:     LevelId,
     pub name:   Arc<str>,
     pub stages: Arena<StageTag, Stage>,
     // cache[i] = (stage, actor) pairs where the actor has ≥1 sub-entity with ComponentType i
@@ -23,8 +27,9 @@ pub struct Level {
 }
 
 impl Level {
-    pub fn new(name: impl Into<Arc<str>>) -> Self {
+    pub fn new(id: LevelId, name: impl Into<Arc<str>>) -> Self {
         Self {
+            id,
             name:   name.into(),
             stages: Arena::new(),
             cache:  std::array::from_fn(|_| Vec::new()),
@@ -33,8 +38,8 @@ impl Level {
 
     // ── Spawn / despawn ───────────────────────────────────────────────────
 
-    pub fn spawn_stage(&mut self, name: impl Into<Arc<str>>) -> StageHandle {
-        self.stages.insert(Stage::new(name))
+    pub fn spawn_stage(&mut self, id: StageId, name: impl Into<Arc<str>>) -> StageHandle {
+        self.stages.insert(Stage::new(id, name))
     }
 
     pub fn despawn_stage(&mut self, stage_h: StageHandle) {
@@ -147,6 +152,34 @@ impl Level {
     pub fn propagate_transforms(&mut self) {
         for stage in self.stages.values_mut() {
             stage.propagate_transforms();
+        }
+    }
+
+    // ── Event-manager tick gears ──────────────────────────────────────────
+
+    pub fn collect_effects(
+        &self,
+        dt: f32,
+        world: &crate::resource_manager::world_manager::world::World,
+        sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
+    ) {
+        for stage in self.stages.values() {
+            stage.collect_effects(dt, world, sink);
+        }
+    }
+
+    pub fn post_tick(&mut self, dt: f32) {
+        for stage in self.stages.values_mut() {
+            stage.post_tick(dt);
+        }
+    }
+
+    pub fn drain_pending_mealy(
+        &mut self,
+        sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
+    ) {
+        for stage in self.stages.values_mut() {
+            stage.drain_pending_mealy(sink);
         }
     }
 }
