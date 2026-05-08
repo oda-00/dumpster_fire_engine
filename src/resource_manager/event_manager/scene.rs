@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use glam::{Affine3A, Vec3};
 use thin_vec::ThinVec;
@@ -714,11 +714,6 @@ pub struct Scene {
     pub id:          SceneId,
     pub stage:       StageId,
     pub parent:      Option<SceneId>,
-    /// Resolved parent handle, populated by `Play::instantiate` after every
-    /// scene has been inserted. Lets ancestor traversal avoid the SceneId →
-    /// SceneHandle lookup on every parent step. Kept in sync with `parent`
-    /// (both set once at instantiate, never mutated).
-    pub parent_handle: Option<SceneHandle>,
     pub kind:        SceneKind,
     pub troupes:     Vec<TroupeId>,
     pub actors:      Troupe,
@@ -731,12 +726,6 @@ pub struct Scene {
     pub tick_count:  u64,
     pub entered:     bool,
     pub _rendered:   bool,
-    /// Snapshot of `Play::tick_counter` at the most recent `collect_effects`
-    /// visit. Compared in O(1) against the play's current tick id to dedup
-    /// shared-ancestor visits without any external scratch buffer. Atomic so
-    /// `&self`-callable `collect_effects` can tag the scene — same convention
-    /// as `SceneOperation::fired` and `BtNode::Repeat::current`.
-    pub last_processed_tick: AtomicU64,
 }
 
 impl Scene {
@@ -751,7 +740,6 @@ impl Scene {
             id:          def.id,
             stage:       def.stage,
             parent:      def.parent,
-            parent_handle: None, // filled in by Play::instantiate's second pass
             kind:        def.kind.clone(),
             troupes:     def.troupes.iter().copied().collect(),
             actors,
@@ -764,7 +752,6 @@ impl Scene {
             tick_count:  0,
             entered:     false,
             _rendered:   false,
-            last_processed_tick: AtomicU64::new(0),
         }
     }
 

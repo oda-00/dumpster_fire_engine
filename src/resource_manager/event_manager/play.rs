@@ -110,6 +110,17 @@ pub struct Play {
     pub id_base:   i64,
     pub id_lookup: ThinVec<Option<SceneHandle>>,
 
+    /// Hot parallel arrays — dense, indexed by `SceneHandle::idx as usize`.
+    /// Pulled out of `Scene` so the per-tick chain-build + dedup loop touches
+    /// only ~16 bytes per scene (one Option<SceneHandle> + one AtomicU64)
+    /// instead of the full ~200-byte cold Scene struct. At depth ≥ 64 (where
+    /// the Scene array spills L1) the working set drops by an order of
+    /// magnitude. Set once at instantiate; `parents` is immutable thereafter,
+    /// `tick_marks` is the dedup generation field formerly known as
+    /// `Scene::last_processed_tick`.
+    pub parents:    ThinVec<Option<SceneHandle>>,
+    pub tick_marks: ThinVec<AtomicU64>,
+
     pub handlers: ThinVec<Handler>,
     pub queue:    ThinVec<Event>,
 
@@ -213,15 +224,22 @@ impl Play {
             id_lookup[(def.id.raw() - id_base) as usize] = Some(h);
         }
 
-        // Second pass: resolve every Scene::parent SceneId to a SceneHandle.
-        // Per-tick ancestor walks read parent_handle directly — no lookup.
+        // Second pass: build the hot parallel arrays. Scenes are never removed
+        // from the Arena, so handle indices are dense 0..N and `idx as usize`
+        // is a valid array index. `parents[h.idx]` resolves SceneDef::parent
+        // to a SceneHandle once; the per-tick chain walk reads it directly.
+        let scene_count = script.scenes.len();
+        let mut parents:    ThinVec<Option<SceneHandle>> = ThinVec::with_capacity(scene_count);
+        let mut tick_marks: ThinVec<AtomicU64>           = ThinVec::with_capacity(scene_count);
+        parents.resize(scene_count, None);
+        for _ in 0..scene_count { tick_marks.push(AtomicU64::new(0)); }
         for slot in id_lookup.iter() {
             if let Some(h) = *slot {
                 let ph = scenes[h].parent.and_then(|pid| {
                     let pidx = (pid.raw() - id_base) as usize;
                     id_lookup.get(pidx).copied().flatten()
                 });
-                scenes[h].parent_handle = ph;
+                parents[h.idx as usize] = ph;
             }
         }
 
@@ -259,6 +277,8 @@ impl Play {
             history: ThinVec::new(),
             id_base,
             id_lookup,
+            parents,
+            tick_marks,
             handlers: script.handlers.iter().cloned().collect(),
             queue: ThinVec::new(),
             static_troupes,
@@ -296,7 +316,7 @@ impl Play {
         let mut out: Vec<SceneHandle> = Vec::new();
         let mut scratch = Vec::with_capacity(8);
         for &leaf in self.active_leaves.iter() {
-            ancestors_into_fields(&self.scenes, leaf, &mut scratch);
+            ancestors_into_fields(&self.parents, leaf, &mut scratch);
             for &h in scratch.iter() {
                 if !out.contains(&h) { out.push(h); }
             }
@@ -446,27 +466,30 @@ impl Play {
             // Build the chain leaf-first by pushing as we walk up. No reverse:
             // leaf-first iteration order is exactly what we need for "innermost
             // transition wins" semantics, and saves one Vec::reverse per leaf.
+            // Hot arrays: chain build touches only `parents` (≤ 16 bytes/entry).
+            // The cold Scene struct is not loaded until after dedup passes.
             loop {
                 chain.push(cur);
                 local_chain_steps += 1;
-                match self.scenes[cur].parent_handle {
+                match self.parents[cur.idx as usize] {
                     Some(ph) => cur = ph,
                     None => break,
                 }
             }
 
             for &handle in chain.iter() {
-                let scene = &self.scenes[handle];
-
-                // O(1) dedup. If we hit a scene already processed this tick,
-                // every farther ancestor was reached by a prior leaf — break
-                // the whole chain walk, not just continue.
-                if scene.last_processed_tick.load(Ordering::Relaxed) == tick_id {
+                // O(1) dedup against the dense AtomicU64 array — one cache line
+                // holds 8 entries. Early break: every farther ancestor was
+                // reached by a prior leaf.
+                let mark = &self.tick_marks[handle.idx as usize];
+                if mark.load(Ordering::Relaxed) == tick_id {
                     local_dedup_skips += 1;
                     break;
                 }
-                scene.last_processed_tick.store(tick_id, Ordering::Relaxed);
+                mark.store(tick_id, Ordering::Relaxed);
                 local_scenes_processed += 1;
+
+                let scene = &self.scenes[handle];
 
                 let ctx = EvalCtx {
                     world,
@@ -526,7 +549,7 @@ impl Play {
 
         // Build active config into config_scratch, reusing its allocation.
         active_configuration_into(
-            &self.scenes,
+            &self.parents,
             &self.active_leaves,
             &mut self.config_scratch,
             &mut self.ancestor_scratch,
@@ -580,8 +603,8 @@ impl Play {
         // ancestors_into_fields only reads scenes + by_id; the mutable borrows
         // on ancestor_scratch / transition_scratch are different fields, so
         // Rust's field-level split-borrow allows this without unsafe.
-        ancestors_into_fields(&self.scenes, src_h, &mut self.ancestor_scratch);
-        ancestors_into_fields(&self.scenes, tgt_h, &mut self.transition_scratch);
+        ancestors_into_fields(&self.parents, src_h, &mut self.ancestor_scratch);
+        ancestors_into_fields(&self.parents, tgt_h, &mut self.transition_scratch);
 
         let src_len = self.ancestor_scratch.len();
         let tgt_len = self.transition_scratch.len();
@@ -620,12 +643,12 @@ impl Play {
         while i < self.active_leaves.len() {
             let leaf = self.active_leaves[i];
             let is_under_src = {
-                let scenes = &self.scenes;
+                let parents = &self.parents;
                 let mut cur = leaf;
                 let mut found = false;
                 loop {
                     if cur == src_h { found = true; break; }
-                    match scenes[cur].parent_handle {
+                    match parents[cur.idx as usize] {
                         Some(ph) => cur = ph,
                         None     => break,
                     }
@@ -658,7 +681,7 @@ impl Play {
             self.descend_to_leaves(final_h);
         } else {
             // LCA == src == tgt (self-loop) — re-descend from src's parent.
-            if let Some(ph) = self.scenes[src_h].parent_handle {
+            if let Some(ph) = self.parents[src_h.idx as usize] {
                 self.descend_to_leaves(ph);
             }
         }
@@ -692,17 +715,17 @@ impl Play {
 // `&self` / `&mut self` method boundaries.
 
 /// Write the ancestor chain [root → … → leaf] into `out` (cleared first).
-/// Walks `Scene::parent_handle` — no SceneId resolution per step.
+/// Walks the dense `parents` array — single load per step, no Scene access.
 fn ancestors_into_fields(
-    scenes: &Arena<SceneTag, Scene>,
-    leaf:   SceneHandle,
-    out:    &mut Vec<SceneHandle>,
+    parents: &[Option<SceneHandle>],
+    leaf:    SceneHandle,
+    out:     &mut Vec<SceneHandle>,
 ) {
     out.clear();
     let mut cur = leaf;
     loop {
         out.push(cur);
-        match scenes[cur].parent_handle {
+        match parents[cur.idx as usize] {
             Some(ph) => cur = ph,
             None     => break,
         }
@@ -713,14 +736,14 @@ fn ancestors_into_fields(
 /// Build the complete active-configuration set into `out` (cleared first),
 /// using `scratch` as a per-leaf ancestor work buffer.
 fn active_configuration_into(
-    scenes:        &Arena<SceneTag, Scene>,
+    parents:       &[Option<SceneHandle>],
     active_leaves: &ThinVec<SceneHandle>,
     out:           &mut Vec<SceneHandle>,
     scratch:       &mut Vec<SceneHandle>,
 ) {
     out.clear();
     for &leaf in active_leaves.iter() {
-        ancestors_into_fields(scenes, leaf, scratch);
+        ancestors_into_fields(parents, leaf, scratch);
         for &h in scratch.iter() {
             if !out.contains(&h) { out.push(h); }
         }
