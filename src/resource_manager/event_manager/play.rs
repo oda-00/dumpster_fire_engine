@@ -159,6 +159,18 @@ impl Play {
             id_lookup[(def.id.raw() - id_base) as usize] = Some(h);
         }
 
+        // Second pass: resolve every Scene::parent SceneId to a SceneHandle.
+        // Per-tick ancestor walks read parent_handle directly — no lookup.
+        for slot in id_lookup.iter() {
+            if let Some(h) = *slot {
+                let ph = scenes[h].parent.and_then(|pid| {
+                    let pidx = (pid.raw() - id_base) as usize;
+                    id_lookup.get(pidx).copied().flatten()
+                });
+                scenes[h].parent_handle = ph;
+            }
+        }
+
         let root_idx = (script.entry.raw() - id_base) as usize;
         let root_h = id_lookup
             .get(root_idx)
@@ -229,7 +241,7 @@ impl Play {
         let mut out: Vec<SceneHandle> = Vec::new();
         let mut scratch = Vec::with_capacity(8);
         for &leaf in self.active_leaves.iter() {
-            ancestors_into_fields(&self.scenes, self.id_base, &self.id_lookup, leaf, &mut scratch);
+            ancestors_into_fields(&self.scenes, leaf, &mut scratch);
             for &h in scratch.iter() {
                 if !out.contains(&h) { out.push(h); }
             }
@@ -374,7 +386,7 @@ impl Play {
             // transition wins" semantics, and saves one Vec::reverse per leaf.
             loop {
                 chain.push(cur);
-                match self.scenes[cur].parent.and_then(|pid| self.handle_for(pid)) {
+                match self.scenes[cur].parent_handle {
                     Some(ph) => cur = ph,
                     None => break,
                 }
@@ -442,8 +454,6 @@ impl Play {
         // Build active config into config_scratch, reusing its allocation.
         active_configuration_into(
             &self.scenes,
-            self.id_base,
-            &self.id_lookup,
             &self.active_leaves,
             &mut self.config_scratch,
             &mut self.ancestor_scratch,
@@ -496,8 +506,8 @@ impl Play {
         // ancestors_into_fields only reads scenes + by_id; the mutable borrows
         // on ancestor_scratch / transition_scratch are different fields, so
         // Rust's field-level split-borrow allows this without unsafe.
-        ancestors_into_fields(&self.scenes, self.id_base, &self.id_lookup, src_h, &mut self.ancestor_scratch);
-        ancestors_into_fields(&self.scenes, self.id_base, &self.id_lookup, tgt_h, &mut self.transition_scratch);
+        ancestors_into_fields(&self.scenes, src_h, &mut self.ancestor_scratch);
+        ancestors_into_fields(&self.scenes, tgt_h, &mut self.transition_scratch);
 
         let src_len = self.ancestor_scratch.len();
         let tgt_len = self.transition_scratch.len();
@@ -536,14 +546,12 @@ impl Play {
         while i < self.active_leaves.len() {
             let leaf = self.active_leaves[i];
             let is_under_src = {
-                let scenes    = &self.scenes;
-                let id_base   = self.id_base;
-                let id_lookup = &self.id_lookup;
+                let scenes = &self.scenes;
                 let mut cur = leaf;
                 let mut found = false;
                 loop {
                     if cur == src_h { found = true; break; }
-                    match scenes[cur].parent.and_then(|pid| lookup_by_id(id_base, id_lookup, pid)) {
+                    match scenes[cur].parent_handle {
                         Some(ph) => cur = ph,
                         None     => break,
                     }
@@ -576,9 +584,7 @@ impl Play {
             self.descend_to_leaves(final_h);
         } else {
             // LCA == src == tgt (self-loop) — re-descend from src's parent.
-            if let Some(pid) = self.scenes[src_h].parent
-                && let Some(ph) = self.handle_for(pid)
-            {
+            if let Some(ph) = self.scenes[src_h].parent_handle {
                 self.descend_to_leaves(ph);
             }
         }
@@ -611,32 +617,20 @@ impl Play {
 // field-level split-borrow only works across distinct fields, not across
 // `&self` / `&mut self` method boundaries.
 
-/// O(1) free-function lookup mirror of `Play::handle_for`. Used inside split-borrow
-/// blocks where `&self` isn't available.
-#[inline(always)]
-fn lookup_by_id(id_base: i64, id_lookup: &[Option<SceneHandle>], id: SceneId) -> Option<SceneHandle> {
-    let idx = id.raw().wrapping_sub(id_base) as usize;
-    id_lookup.get(idx).copied().flatten()
-}
-
 /// Write the ancestor chain [root → … → leaf] into `out` (cleared first).
+/// Walks `Scene::parent_handle` — no SceneId resolution per step.
 fn ancestors_into_fields(
-    scenes:    &Arena<SceneTag, Scene>,
-    id_base:   i64,
-    id_lookup: &[Option<SceneHandle>],
-    leaf:      SceneHandle,
-    out:       &mut Vec<SceneHandle>,
+    scenes: &Arena<SceneTag, Scene>,
+    leaf:   SceneHandle,
+    out:    &mut Vec<SceneHandle>,
 ) {
     out.clear();
     let mut cur = leaf;
     loop {
         out.push(cur);
-        match scenes[cur].parent {
-            None => break,
-            Some(pid) => match lookup_by_id(id_base, id_lookup, pid) {
-                Some(ph) => cur = ph,
-                None     => break,
-            },
+        match scenes[cur].parent_handle {
+            Some(ph) => cur = ph,
+            None     => break,
         }
     }
     out.reverse();
@@ -646,15 +640,13 @@ fn ancestors_into_fields(
 /// using `scratch` as a per-leaf ancestor work buffer.
 fn active_configuration_into(
     scenes:        &Arena<SceneTag, Scene>,
-    id_base:       i64,
-    id_lookup:     &[Option<SceneHandle>],
     active_leaves: &ThinVec<SceneHandle>,
     out:           &mut Vec<SceneHandle>,
     scratch:       &mut Vec<SceneHandle>,
 ) {
     out.clear();
     for &leaf in active_leaves.iter() {
-        ancestors_into_fields(scenes, id_base, id_lookup, leaf, scratch);
+        ancestors_into_fields(scenes, leaf, scratch);
         for &h in scratch.iter() {
             if !out.contains(&h) { out.push(h); }
         }

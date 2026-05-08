@@ -714,6 +714,11 @@ pub struct Scene {
     pub id:          SceneId,
     pub stage:       StageId,
     pub parent:      Option<SceneId>,
+    /// Resolved parent handle, populated by `Play::instantiate` after every
+    /// scene has been inserted. Lets ancestor traversal avoid the SceneId →
+    /// SceneHandle lookup on every parent step. Kept in sync with `parent`
+    /// (both set once at instantiate, never mutated).
+    pub parent_handle: Option<SceneHandle>,
     pub kind:        SceneKind,
     pub troupes:     Vec<TroupeId>,
     pub actors:      Troupe,
@@ -746,6 +751,7 @@ impl Scene {
             id:          def.id,
             stage:       def.stage,
             parent:      def.parent,
+            parent_handle: None, // filled in by Play::instantiate's second pass
             kind:        def.kind.clone(),
             troupes:     def.troupes.iter().copied().collect(),
             actors,
