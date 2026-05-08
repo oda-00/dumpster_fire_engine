@@ -246,7 +246,7 @@ impl World {
             Effect::AddComponent(b) => {
                 let crate::resource_manager::event_manager::AddComponentEffect {
                     level_h, stage_h, actor_h, variant_idx, component,
-                } = *b;
+                } = b;
                 if let Some(level) = self.levels.get_mut(level_h) {
                     level.add_component(stage_h, actor_h, variant_idx, component);
                 }
@@ -262,7 +262,7 @@ impl World {
             Effect::SpawnSubEntity(b) => {
                 let crate::resource_manager::event_manager::SpawnSubEntityEffect {
                     level_h, stage_h, actor_h, actor_type, local,
-                } = *b;
+                } = b;
                 self.spawn_sub_entity(level_h, stage_h, actor_h, actor_type, local);
             }
             Effect::DespawnActor { level_h, stage_h, actor_h } => {

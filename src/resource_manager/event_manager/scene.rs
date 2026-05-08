@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::sync::Mutex;
 use std::sync::Arc;
 use glam::{Affine3A, Vec3};
 use thin_vec::ThinVec;
@@ -93,7 +93,7 @@ pub enum Payload {
     Vec3(Vec3),
     Actor(ActorId),
     Text(Arc<str>),
-    Pair(Box<(Payload, Payload)>),
+    Pair(Arc<(Payload, Payload)>),
 }
 
 // ── Event ───────────────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ pub enum Event {
     ComponentAdded   { actor: ActorId, variant_idx: usize, component_type: ComponentType },
     ComponentRemoved { actor: ActorId, variant_idx: usize, component_type: ComponentType },
     Tick { dt: f32 },
-    Custom(EventId, Payload),
+    Custom(EventId, Arc<Payload>),
 }
 
 // ── EventTarget ─────────────────────────────────────────────────────────────
@@ -143,7 +143,7 @@ pub enum Effect {
     /// Boxed: `Component` is large (~80 B) and AddComponent is rare on the hot
     /// path. Boxing keeps the inline `Effect` discriminant slim so the per-tick
     /// `Vec<Effect>` working set fits more entries per cache line.
-    AddComponent(Box<AddComponentEffect>),
+    AddComponent(Arc<AddComponentEffect>),
     RemoveComponent {
         level_h:        LevelHandle,
         stage_h:        StageHandle,
@@ -159,7 +159,7 @@ pub enum Effect {
     },
     /// Boxed: `ActorType` is a large enum + 64 B Affine3A. Same rationale as
     /// AddComponent — rare emit, big payload, no need to bloat the inline size.
-    SpawnSubEntity(Box<SpawnSubEntityEffect>),
+    SpawnSubEntity(Arc<SpawnSubEntityEffect>),
     DespawnActor {
         level_h: LevelHandle,
         stage_h: StageHandle,
@@ -222,11 +222,11 @@ impl Clone for Effect {
             Effect::SetSubEntityLocal { level_h, stage_h, actor_h, variant_idx, local } =>
                 Effect::SetSubEntityLocal { level_h: *level_h, stage_h: *stage_h, actor_h: *actor_h, variant_idx: *variant_idx, local: *local },
             Effect::AddComponent(b) =>
-                Effect::AddComponent(Box::new(AddComponentEffect {
+                Effect::AddComponent(Arc::new(AddComponentEffect {
                     level_h: b.level_h, stage_h: b.stage_h, actor_h: b.actor_h,
                     variant_idx: b.variant_idx,
                     component: clone_component(&b.component),
-                })),
+                }))
             Effect::RemoveComponent { level_h, stage_h, actor_h, variant_idx, component_type } =>
                 Effect::RemoveComponent { level_h: *level_h, stage_h: *stage_h, actor_h: *actor_h, variant_idx: *variant_idx, component_type: *component_type },
             Effect::SpawnActor { level_h, stage_h, id, local } =>
@@ -297,14 +297,14 @@ pub enum Condition {
     ActorMovedThisTick(ActorId),
     ActorHasComponent { actor: ActorId, component_type: ComponentType },
     /// Every actor in the named troupe satisfies the inner predicate.
-    TroupeAll { troupe: TroupeId, predicate: Box<Condition> },
+    TroupeAll { troupe: TroupeId, predicate: Arc<Condition> },
     /// Any actor in the named troupe satisfies the inner predicate.
-    TroupeAny { troupe: TroupeId, predicate: Box<Condition> },
+    TroupeAny { troupe: TroupeId, predicate: Arc<Condition> },
     /// A Custom event with this id was drained this tick.
     EventFired(EventId),
     All(ThinVec<Condition>),
     Any(ThinVec<Condition>),
-    Not(Box<Condition>),
+    Not(Arc<Condition>),
     /// Function-pointer escape hatch — Copy, no heap, no captures.
     Custom(fn(&EvalCtx<'_>) -> bool),
 }
@@ -437,9 +437,9 @@ pub struct Handler {
 #[derive(Clone)]
 pub struct SceneOperation {
     pub condition: Condition,
-    pub effect:    Effect,
+    pub effect:    Arc<Effect>,
     /// Cell so pass 1 (read-only against the Scene) can mark a once-op as fired.
-    pub fired:     Cell<bool>,
+    pub fired:     Mutex<bool>,
     pub once:      bool,
 }
 
@@ -464,15 +464,15 @@ pub enum BtNode {
     Sequence(Vec<BtNode>),
     Selector(Vec<BtNode>),
     Parallel { children: Vec<BtNode>, policy: ParallelPolicy },
-    Repeat   { child: Box<BtNode>, count: u32, current: Cell<u32> },
-    Decorator { decorator: Decorator, child: Box<BtNode> },
+    Repeat   { child: Arc<BtNode>, count: u32, current: Cell<u32> },
+    Decorator { decorator: Decorator, child: Arc<BtNode> },
     Leaf(SceneOperation),
 }
 
 impl BtNode {
     pub fn leaf(condition: Condition, effect: Effect, once: bool) -> Self {
         BtNode::Leaf(SceneOperation {
-            condition, effect, fired: Cell::new(false), once,
+            condition, effect, fired: Mutex::new(false), once,
         })
     }
 

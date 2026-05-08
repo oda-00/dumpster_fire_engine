@@ -448,7 +448,7 @@ fn scan_bt(
         BtNode::Repeat { child, .. } => scan_bt(child, all_troupes, moving),
         BtNode::Decorator { child, .. } => scan_bt(child, all_troupes, moving),
         BtNode::Leaf(op) => {
-            if let Effect::CueTroupe { troupe, delta, .. } = &op.effect {
+            if let Effect::CueTroupe { troupe, delta, .. } = &*op.effect {
                 if !all_troupes.contains(troupe) { all_troupes.push(*troupe); }
                 if *delta != Affine3A::IDENTITY && !moving.contains(troupe) {
                     moving.push(*troupe);
