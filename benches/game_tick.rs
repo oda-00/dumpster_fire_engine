@@ -390,8 +390,9 @@ fn bench_tick_phases(c: &mut Criterion) {
     g.bench_function("collect_effects", |b| {
         b.iter(|| {
             let mut sink: Vec<Effect> = Vec::new();
+            let mut chain: Vec<SceneHandle> = Vec::with_capacity(8);
             for level in world.levels.values() {
-                level.collect_effects(black_box(DT), &world, &mut sink);
+                level.collect_effects(black_box(DT), &world, &mut sink, &mut chain);
             }
             black_box(sink);
         });
@@ -575,11 +576,102 @@ fn bench_transition_storm(c: &mut Criterion) {
     g.finish();
 }
 
+// ── Deep-HSM bench ─────────────────────────────────────────────────────────
+//
+// Linear Compound chain root → c1 → c2 → ... → leaf, depth = `depth`. Stresses
+// the chain-build inner loop in collect_effects and the dedup walk: every tick
+// walks `depth` parents per leaf. Designed to expose cache-density wins on the
+// per-tick ancestor traversal where the per-stage scene count is large.
+
+fn build_script_deep(depth: usize, stage: &StageHandles, stage_id: StageId) -> Script {
+    assert!(depth >= 2, "deep HSM needs at least root + leaf");
+
+    let troupe_all = TroupeId::new(1);
+    let all_actors: Vec<ActiveActor> = stage.actors.iter()
+        .map(|(id, h)| ActiveActor::new(stage.lh, stage.sh, *h, *id))
+        .collect();
+    let bt_actor = stage.actors[0].1;
+
+    let mut script = Script::new(ScriptId::new(3), "deep_script", SceneId::new(1));
+
+    // Root + intermediate compounds: 1..=depth-1, each with single child = next id.
+    for d in 1..depth {
+        let id     = SceneId::new(d as i64);
+        let child  = SceneId::new((d + 1) as i64);
+        let parent = if d == 1 { None } else { Some(SceneId::new((d - 1) as i64)) };
+        script.add_scene(SceneDef {
+            id, stage: stage_id, parent,
+            kind: SceneKind::Compound {
+                children: thin_vec![child], initial: child, history: None,
+            },
+            troupes: thin_vec![], initial_actors: thin_vec![],
+            root: BtNode::empty(),
+            on_enter: thin_vec![], on_exit: thin_vec![],
+            handlers: thin_vec![], transitions: thin_vec![],
+        });
+    }
+
+    // Leaf at id=depth: Atomic with one trivial BT leaf.
+    let leaf_id   = SceneId::new(depth as i64);
+    let leaf_par  = SceneId::new((depth - 1) as i64);
+    script.add_scene(SceneDef {
+        id: leaf_id, stage: stage_id, parent: Some(leaf_par),
+        kind: SceneKind::Atomic,
+        troupes: thin_vec![troupe_all],
+        initial_actors: thin_vec![all_actors.iter().cloned().collect()],
+        root: BtNode::leaf(
+            Condition::Always,
+            Effect::SetActorLocal {
+                level_h: stage.lh, stage_h: stage.sh, actor_h: bt_actor,
+                local: Affine3A::from_translation(Vec3::new(0.001, 0.0, 0.0)),
+            },
+            false,
+        ),
+        on_enter: thin_vec![], on_exit: thin_vec![],
+        handlers: thin_vec![], transitions: thin_vec![],
+    });
+
+    script
+}
+
+fn build_world_deep(scale: Scale, depth: usize) -> (World, Vec<StageHandles>) {
+    let (mut world, handles) = build_world(scale);
+    // Replace each Stage's Play with a deep-HSM one.
+    for (idx, stage) in handles.iter().enumerate() {
+        let stage_id = world.levels[stage.lh].stages[stage.sh].id;
+        let script = build_script_deep(depth, stage, stage_id);
+        let play = Play::instantiate(
+            PlayId::new(1000 + idx as i64),
+            format!("deep_play_{idx}"),
+            &script,
+            stage_id, stage.lh, stage.sh,
+        );
+        world.levels[stage.lh].stages[stage.sh].set_play(play);
+    }
+    (world, handles)
+}
+
+fn bench_deep_hsm(c: &mut Criterion) {
+    let scale = Scale::small();
+    let mut g = c.benchmark_group("deep_hsm");
+    for &depth in &[16usize, 64, 256] {
+        let (mut world, _h) = build_world_deep(scale, depth);
+        for _ in 0..60 { world.tick(DT); }
+
+        g.throughput(Throughput::Elements(depth as u64));
+        g.bench_with_input(BenchmarkId::from_parameter(format!("depth={depth}")), &depth, |b, _| {
+            b.iter(|| world.tick(black_box(DT)));
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(benches,
     bench_world_build,
     bench_tick_steady,
     bench_tick_scaling,
     bench_tick_phases,
     bench_transition_storm,
+    bench_deep_hsm,
 );
 criterion_main!(benches);

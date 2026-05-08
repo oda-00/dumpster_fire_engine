@@ -246,9 +246,10 @@ impl Stage {
         dt: f32,
         world: &crate::resource_manager::world_manager::world::World,
         sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
+        chain: &mut Vec<crate::resource_manager::event_manager::SceneHandle>,
     ) {
         if let Some(play) = self.play.as_ref() {
-            play.collect_effects(dt, world, sink);
+            play.collect_effects(dt, world, sink, chain);
         }
     }
 
