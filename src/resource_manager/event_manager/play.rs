@@ -57,10 +57,12 @@ pub struct Play {
     /// History pseudostate cache: (parent_scene_id, last_visited_child_id).
     pub history: ThinVec<(SceneId, SceneId)>,
 
-    /// Resolution table: SceneId → SceneHandle. Sorted by SceneId at instantiate
-    /// time so `handle_for` can binary-search instead of linear-scan — no HashMap,
-    /// keeps the engine convention of flat allocation-friendly buffers.
-    pub by_id: ThinVec<(SceneId, SceneHandle)>,
+    /// Resolution table: SceneId → SceneHandle as a range-compressed direct-index
+    /// array. `id_base` is the minimum authored SceneId; `id_lookup[id - id_base]`
+    /// is the handle (or None for gaps). O(1) lookup, no branches, no binary
+    /// search, no iterator state. Built once at instantiate.
+    pub id_base:   i64,
+    pub id_lookup: ThinVec<Option<SceneHandle>>,
 
     pub handlers: ThinVec<Handler>,
     pub queue:    ThinVec<Event>,
@@ -132,21 +134,36 @@ impl Play {
         stage_h: StageHandle,
     ) -> Self {
         let mut scenes: Arena<SceneTag, Scene> = Arena::new();
-        let mut by_id: ThinVec<(SceneId, SceneHandle)> = ThinVec::new();
+
+        // Build a range-compressed direct-index lookup. SceneIds in a script are
+        // author-assigned i64s; in practice they cluster (e.g. 1..N or 100..104).
+        // Allocate `max - min + 1` slots, index by `(id - id_base)`.
+        let (id_base, id_span) = if script.scenes.is_empty() {
+            (0i64, 0usize)
+        } else {
+            let mut min_id: i64 = i64::MAX;
+            let mut max_id: i64 = i64::MIN;
+            for def in script.scenes.iter() {
+                let r = def.id.raw();
+                if r < min_id { min_id = r; }
+                if r > max_id { max_id = r; }
+            }
+            (min_id, (max_id - min_id + 1) as usize)
+        };
+
+        let mut id_lookup: ThinVec<Option<SceneHandle>> = ThinVec::with_capacity(id_span);
+        id_lookup.resize(id_span, None);
 
         for def in script.scenes.iter() {
             let h = scenes.insert(Scene::from_def(def));
-            by_id.push((def.id, h));
+            id_lookup[(def.id.raw() - id_base) as usize] = Some(h);
         }
 
-        // Sort once so handle_for can binary-search; avoids per-lookup linear scan
-        // without introducing a HashMap.
-        by_id.sort_unstable_by_key(|(id, _)| *id);
-
-        let root_h = by_id
-            .binary_search_by_key(&script.entry, |(id, _)| *id)
-            .ok()
-            .map(|i| by_id[i].1)
+        let root_idx = (script.entry.raw() - id_base) as usize;
+        let root_h = id_lookup
+            .get(root_idx)
+            .copied()
+            .flatten()
             .expect("Script::entry must reference a scene that was added via add_scene");
 
         // Static-troupe analysis: collect every troupe id that appears in the
@@ -174,7 +191,8 @@ impl Play {
             root: root_h,
             active_leaves: ThinVec::new(),
             history: ThinVec::new(),
-            by_id,
+            id_base,
+            id_lookup,
             handlers: script.handlers.iter().cloned().collect(),
             queue: ThinVec::new(),
             static_troupes,
@@ -199,13 +217,11 @@ impl Play {
         play
     }
 
-    /// O(log N) lookup against the sorted by_id table (built at instantiate).
-    #[inline]
+    /// O(1) range-compressed direct-index lookup. Built at instantiate.
+    #[inline(always)]
     pub fn handle_for(&self, id: SceneId) -> Option<SceneHandle> {
-        self.by_id
-            .binary_search_by_key(&id, |(k, _)| *k)
-            .ok()
-            .map(|i| self.by_id[i].1)
+        let idx = id.raw().wrapping_sub(self.id_base) as usize;
+        self.id_lookup.get(idx).copied().flatten()
     }
 
     /// All scenes currently active = each leaf plus its ancestor chain (deduped).
@@ -213,7 +229,7 @@ impl Play {
         let mut out: Vec<SceneHandle> = Vec::new();
         let mut scratch = Vec::with_capacity(8);
         for &leaf in self.active_leaves.iter() {
-            ancestors_into_fields(&self.scenes, &self.by_id, leaf, &mut scratch);
+            ancestors_into_fields(&self.scenes, self.id_base, &self.id_lookup, leaf, &mut scratch);
             for &h in scratch.iter() {
                 if !out.contains(&h) { out.push(h); }
             }
@@ -426,7 +442,8 @@ impl Play {
         // Build active config into config_scratch, reusing its allocation.
         active_configuration_into(
             &self.scenes,
-            &self.by_id,
+            self.id_base,
+            &self.id_lookup,
             &self.active_leaves,
             &mut self.config_scratch,
             &mut self.ancestor_scratch,
@@ -479,8 +496,8 @@ impl Play {
         // ancestors_into_fields only reads scenes + by_id; the mutable borrows
         // on ancestor_scratch / transition_scratch are different fields, so
         // Rust's field-level split-borrow allows this without unsafe.
-        ancestors_into_fields(&self.scenes, &self.by_id, src_h, &mut self.ancestor_scratch);
-        ancestors_into_fields(&self.scenes, &self.by_id, tgt_h, &mut self.transition_scratch);
+        ancestors_into_fields(&self.scenes, self.id_base, &self.id_lookup, src_h, &mut self.ancestor_scratch);
+        ancestors_into_fields(&self.scenes, self.id_base, &self.id_lookup, tgt_h, &mut self.transition_scratch);
 
         let src_len = self.ancestor_scratch.len();
         let tgt_len = self.transition_scratch.len();
@@ -519,15 +536,14 @@ impl Play {
         while i < self.active_leaves.len() {
             let leaf = self.active_leaves[i];
             let is_under_src = {
-                let scenes = &self.scenes;
-                let by_id  = &self.by_id;
+                let scenes    = &self.scenes;
+                let id_base   = self.id_base;
+                let id_lookup = &self.id_lookup;
                 let mut cur = leaf;
                 let mut found = false;
                 loop {
                     if cur == src_h { found = true; break; }
-                    match scenes[cur].parent.and_then(|pid| {
-                        by_id.iter().find(|(k, _)| *k == pid).map(|(_, h)| *h)
-                    }) {
+                    match scenes[cur].parent.and_then(|pid| lookup_by_id(id_base, id_lookup, pid)) {
                         Some(ph) => cur = ph,
                         None     => break,
                     }
@@ -595,13 +611,21 @@ impl Play {
 // field-level split-borrow only works across distinct fields, not across
 // `&self` / `&mut self` method boundaries.
 
+/// O(1) free-function lookup mirror of `Play::handle_for`. Used inside split-borrow
+/// blocks where `&self` isn't available.
+#[inline(always)]
+fn lookup_by_id(id_base: i64, id_lookup: &[Option<SceneHandle>], id: SceneId) -> Option<SceneHandle> {
+    let idx = id.raw().wrapping_sub(id_base) as usize;
+    id_lookup.get(idx).copied().flatten()
+}
+
 /// Write the ancestor chain [root → … → leaf] into `out` (cleared first).
-/// `by_id` must be sorted by SceneId (Play::instantiate guarantees this).
 fn ancestors_into_fields(
-    scenes: &Arena<SceneTag, Scene>,
-    by_id:  &ThinVec<(SceneId, SceneHandle)>,
-    leaf:   SceneHandle,
-    out:    &mut Vec<SceneHandle>,
+    scenes:    &Arena<SceneTag, Scene>,
+    id_base:   i64,
+    id_lookup: &[Option<SceneHandle>],
+    leaf:      SceneHandle,
+    out:       &mut Vec<SceneHandle>,
 ) {
     out.clear();
     let mut cur = leaf;
@@ -609,12 +633,10 @@ fn ancestors_into_fields(
         out.push(cur);
         match scenes[cur].parent {
             None => break,
-            Some(pid) => {
-                match by_id.binary_search_by_key(&pid, |(k, _)| *k).ok().map(|i| by_id[i].1) {
-                    Some(ph) => cur = ph,
-                    None     => break,
-                }
-            }
+            Some(pid) => match lookup_by_id(id_base, id_lookup, pid) {
+                Some(ph) => cur = ph,
+                None     => break,
+            },
         }
     }
     out.reverse();
@@ -624,14 +646,15 @@ fn ancestors_into_fields(
 /// using `scratch` as a per-leaf ancestor work buffer.
 fn active_configuration_into(
     scenes:        &Arena<SceneTag, Scene>,
-    by_id:         &ThinVec<(SceneId, SceneHandle)>,
+    id_base:       i64,
+    id_lookup:     &[Option<SceneHandle>],
     active_leaves: &ThinVec<SceneHandle>,
     out:           &mut Vec<SceneHandle>,
     scratch:       &mut Vec<SceneHandle>,
 ) {
     out.clear();
     for &leaf in active_leaves.iter() {
-        ancestors_into_fields(scenes, by_id, leaf, scratch);
+        ancestors_into_fields(scenes, id_base, id_lookup, leaf, scratch);
         for &h in scratch.iter() {
             if !out.contains(&h) { out.push(h); }
         }
