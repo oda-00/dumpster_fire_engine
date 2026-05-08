@@ -18,3 +18,7 @@ harness = false
 [[bench]]
 name = "arena_iteration"
 harness = false
+
+[[bench]]
+name = "game_tick"
+harness = false

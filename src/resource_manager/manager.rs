@@ -17,7 +17,7 @@ use super::component::{Component, ComponentType};
 pub struct Handle<Tag> {
     pub idx: u32,
     pub generation: NonZeroU32,
-    _tag: PhantomData<fn() -> Tag>,
+    pub _tag: PhantomData<fn() -> Tag>,
 }
 
 // Arena tag types — plain ZSTs, no data, no circular imports.
@@ -299,11 +299,14 @@ impl SubEntity {
 // Owned by Stage::actors arena. No parent pointer needed.
 // sub_entities[i] corresponds to the ActorType variant whose index() == i.
 // At most one sub-entity per ActorType variant — same invariant as before.
+//
+// HOT/COLD SoA SPLIT: `local`, `world`, and the dirty flag previously lived
+// here have been moved into parallel `Vec` arrays on Stage (`locals`,
+// `worlds`, `dirty_flags`) indexed by `ActorHandle::idx`. The cue/transform
+// hot path now streams over those tight arrays instead of pulling whole
+// Actor cache lines (which include the heavy `sub_entities` array).
 
 pub struct Actor {
     pub id:           ActorId,
-    pub local:        Affine3A,
-    pub world:        Affine3A,
-    pub dirty:        bool,   // true = already queued in Stage::dirty_actors
     pub sub_entities: [Option<SubEntity>; ActorType::COUNT],
 }
