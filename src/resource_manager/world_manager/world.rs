@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use glam::Affine3A;
 use thin_vec::ThinVec;
+use rayon::prelude::*;
 use crate::resource_manager::component::{Component, ComponentData};
 use crate::resource_manager::manager::{
     ActorHandle, ActorId, ActorType, Arena, Id, LevelHandle, LevelTag, StageHandle,
@@ -24,8 +25,9 @@ pub struct World {
     pub id:     WorldId,
     pub levels: Arena<LevelTag, Level>,
     pub roots:  ThinVec<LevelHandle>,
-    /// Reusable per-tick effect buffer — keeps allocation out of the hot path.
-    tick_effects: Vec<crate::resource_manager::event_manager::Effect>,
+    /// Reusable per-tick effect buffer — capacity is preserved across ticks via
+    /// `mem::take` + `clear` so steady-state operation is allocation-free.
+    tick_effects: crate::resource_manager::event_manager::EffectArena,
 }
 
 impl World {
@@ -34,7 +36,7 @@ impl World {
             id,
             levels: Arena::new(),
             roots: ThinVec::new(),
-            tick_effects: Vec::new(),
+            tick_effects: crate::resource_manager::event_manager::EffectArena::with_capacity(4096),
         }
     }
 
@@ -182,9 +184,26 @@ impl World {
     }
 
     /// Flushes all dirty transforms in all levels. O(dirty actors across all stages).
+    ///
+    /// Stages are fully independent during propagation (each stage only touches
+    /// its own SoA arrays), so above the parallelism threshold we fan out across
+    /// stages with rayon. Below the threshold (or with a single stage) we stay
+    /// sequential — rayon's fork/join overhead dominates at small dirty counts.
     pub fn propagate_transforms(&mut self) {
+        // Gather disjoint &mut Stage references from all levels into a flat Vec.
+        let mut stages: Vec<&mut crate::resource_manager::world_manager::stage::Stage> =
+            Vec::new();
         for level in self.levels.values_mut() {
-            level.propagate_transforms();
+            for stage in level.stages.values_mut() {
+                stages.push(stage);
+            }
+        }
+
+        let total_dirty: usize = stages.iter().map(|s| s.dirty_count()).sum();
+        if total_dirty >= 1024 && stages.len() >= 2 {
+            stages.par_iter_mut().for_each(|s| s.propagate_transforms());
+        } else {
+            for s in stages { s.propagate_transforms(); }
         }
     }
 
@@ -198,14 +217,26 @@ impl World {
     //   4. propagate transforms (existing behavior)
 
     pub fn tick(&mut self, dt: f32) {
-        // Take the pooled buffer out so we can hold &mut self while it's full.
+        // Take the pooled arena out so we can hold &mut self while it's full.
         // Reuses prior capacity — fresh tick reads no allocator.
         let mut effects = std::mem::take(&mut self.tick_effects);
         effects.clear();
 
+        // Pass 0 — emit the per-tick `Event::Tick { dt }` into every play queue
+        // so EventMatcher::Tick handlers actually fire (was previously dead).
+        for level in self.levels.values_mut() {
+            for stage in level.stages.values_mut() {
+                if let Some(play) = stage.play.as_mut() {
+                    play.queue.push(
+                        crate::resource_manager::event_manager::Event::Tick { dt },
+                    );
+                }
+            }
+        }
+
         // Pass 2-prelude: drain Mealy effects from the previous tick's transitions.
         for level in self.levels.values_mut() {
-            level.drain_pending_mealy(&mut effects);
+            level.drain_pending_mealy(effects.as_vec_mut());
         }
 
         // Pass 1 — read-only collect. Reborrow self as &World so condition
@@ -213,12 +244,12 @@ impl World {
         {
             let world_view: &World = &*self;
             for level in world_view.levels.values() {
-                level.collect_effects(dt, world_view, &mut effects);
+                level.collect_effects(dt, world_view, effects.as_vec_mut());
             }
         }
 
         // Pass 2 — apply.
-        for eff in effects.drain(..) {
+        for eff in effects.drain() {
             self.apply_effect(eff);
         }
 
@@ -230,7 +261,7 @@ impl World {
         // Pass 4 — transforms.
         self.propagate_transforms();
 
-        // Restore the (now-empty, but capacity-preserving) buffer.
+        // Restore the (now-empty, but capacity-preserving) arena.
         self.tick_effects = effects;
     }
 
@@ -244,9 +275,19 @@ impl World {
                 self.set_sub_entity_local(level_h, stage_h, actor_h, variant_idx, local);
             }
             Effect::AddComponent(b) => {
-                let crate::resource_manager::event_manager::AddComponentEffect {
-                    level_h, stage_h, actor_h, variant_idx, component,
-                } = b;
+                // Single-owner fast path: move out of the Arc with no copy.
+                // Shared (refcount > 1) falls back to a deep clone of the
+                // payload — the only field that needs deep-cloning is the
+                // non-Clone `Component`, handled by `clone_component`.
+                use crate::resource_manager::event_manager::AddComponentEffect;
+                let AddComponentEffect { level_h, stage_h, actor_h, variant_idx, component } =
+                    Arc::try_unwrap(b).unwrap_or_else(|arc| AddComponentEffect {
+                        level_h:     arc.level_h,
+                        stage_h:     arc.stage_h,
+                        actor_h:     arc.actor_h,
+                        variant_idx: arc.variant_idx,
+                        component:   crate::resource_manager::event_manager::clone_component_pub(&arc.component),
+                    });
                 if let Some(level) = self.levels.get_mut(level_h) {
                     level.add_component(stage_h, actor_h, variant_idx, component);
                 }
@@ -260,10 +301,14 @@ impl World {
                 self.spawn_actor(level_h, stage_h, id, local);
             }
             Effect::SpawnSubEntity(b) => {
-                let crate::resource_manager::event_manager::SpawnSubEntityEffect {
-                    level_h, stage_h, actor_h, actor_type, local,
-                } = b;
-                self.spawn_sub_entity(level_h, stage_h, actor_h, actor_type, local);
+                // SpawnSubEntity carries a non-Clone `ActorType`, so the only
+                // way to reach the inner is to be the unique owner. Refcount > 1
+                // means the same handle was scheduled twice — drop the duplicate.
+                use crate::resource_manager::event_manager::SpawnSubEntityEffect;
+                if let Ok(payload) = Arc::try_unwrap(b) {
+                    let SpawnSubEntityEffect { level_h, stage_h, actor_h, actor_type, local } = payload;
+                    self.spawn_sub_entity(level_h, stage_h, actor_h, actor_type, local);
+                }
             }
             Effect::DespawnActor { level_h, stage_h, actor_h } => {
                 self.despawn_actor(level_h, stage_h, actor_h);
@@ -275,10 +320,10 @@ impl World {
                 // Direct-write fast path — bypasses per-actor World→Level→Stage
                 // routing. Stage holds a reusable scratch buffer to keep the
                 // fan-out allocation-free.
-                if let Some(level) = self.levels.get_mut(level_h) {
-                    if let Some(stage) = level.stages.get_mut(stage_h) {
-                        stage.cue_troupe_direct(troupe, delta);
-                    }
+                if let Some(level) = self.levels.get_mut(level_h)
+                    && let Some(stage) = level.stages.get_mut(stage_h)
+                {
+                    stage.cue_troupe_direct(troupe, delta);
                 }
             }
             Effect::Emit { level_h, stage_h, target, event } => {
@@ -301,17 +346,16 @@ impl World {
                 let _ = Event::Tick { dt: 0.0 }; // keep Event in scope so future variants compile
             }
             Effect::ScheduleTransition { level_h, stage_h, source, target, mealy } => {
-                if let Some(level) = self.levels.get_mut(level_h) {
-                    if let Some(stage) = level.stages.get_mut(stage_h) {
-                        if let Some(play) = stage.play.as_mut() {
-                            // Last-write-wins if multiple transitions schedule
-                            // in the same tick; pass 3 will pick this one.
-                            play.pending_transition =
-                                Some(crate::resource_manager::event_manager::TransitionRecord {
-                                    source, target, mealy,
-                                });
-                        }
-                    }
+                if let Some(level) = self.levels.get_mut(level_h)
+                    && let Some(stage) = level.stages.get_mut(stage_h)
+                    && let Some(play) = stage.play.as_mut()
+                {
+                    // Multiple transitions scheduled in the same tick are
+                    // applied in FIFO order by post_tick_bookkeeping.
+                    play.pending_transitions.push(
+                        crate::resource_manager::event_manager::TransitionRecord {
+                            source, target, mealy,
+                        });
                 }
             }
         }

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use dumpster_fire_engine::resource_manager::*;
 use glam::{Affine3A, Vec3};
 
@@ -229,7 +230,7 @@ fn main() {
         transitions:    thin_vec![Transition {
             condition: Condition::AfterSeconds(2.0),
             target:    s_act2,
-            effects:   thin_vec![],
+            effects:   Arc::default(),
         }],
     };
 

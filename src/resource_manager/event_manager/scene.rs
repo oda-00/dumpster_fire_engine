@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use glam::{Affine3A, Vec3};
 use thin_vec::ThinVec;
@@ -140,9 +140,11 @@ pub enum Effect {
         variant_idx: usize,
         local:       Affine3A,
     },
-    /// Boxed: `Component` is large (~80 B) and AddComponent is rare on the hot
-    /// path. Boxing keeps the inline `Effect` discriminant slim so the per-tick
-    /// `Vec<Effect>` working set fits more entries per cache line.
+    /// Arc-wrapped: `Component` is large (~80 B) and AddComponent is rare on
+    /// the hot path. Sharing keeps the inline `Effect` discriminant slim so the
+    /// per-tick `Vec<Effect>` working set fits more entries per cache line, and
+    /// allows cheap clones when an op fires on multiple frames before being
+    /// applied (refcount bump instead of a fresh heap allocation).
     AddComponent(Arc<AddComponentEffect>),
     RemoveComponent {
         level_h:        LevelHandle,
@@ -157,8 +159,8 @@ pub enum Effect {
         id:      ActorId,
         local:   Affine3A,
     },
-    /// Boxed: `ActorType` is a large enum + 64 B Affine3A. Same rationale as
-    /// AddComponent — rare emit, big payload, no need to bloat the inline size.
+    /// Arc-wrapped: `ActorType` is a large enum + 64 B Affine3A. Same rationale
+    /// as AddComponent — rare emit, big payload, no need to bloat the inline size.
     SpawnSubEntity(Arc<SpawnSubEntityEffect>),
     DespawnActor {
         level_h: LevelHandle,
@@ -187,12 +189,15 @@ pub enum Effect {
         event:   Event,
     },
     /// Mealy-style transition record consumed by Play::post_tick_bookkeeping.
+    /// `mealy` is an Arc-shared slice so cloning this effect (e.g. when the
+    /// same transition fires on multiple frames) is a single atomic refcount
+    /// increment instead of a heap allocation + element-by-element copy.
     ScheduleTransition {
         level_h: LevelHandle,
         stage_h: StageHandle,
         source:  SceneId,
         target:  SceneId,
-        mealy:   ThinVec<Effect>,
+        mealy:   Arc<[Effect]>,
     },
 }
 
@@ -226,7 +231,7 @@ impl Clone for Effect {
                     level_h: b.level_h, stage_h: b.stage_h, actor_h: b.actor_h,
                     variant_idx: b.variant_idx,
                     component: clone_component(&b.component),
-                }))
+                })),
             Effect::RemoveComponent { level_h, stage_h, actor_h, variant_idx, component_type } =>
                 Effect::RemoveComponent { level_h: *level_h, stage_h: *stage_h, actor_h: *actor_h, variant_idx: *variant_idx, component_type: *component_type },
             Effect::SpawnActor { level_h, stage_h, id, local } =>
@@ -243,8 +248,9 @@ impl Clone for Effect {
                 Effect::CueTroupe { level_h: *level_h, stage_h: *stage_h, troupe: *troupe, delta: *delta },
             Effect::Emit { level_h, stage_h, target, event } =>
                 Effect::Emit { level_h: *level_h, stage_h: *stage_h, target: *target, event: event.clone() },
+            // Arc clone: one atomic refcount bump, no heap allocation.
             Effect::ScheduleTransition { level_h, stage_h, source, target, mealy } =>
-                Effect::ScheduleTransition { level_h: *level_h, stage_h: *stage_h, source: *source, target: *target, mealy: mealy.clone() },
+                Effect::ScheduleTransition { level_h: *level_h, stage_h: *stage_h, source: *source, target: *target, mealy: Arc::clone(mealy) },
         }
     }
 }
@@ -252,6 +258,10 @@ impl Clone for Effect {
 /// Component does not derive Clone in component.rs (and that file is owned by
 /// resource_manager — we don't touch it). For the effect-buffer model we need
 /// to clone Effect; this helper rebuilds a Component by matching on its variant.
+/// Re-exported as `clone_component_pub` for use from `World::apply_effect`'s
+/// `Arc::try_unwrap` fallback path.
+pub fn clone_component_pub(c: &Component) -> Component { clone_component(c) }
+
 fn clone_component(c: &Component) -> Component {
     use crate::resource_manager::component::*;
     match c {
@@ -434,13 +444,26 @@ pub struct Handler {
 
 // ── SceneOperation ──────────────────────────────────────────────────────────
 
-#[derive(Clone)]
 pub struct SceneOperation {
     pub condition: Condition,
     pub effect:    Arc<Effect>,
-    /// Cell so pass 1 (read-only against the Scene) can mark a once-op as fired.
-    pub fired:     Mutex<bool>,
+    /// AtomicBool so pass 1 (read-only against the Scene, possibly run from a
+    /// rayon worker thread) can flag a once-op as fired without taking a lock.
+    /// Manual `Clone` resets each cloned op's flag to its source value rather
+    /// than aliasing — every materialized Scene gets its own independent flag.
+    pub fired:     AtomicBool,
     pub once:      bool,
+}
+
+impl Clone for SceneOperation {
+    fn clone(&self) -> Self {
+        SceneOperation {
+            condition: self.condition.clone(),
+            effect:    Arc::clone(&self.effect),
+            fired:     AtomicBool::new(self.fired.load(Ordering::Relaxed)),
+            once:      self.once,
+        }
+    }
 }
 
 // ── Behavior Tree ───────────────────────────────────────────────────────────
@@ -459,20 +482,46 @@ pub enum Decorator {
     Cooldown(f32),
 }
 
-#[derive(Clone)]
 pub enum BtNode {
     Sequence(Vec<BtNode>),
     Selector(Vec<BtNode>),
     Parallel { children: Vec<BtNode>, policy: ParallelPolicy },
-    Repeat   { child: Arc<BtNode>, count: u32, current: Cell<u32> },
+    /// Repeat counter is an `AtomicU32` so the read-only pass-1 walk can step
+    /// it without an exclusive borrow. `Clone` resets the per-node counter to
+    /// the source's last-observed value so each materialized scene starts from
+    /// its authored state.
+    Repeat   { child: Arc<BtNode>, count: u32, current: AtomicU32 },
     Decorator { decorator: Decorator, child: Arc<BtNode> },
     Leaf(SceneOperation),
+}
+
+impl Clone for BtNode {
+    fn clone(&self) -> Self {
+        match self {
+            BtNode::Sequence(cs)  => BtNode::Sequence(cs.clone()),
+            BtNode::Selector(cs)  => BtNode::Selector(cs.clone()),
+            BtNode::Parallel { children, policy } =>
+                BtNode::Parallel { children: children.clone(), policy: *policy },
+            BtNode::Repeat { child, count, current } =>
+                BtNode::Repeat {
+                    child:   Arc::clone(child),
+                    count:   *count,
+                    current: AtomicU32::new(current.load(Ordering::Relaxed)),
+                },
+            BtNode::Decorator { decorator, child } =>
+                BtNode::Decorator { decorator: decorator.clone(), child: Arc::clone(child) },
+            BtNode::Leaf(op) => BtNode::Leaf(op.clone()),
+        }
+    }
 }
 
 impl BtNode {
     pub fn leaf(condition: Condition, effect: Effect, once: bool) -> Self {
         BtNode::Leaf(SceneOperation {
-            condition, effect, fired: Mutex::new(false), once,
+            condition,
+            effect: Arc::new(effect),
+            fired:  AtomicBool::new(false),
+            once,
         })
     }
 
@@ -535,15 +584,15 @@ impl BtNode {
             }
             BtNode::Repeat { child, count, current } => {
                 let target = *count;
-                let mut iters = current.get();
+                let iters = current.load(Ordering::Relaxed);
                 if target != 0 && iters >= target {
                     return BtStatus::Success;
                 }
                 match child.tick(ctx, out) {
                     BtStatus::Success => {
-                        iters = iters.saturating_add(1);
-                        current.set(iters);
-                        if target != 0 && iters >= target { BtStatus::Success }
+                        let next = iters.saturating_add(1);
+                        current.store(next, Ordering::Relaxed);
+                        if target != 0 && next >= target { BtStatus::Success }
                         else { BtStatus::Running }
                     }
                     BtStatus::Failure => BtStatus::Failure,
@@ -566,12 +615,15 @@ impl BtNode {
                 Decorator::Cooldown(_s) => child.tick(ctx, out),
             },
             BtNode::Leaf(op) => {
-                if op.once && op.fired.get() {
+                if op.once && op.fired.load(Ordering::Relaxed) {
                     return BtStatus::Success;
                 }
                 if op.condition.eval(ctx) {
-                    out.push(op.effect.clone());
-                    if op.once { op.fired.set(true); }
+                    // Deep-clone the inner Effect off the Arc so the sink keeps
+                    // its `Vec<Effect>` shape; the Arc itself stays in the BT so
+                    // re-firings on the next tick are still cheap to read.
+                    out.push((*op.effect).clone());
+                    if op.once { op.fired.store(true, Ordering::Relaxed); }
                     BtStatus::Success
                 } else {
                     BtStatus::Running
@@ -588,10 +640,11 @@ impl BtNode {
             BtNode::Parallel { children, .. } =>
                 for c in children { c.reset() },
             BtNode::Repeat { child, current, .. } => {
-                current.set(0); child.reset();
+                current.store(0, Ordering::Relaxed);
+                child.reset();
             }
             BtNode::Decorator { child, .. } => child.reset(),
-            BtNode::Leaf(op) => op.fired.set(false),
+            BtNode::Leaf(op) => op.fired.store(false, Ordering::Relaxed),
         }
     }
 }
@@ -615,7 +668,9 @@ pub struct Transition {
     pub condition: Condition,
     pub target:    SceneId,
     /// Mealy outputs: applied (at next tick's pass 2) when this edge is taken.
-    pub effects:   ThinVec<Effect>,
+    /// Stored as `Arc<[Effect]>` so cloning a `Transition` (e.g. at Script→Play
+    /// instantiation) is a single atomic bump instead of a full Vec copy.
+    pub effects:   Arc<[Effect]>,
 }
 
 // ── HSM scene shape ─────────────────────────────────────────────────────────

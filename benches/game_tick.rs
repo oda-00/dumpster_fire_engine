@@ -10,6 +10,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use glam::{Affine3A, Vec3};
+use std::sync::Arc;
 use thin_vec::thin_vec;
 
 use dumpster_fire_engine::resource_manager::*;
@@ -212,7 +213,7 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
         handlers: thin_vec![],
         transitions: thin_vec![Transition {
             condition: Condition::AfterSeconds(0.5),
-            target: s_action, effects: thin_vec![],
+            target: s_action, effects: Arc::default(),
         }],
     };
 
@@ -240,7 +241,7 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
         handlers: thin_vec![],
         transitions: thin_vec![Transition {
             condition: Condition::AfterSeconds(1.0),
-            target: s_climax, effects: thin_vec![],
+            target: s_climax, effects: Arc::default(),
         }],
     };
 
@@ -294,7 +295,7 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
         handlers: thin_vec![],
         transitions: thin_vec![Transition {
             condition: Condition::AfterSeconds(0.5),
-            target: s_walk, effects: thin_vec![],
+            target: s_walk, effects: Arc::default(),
         }],
     };
 
@@ -419,10 +420,166 @@ fn bench_tick_phases(c: &mut Criterion) {
     g.finish();
 }
 
+// ── Transition-storm world ─────────────────────────────────────────────────
+//
+// Every scene has a Condition::Always transition back to its sibling so
+// apply_transition fires on every tick. This isolates the cost of the HSM
+// transition path (exit/enter chains, leaf-drop, history update, Mealy stash).
+
+fn build_script_storm(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script {
+    let s_root = SceneId::new(1);
+    let s_a    = SceneId::new(2);
+    let s_b    = SceneId::new(3);
+
+    let troupe_all = TroupeId::new(1);
+    let all_actors: Vec<ActiveActor> = stage.actors.iter()
+        .map(|(id, h)| ActiveActor::new(stage.lh, stage.sh, *h, *id))
+        .collect();
+
+    let bt_actor = stage.actors[0].1;
+    let make_bt = || -> BtNode {
+        let mut nodes = Vec::with_capacity(scale.bt_leaves);
+        for k in 0..scale.bt_leaves {
+            let dx = (k as f32) * 0.01;
+            nodes.push(BtNode::leaf(
+                Condition::Always,
+                Effect::SetActorLocal {
+                    level_h: stage.lh, stage_h: stage.sh, actor_h: bt_actor,
+                    local: Affine3A::from_translation(Vec3::new(dx, 0.0, 0.0)),
+                },
+                false,
+            ));
+        }
+        BtNode::Sequence(nodes)
+    };
+
+    let scene_a = SceneDef {
+        id: s_a, stage: stage_id, parent: Some(s_root),
+        kind: SceneKind::Atomic,
+        troupes: thin_vec![troupe_all],
+        initial_actors: thin_vec![all_actors.iter().cloned().collect()],
+        root: make_bt(),
+        on_enter: thin_vec![], on_exit: thin_vec![],
+        handlers: thin_vec![],
+        transitions: thin_vec![Transition {
+            condition: Condition::Always,
+            target: s_b, effects: Arc::default(),
+        }],
+    };
+
+    let scene_b = SceneDef {
+        id: s_b, stage: stage_id, parent: Some(s_root),
+        kind: SceneKind::Atomic,
+        troupes: thin_vec![troupe_all],
+        initial_actors: thin_vec![all_actors.iter().cloned().collect()],
+        root: make_bt(),
+        on_enter: thin_vec![], on_exit: thin_vec![],
+        handlers: thin_vec![],
+        transitions: thin_vec![Transition {
+            condition: Condition::Always,
+            target: s_a, effects: Arc::default(),
+        }],
+    };
+
+    let root = SceneDef {
+        id: s_root, stage: stage_id, parent: None,
+        kind: SceneKind::Compound {
+            children: thin_vec![s_a, s_b],
+            initial: s_a, history: None,
+        },
+        troupes: thin_vec![], initial_actors: thin_vec![],
+        root: BtNode::empty(),
+        on_enter: thin_vec![], on_exit: thin_vec![],
+        handlers: thin_vec![], transitions: thin_vec![],
+    };
+
+    let mut script = Script::new(ScriptId::new(2), "storm_script", s_root);
+    script.add_scene(root);
+    script.add_scene(scene_a);
+    script.add_scene(scene_b);
+    script
+}
+
+fn build_world_storm(scale: Scale) -> (World, Vec<StageHandles>) {
+    let mut world = World::new(WorldId::new(2));
+    let mut handles = Vec::with_capacity(scale.levels * scale.stages_per_level);
+
+    let mut sid_counter: i64      = 1;
+    let mut actor_id_counter: i64 = 1;
+    let mut char_id_counter:  i64 = 1;
+
+    for li in 0..scale.levels {
+        let lh = world.spawn_level(LevelId::new(li as i64 + 1), format!("level_{li}"));
+        for si in 0..scale.stages_per_level {
+            let sh = world
+                .spawn_stage(lh, StageId::new(sid_counter), format!("stage_{li}_{si}"))
+                .unwrap();
+            sid_counter += 1;
+
+            let mut actors = Vec::with_capacity(scale.actors_per_stage);
+            for ai in 0..scale.actors_per_stage {
+                let aid = ActorId::new(actor_id_counter);
+                actor_id_counter += 1;
+                let ah = world.spawn_actor(
+                    lh, sh, aid,
+                    Affine3A::from_translation(Vec3::new(ai as f32, 0.0, 0.0)),
+                ).unwrap();
+                world.spawn_sub_entity(
+                    lh, sh, ah,
+                    ActorType::Character(Character {
+                        id: CharacterId::new(char_id_counter),
+                        name: format!("c{char_id_counter}").into(),
+                        visible: true, physical: true, playable: false,
+                    }),
+                    Affine3A::IDENTITY,
+                ).unwrap();
+                char_id_counter += 1;
+                actors.push((aid, ah));
+            }
+            handles.push(StageHandles { lh, sh, actors });
+        }
+    }
+
+    for (idx, stage) in handles.iter().enumerate() {
+        let stage_id = world.levels[stage.lh].stages[stage.sh].id;
+        let script = build_script_storm(scale, stage, stage_id);
+        let play = Play::instantiate(
+            PlayId::new(idx as i64 + 1),
+            format!("storm_play_{idx}"),
+            &script,
+            stage_id,
+            stage.lh,
+            stage.sh,
+        );
+        world.levels[stage.lh].stages[stage.sh].set_play(play);
+    }
+
+    (world, handles)
+}
+
+/// Measures the transition hot path: every tick fires `apply_transition` because
+/// every scene has a `Condition::Always` edge to its sibling. Shows the effect
+/// of the scratch-buffer / Arc-mealy optimisations in isolation from steady-state
+/// BT + troupe work.
+fn bench_transition_storm(c: &mut Criterion) {
+    let scale = Scale::medium();
+    let (mut world, _h) = build_world_storm(scale);
+    // Warm up the allocator; transitions start firing immediately (Condition::Always).
+    for _ in 0..60 { world.tick(DT); }
+
+    let mut g = c.benchmark_group("transition_storm");
+    g.throughput(Throughput::Elements(scale.total_actors()));
+    g.bench_function(scale.label(), |b| {
+        b.iter(|| world.tick(black_box(DT)));
+    });
+    g.finish();
+}
+
 criterion_group!(benches,
     bench_world_build,
     bench_tick_steady,
     bench_tick_scaling,
     bench_tick_phases,
+    bench_transition_storm,
 );
 criterion_main!(benches);
