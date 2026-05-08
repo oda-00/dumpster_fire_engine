@@ -35,6 +35,52 @@ pub struct TransitionRecord {
     pub mealy:  Arc<[Effect]>,
 }
 
+// ── PlayStats — workload shape counters ────────────────────────────────────
+
+#[derive(Default)]
+pub struct PlayStats {
+    /// Total parent_handle steps walked in chain-build loops.
+    pub chain_steps:       AtomicU64,
+    /// Scenes that passed the dedup check and were fully processed.
+    pub scenes_processed:  AtomicU64,
+    /// Scenes hit by the early-break dedup (already visited this tick).
+    pub dedup_skips:       AtomicU64,
+    /// `apply_transition` calls.
+    pub transitions_fired: AtomicU64,
+    /// `BtNode::tick` invocations on Atomic scenes.
+    pub bt_ticks:          AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PlayStatsSnapshot {
+    pub chain_steps:       u64,
+    pub scenes_processed:  u64,
+    pub dedup_skips:       u64,
+    pub transitions_fired: u64,
+    pub bt_ticks:          u64,
+}
+
+impl PlayStats {
+    #[inline(always)]
+    pub fn snapshot(&self) -> PlayStatsSnapshot {
+        PlayStatsSnapshot {
+            chain_steps:       self.chain_steps.load(Ordering::Relaxed),
+            scenes_processed:  self.scenes_processed.load(Ordering::Relaxed),
+            dedup_skips:       self.dedup_skips.load(Ordering::Relaxed),
+            transitions_fired: self.transitions_fired.load(Ordering::Relaxed),
+            bt_ticks:          self.bt_ticks.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn reset(&self) {
+        self.chain_steps.store(0, Ordering::Relaxed);
+        self.scenes_processed.store(0, Ordering::Relaxed);
+        self.dedup_skips.store(0, Ordering::Relaxed);
+        self.transitions_fired.store(0, Ordering::Relaxed);
+        self.bt_ticks.store(0, Ordering::Relaxed);
+    }
+}
+
 // ── Play ────────────────────────────────────────────────────────────────────
 
 pub struct Play {
@@ -100,6 +146,14 @@ pub struct Play {
     /// scene's stored value against the current tick id gives O(1) dedup
     /// for shared ancestors with no scratch buffer.
     tick_counter: AtomicU64,
+
+    /// Cheap workload-shape counters. Bumped via Relaxed atomics from
+    /// `collect_effects` (&self) and as plain reads from `apply_transition`
+    /// (&mut self). On x86_64 a Relaxed AtomicU64::fetch_add is a plain ADD;
+    /// the hot path cost is at noise level. Read via `stats_snapshot()` to
+    /// understand workload shape (chain depth, dedup hit rate, transition
+    /// frequency) before further structural changes.
+    pub stats: PlayStats,
 
     // ── Per-Play scratch buffers ──────────────────────────────────────────
     //
@@ -214,6 +268,7 @@ impl Play {
             finished: false,
             wants_tick,
             tick_counter: AtomicU64::new(0),
+            stats: PlayStats::default(),
             ancestor_scratch:      Vec::with_capacity(16),
             transition_scratch:    Vec::with_capacity(16),
             config_scratch:        Vec::with_capacity(16),
@@ -378,6 +433,13 @@ impl Play {
         // O(1) without any external dedup buffer.
         let tick_id = self.tick_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
+        // Local stat accumulators: avoid `lock xadd` per inner-loop step.
+        // Folded to the atomic fields once at function exit.
+        let mut local_chain_steps:      u64 = 0;
+        let mut local_scenes_processed: u64 = 0;
+        let mut local_dedup_skips:      u64 = 0;
+        let mut local_bt_ticks:         u64 = 0;
+
         for &leaf in self.active_leaves.iter() {
             chain.clear();
             let mut cur = leaf;
@@ -386,6 +448,7 @@ impl Play {
             // transition wins" semantics, and saves one Vec::reverse per leaf.
             loop {
                 chain.push(cur);
+                local_chain_steps += 1;
                 match self.scenes[cur].parent_handle {
                     Some(ph) => cur = ph,
                     None => break,
@@ -399,9 +462,11 @@ impl Play {
                 // every farther ancestor was reached by a prior leaf — break
                 // the whole chain walk, not just continue.
                 if scene.last_processed_tick.load(Ordering::Relaxed) == tick_id {
+                    local_dedup_skips += 1;
                     break;
                 }
                 scene.last_processed_tick.store(tick_id, Ordering::Relaxed);
+                local_scenes_processed += 1;
 
                 let ctx = EvalCtx {
                     world,
@@ -417,6 +482,7 @@ impl Play {
 
                 // 1. Tick BT body (Atomic only).
                 if matches!(scene.kind, SceneKind::Atomic) {
+                    local_bt_ticks += 1;
                     let _status = scene.root.tick(&ctx, out);
                 }
 
@@ -445,6 +511,13 @@ impl Play {
                 }
             }
         }
+
+        // Fold local accumulators into the atomic fields once. Single Relaxed
+        // fetch_add per counter per call — total cost is fixed, not per-step.
+        if local_chain_steps      != 0 { self.stats.chain_steps.fetch_add(local_chain_steps, Ordering::Relaxed); }
+        if local_scenes_processed != 0 { self.stats.scenes_processed.fetch_add(local_scenes_processed, Ordering::Relaxed); }
+        if local_dedup_skips      != 0 { self.stats.dedup_skips.fetch_add(local_dedup_skips, Ordering::Relaxed); }
+        if local_bt_ticks         != 0 { self.stats.bt_ticks.fetch_add(local_bt_ticks, Ordering::Relaxed); }
     }
 
     /// Pass 3 — mut — drain queues, advance counters, apply pending transition.
@@ -501,6 +574,7 @@ impl Play {
         let TransitionRecord { source, target, mealy } = rec;
         let Some(src_h) = self.handle_for(source) else { return };
         let Some(tgt_h) = self.handle_for(target) else { return };
+        self.stats.transitions_fired.fetch_add(1, Ordering::Relaxed);
 
         // Reuse scratch buffers for ancestor chains — no heap allocation.
         // ancestors_into_fields only reads scenes + by_id; the mutable borrows
