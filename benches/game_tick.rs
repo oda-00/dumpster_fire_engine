@@ -390,8 +390,9 @@ fn bench_tick_phases(c: &mut Criterion) {
     g.bench_function("collect_effects", |b| {
         b.iter(|| {
             let mut sink: Vec<Effect> = Vec::new();
+            let mut chain: Vec<SceneHandle> = Vec::with_capacity(8);
             for level in world.levels.values() {
-                level.collect_effects(black_box(DT), &world, &mut sink);
+                level.collect_effects(black_box(DT), &world, &mut sink, &mut chain);
             }
             black_box(sink);
         });

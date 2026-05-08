@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use glam::{Affine3A, Vec3};
 use thin_vec::ThinVec;
@@ -726,6 +726,12 @@ pub struct Scene {
     pub tick_count:  u64,
     pub entered:     bool,
     pub _rendered:   bool,
+    /// Snapshot of `Play::tick_counter` at the most recent `collect_effects`
+    /// visit. Compared in O(1) against the play's current tick id to dedup
+    /// shared-ancestor visits without any external scratch buffer. Atomic so
+    /// `&self`-callable `collect_effects` can tag the scene — same convention
+    /// as `SceneOperation::fired` and `BtNode::Repeat::current`.
+    pub last_processed_tick: AtomicU64,
 }
 
 impl Scene {
@@ -752,6 +758,7 @@ impl Scene {
             tick_count:  0,
             entered:     false,
             _rendered:   false,
+            last_processed_tick: AtomicU64::new(0),
         }
     }
 

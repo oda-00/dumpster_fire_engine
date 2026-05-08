@@ -28,6 +28,11 @@ pub struct World {
     /// Reusable per-tick effect buffer — capacity is preserved across ticks via
     /// `mem::take` + `clear` so steady-state operation is allocation-free.
     tick_effects: crate::resource_manager::event_manager::EffectArena,
+    /// Reusable per-tick ancestor-chain scratch shared across every Play's
+    /// `collect_effects` call. Lifted out via `mem::take` so the allocation
+    /// persists across ticks (same pattern as `tick_effects`). Replaced the
+    /// per-call `Vec::with_capacity(8)` and the SmallVec experiment.
+    tick_chain: Vec<crate::resource_manager::event_manager::SceneHandle>,
 }
 
 impl World {
@@ -37,6 +42,7 @@ impl World {
             levels: Arena::new(),
             roots: ThinVec::new(),
             tick_effects: crate::resource_manager::event_manager::EffectArena::with_capacity(4096),
+            tick_chain:   Vec::with_capacity(16),
         }
     }
 
@@ -217,16 +223,22 @@ impl World {
     //   4. propagate transforms (existing behavior)
 
     pub fn tick(&mut self, dt: f32) {
-        // Take the pooled arena out so we can hold &mut self while it's full.
-        // Reuses prior capacity — fresh tick reads no allocator.
+        // Take both pooled buffers out so we can hold &mut self while they're
+        // full. Capacity preserved across ticks — zero allocator traffic on
+        // the steady-state path.
         let mut effects = std::mem::take(&mut self.tick_effects);
+        let mut chain   = std::mem::take(&mut self.tick_chain);
         effects.clear();
+        chain.clear();
 
-        // Pass 0 — emit the per-tick `Event::Tick { dt }` into every play queue
-        // so EventMatcher::Tick handlers actually fire (was previously dead).
+        // Pass 0 — emit per-tick `Event::Tick { dt }` only into play queues
+        // whose script has a Tick handler. Most plays don't, so the gate
+        // skips the push entirely (was a per-stage cost on every tick).
         for level in self.levels.values_mut() {
             for stage in level.stages.values_mut() {
-                if let Some(play) = stage.play.as_mut() {
+                if let Some(play) = stage.play.as_mut()
+                    && play.wants_tick
+                {
                     play.queue.push(
                         crate::resource_manager::event_manager::Event::Tick { dt },
                     );
@@ -240,11 +252,13 @@ impl World {
         }
 
         // Pass 1 — read-only collect. Reborrow self as &World so condition
-        // evaluators can hold a &World while we iterate levels via shared access.
+        // evaluators can hold a &World while we iterate levels via shared
+        // access. `chain` threads through Level/Stage to Play, where it serves
+        // as the per-leaf ancestor walk buffer.
         {
             let world_view: &World = &*self;
             for level in world_view.levels.values() {
-                level.collect_effects(dt, world_view, effects.as_vec_mut());
+                level.collect_effects(dt, world_view, effects.as_vec_mut(), &mut chain);
             }
         }
 
@@ -261,8 +275,9 @@ impl World {
         // Pass 4 — transforms.
         self.propagate_transforms();
 
-        // Restore the (now-empty, but capacity-preserving) arena.
+        // Restore the (now-empty, but capacity-preserving) buffers.
         self.tick_effects = effects;
+        self.tick_chain   = chain;
     }
 
     pub fn apply_effect(&mut self, eff: crate::resource_manager::event_manager::Effect) {

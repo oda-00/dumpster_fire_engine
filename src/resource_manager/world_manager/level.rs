@@ -164,9 +164,10 @@ impl Level {
         dt: f32,
         world: &crate::resource_manager::world_manager::world::World,
         sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
+        chain: &mut Vec<crate::resource_manager::event_manager::SceneHandle>,
     ) {
         for stage in self.stages.values() {
-            stage.collect_effects(dt, world, sink);
+            stage.collect_effects(dt, world, sink, chain);
         }
     }
 

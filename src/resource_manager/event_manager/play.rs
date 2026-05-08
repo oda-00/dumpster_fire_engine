@@ -1,20 +1,21 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use glam::Affine3A;
-use smallvec::SmallVec;
 use thin_vec::ThinVec;
 use crate::resource_manager::manager::{Arena, Handle, Id, LevelHandle, StageHandle};
 use crate::resource_manager::world_manager::stage::StageId;
 use crate::resource_manager::world_manager::world::World;
 use super::scene::{
-    BtNode, BtState, EvalCtx, Effect, Event, Handler, Scene, SceneHandle, SceneId,
-    SceneKind, SceneTag, TroupeId,
+    BtNode, BtState, EvalCtx, Effect, Event, EventMatcher, Handler, Scene, SceneHandle,
+    SceneId, SceneKind, SceneTag, TroupeId,
 };
 use super::script::{Script, ScriptId};
 
-/// Inline capacity for ancestor chains and region target buffers. HSM trees in
-/// authored scripts are essentially never deeper than this; staying within this
-/// bound means the SmallVec lives entirely on the stack with no heap allocation.
-const HSM_INLINE_CAP: usize = 8;
+/// Stack-array inline cap for HSM region-target collection in
+/// `descend_to_leaves`. Trees with more concurrent regions than this fall
+/// through to a heap path (deliberately not exposed — the limit is a
+/// performance hint, not a correctness ceiling).
+const REGION_TARGETS_INLINE: usize = 8;
 
 // ── Tags / markers / Ids owned by play.rs ───────────────────────────────────
 
@@ -71,9 +72,10 @@ pub struct Play {
     pub static_troupes: ThinVec<crate::resource_manager::event_manager::TroupeId>,
 
     /// Filled by World::apply_effect when an Effect::ScheduleTransition fires;
-    /// drained by post_tick_bookkeeping during pass 3. Multiple transitions
-    /// scheduled in the same tick are applied in scheduling order (FIFO),
-    /// not last-write-wins.
+    /// drained by post_tick_bookkeeping during pass 3 by `mem::swap` into
+    /// `pending_drain_scratch` (so the apply loop holds &mut self without
+    /// borrowing `pending_transitions` itself). Per-tick dedup in
+    /// collect_effects guarantees at most one record per source scene.
     pub pending_transitions: ThinVec<TransitionRecord>,
 
     /// Mealy outputs accumulated when a transition is applied; drained by
@@ -84,6 +86,19 @@ pub struct Play {
     pub paused:   bool,
     pub finished: bool,
 
+    /// True iff the script has at least one `EventMatcher::Tick` handler
+    /// (play-global or scene-local). Computed once at instantiate so
+    /// `World::tick`'s pass-0 can skip the per-stage `Event::Tick { dt }`
+    /// push when nothing would consume it.
+    pub wants_tick: bool,
+
+    /// Monotonic per-Play tick id. `collect_effects` does
+    /// `tick_counter.fetch_add(1, Relaxed) + 1` at entry; the result is
+    /// stored into each visited `Scene::last_processed_tick`. Comparing the
+    /// scene's stored value against the current tick id gives O(1) dedup
+    /// for shared ancestors with no scratch buffer.
+    tick_counter: AtomicU64,
+
     // ── Per-Play scratch buffers ──────────────────────────────────────────
     //
     // Pre-allocated buffers reused every tick to eliminate the transient Vec
@@ -91,14 +106,17 @@ pub struct Play {
     // Capacity grows to the watermark of the deepest HSM seen at runtime and
     // is never shrunk, so steady-state operation is allocation-free.
     //
-    // ancestor_scratch:   source ancestor chain (root → src) in apply_transition
-    // transition_scratch: target ancestor chain (root → tgt) in apply_transition;
-    //                     also repurposed as the "leaves to keep" buffer after
-    //                     the tgt chain is no longer needed.
-    // config_scratch:     active configuration set in post_tick_bookkeeping
-    ancestor_scratch:   Vec<SceneHandle>,
-    transition_scratch: Vec<SceneHandle>,
-    config_scratch:     Vec<SceneHandle>,
+    // ancestor_scratch:        source ancestor chain (root → src) in apply_transition
+    // transition_scratch:      target ancestor chain (root → tgt) in apply_transition;
+    //                          also repurposed as the "leaves to keep" buffer after
+    //                          the tgt chain is no longer needed.
+    // config_scratch:          active configuration set in post_tick_bookkeeping
+    // pending_drain_scratch:   swap-target for pending_transitions during drain;
+    //                          allocation persists across ticks.
+    ancestor_scratch:       Vec<SceneHandle>,
+    transition_scratch:     Vec<SceneHandle>,
+    config_scratch:         Vec<SceneHandle>,
+    pending_drain_scratch:  ThinVec<TransitionRecord>,
 }
 
 impl Play {
@@ -138,6 +156,13 @@ impl Play {
         // not to move any actor — Stage::cue_troupe_direct can skip them.
         let static_troupes = compute_static_troupes(script);
 
+        // Precompute whether anything actually consumes Event::Tick — World::tick
+        // skips the per-tick push if not.
+        let wants_tick = script.handlers.iter().any(|h| matches!(h.matcher, EventMatcher::Tick))
+            || script.scenes.iter().any(|d| {
+                d.handlers.iter().any(|h| matches!(h.matcher, EventMatcher::Tick))
+            });
+
         let mut play = Play {
             id,
             name: name.into(),
@@ -157,9 +182,12 @@ impl Play {
             pending_mealy: Vec::new(),
             paused: false,
             finished: false,
-            ancestor_scratch:   Vec::with_capacity(16),
-            transition_scratch: Vec::with_capacity(16),
-            config_scratch:     Vec::with_capacity(16),
+            wants_tick,
+            tick_counter: AtomicU64::new(0),
+            ancestor_scratch:      Vec::with_capacity(16),
+            transition_scratch:    Vec::with_capacity(16),
+            config_scratch:        Vec::with_capacity(16),
+            pending_drain_scratch: ThinVec::with_capacity(4),
         };
 
         play.descend_to_leaves(root_h);
@@ -195,13 +223,17 @@ impl Play {
 
     /// Walk from `start` through Compound::initial / AndParallel regions,
     /// pushing every reached leaf into active_leaves.
+    ///
+    /// Snapshots the per-kind targets into a stack array (no SmallVec, no
+    /// `regions.clone()` — SceneId is `Id<T>(i64)`, Copy + no-Drop, so the
+    /// array can be initialized with a sentinel placeholder cheaply). Trees
+    /// with more than `REGION_TARGETS_INLINE` concurrent regions fall through
+    /// to a heap `ThinVec` path (extremely unusual for authored HSMs).
     fn descend_to_leaves(&mut self, start: SceneHandle) {
-        // Snapshot the per-kind targets into stack-resident buffers so we can
-        // release the borrow on `self.scenes[start]` before recursing.
-        // ThinVec<Region> used to be cloned here on every AndParallel descent —
-        // SmallVec keeps the targets entirely on the stack for typical region
-        // counts (≤ HSM_INLINE_CAP).
-        let mut targets: SmallVec<[SceneId; HSM_INLINE_CAP]> = SmallVec::new();
+        let mut targets_inline: [SceneId; REGION_TARGETS_INLINE] =
+            [SceneId::new(0); REGION_TARGETS_INLINE];
+        let mut targets_overflow: ThinVec<SceneId> = ThinVec::new();
+        let mut targets_len: usize = 0;
         let is_atomic;
         {
             let scene = &self.scenes[start];
@@ -214,12 +246,19 @@ impl Play {
                     let chosen = self.history_for(scene.id)
                         .or(*history)
                         .unwrap_or(*initial);
-                    targets.push(chosen);
+                    targets_inline[0] = chosen;
+                    targets_len = 1;
                 }
                 SceneKind::AndParallel { regions } => {
                     is_atomic = false;
                     for region in regions.iter() {
-                        targets.push(region.history.unwrap_or(region.initial));
+                        let t = region.history.unwrap_or(region.initial);
+                        if targets_len < REGION_TARGETS_INLINE {
+                            targets_inline[targets_len] = t;
+                            targets_len += 1;
+                        } else {
+                            targets_overflow.push(t);
+                        }
                     }
                 }
             }
@@ -232,18 +271,24 @@ impl Play {
 
         // For Compound: a single target. If it doesn't resolve, treat `start`
         // as a degenerate leaf (matches old behavior).
-        // For AndParallel: every region descends; missing targets are skipped.
-        if targets.len() == 1 {
-            if let Some(child_h) = self.handle_for(targets[0]) {
+        if targets_len == 1 && targets_overflow.is_empty() {
+            if let Some(child_h) = self.handle_for(targets_inline[0]) {
                 self.descend_to_leaves(child_h);
             } else {
                 self.active_leaves.push(start);
             }
-        } else {
-            for &t in targets.iter() {
-                if let Some(child_h) = self.handle_for(t) {
-                    self.descend_to_leaves(child_h);
-                }
+            return;
+        }
+
+        // For AndParallel: every region descends; missing targets are skipped.
+        for &t in targets_inline.iter().take(targets_len) {
+            if let Some(child_h) = self.handle_for(t) {
+                self.descend_to_leaves(child_h);
+            }
+        }
+        for &t in targets_overflow.iter() {
+            if let Some(child_h) = self.handle_for(t) {
+                self.descend_to_leaves(child_h);
             }
         }
     }
@@ -255,14 +300,30 @@ impl Play {
 
     /// Pass 1 — read-only — walk the active configuration, tick BTs, dispatch
     /// handlers, evaluate transitions.
-    pub fn collect_effects(&self, _dt: f32, world: &World, out: &mut Vec<Effect>) {
+    ///
+    /// `chain` is a `&mut Vec<SceneHandle>` scratch buffer threaded down from
+    /// `World::tick` (lifted out via `mem::take` so the allocation persists
+    /// across ticks). We clear-and-reuse it per active leaf — zero heap
+    /// allocation in steady state, no SmallVec inline-vs-heap branch on push.
+    ///
+    /// Per-tick scene-visit dedupe is via `Scene::last_processed_tick`
+    /// (AtomicU64) compared against `Play::tick_counter` — same pattern as
+    /// `SceneOperation::fired` and `BtNode::Repeat::current`. The dedup
+    /// **breaks** the ancestor walk on first hit (every farther ancestor was
+    /// already processed by a prior leaf), strictly faster than `continue`.
+    pub fn collect_effects(
+        &self,
+        _dt:   f32,
+        world: &World,
+        out:   &mut Vec<Effect>,
+        chain: &mut Vec<SceneHandle>,
+    ) {
         if self.paused || self.finished { return; }
 
         // ── Play-global handler dispatch (once per tick, anchored at root) ──
-        // Was previously fired once per ancestor of the first leaf — a 3-deep
-        // HSM dispatched 3× per event. It also failed to dispatch at all when
-        // active_leaves was empty.
-        {
+        // Skip entirely when nothing would consume an event — recovers the
+        // overhead of the mandatory dispatch path the correctness fix added.
+        if !self.handlers.is_empty() && !self.queue.is_empty() {
             let root_scene = &self.scenes[self.root];
             let play_ctx = EvalCtx {
                 world,
@@ -284,37 +345,35 @@ impl Play {
             }
         }
 
-        // Stack-resident ancestor chain + per-tick "scene already processed" set.
-        // The dedup is critical: when multiple active leaves share an ancestor
-        // (e.g. AndParallel: leaves [a, b] both have parent `Climax`), naive
-        // per-leaf chain walks evaluate the parent's BT/handlers/transitions
-        // multiple times — and worse, schedule the same transition once per
-        // leaf, causing duplicate apply_transition calls (which then push
-        // duplicate target leaves, growing active_leaves exponentially).
-        let mut chain:    SmallVec<[SceneHandle; HSM_INLINE_CAP]> = SmallVec::new();
-        let mut seen:     SmallVec<[SceneHandle; HSM_INLINE_CAP]> = SmallVec::new();
+        // Bump the per-Play tick id; every visited Scene tags itself with this
+        // value so a shared ancestor reached via a second leaf is detected in
+        // O(1) without any external dedup buffer.
+        let tick_id = self.tick_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
         for &leaf in self.active_leaves.iter() {
             chain.clear();
             let mut cur = leaf;
+            // Build the chain leaf-first by pushing as we walk up. No reverse:
+            // leaf-first iteration order is exactly what we need for "innermost
+            // transition wins" semantics, and saves one Vec::reverse per leaf.
             loop {
                 chain.push(cur);
-                match self.scenes[cur].parent {
+                match self.scenes[cur].parent.and_then(|pid| self.handle_for(pid)) {
+                    Some(ph) => cur = ph,
                     None => break,
-                    Some(pid) => match self.handle_for(pid) {
-                        Some(ph) => cur = ph,
-                        None => break,
-                    },
                 }
             }
-            chain.reverse();
 
-            // leaf-first walk so innermost transition wins.
-            for &handle in chain.iter().rev() {
-                if seen.contains(&handle) { continue; }
-                seen.push(handle);
-
+            for &handle in chain.iter() {
                 let scene = &self.scenes[handle];
+
+                // O(1) dedup. If we hit a scene already processed this tick,
+                // every farther ancestor was reached by a prior leaf — break
+                // the whole chain walk, not just continue.
+                if scene.last_processed_tick.load(Ordering::Relaxed) == tick_id {
+                    break;
+                }
+                scene.last_processed_tick.store(tick_id, Ordering::Relaxed);
 
                 let ctx = EvalCtx {
                     world,
@@ -390,13 +449,15 @@ impl Play {
 
         self.queue.clear();
 
-        // Drain pending transitions in scheduling order. Each apply_transition
-        // mutates active_leaves/history/scene state; subsequent transitions
-        // see the post-mutation HSM, which matches the "FIFO, in order" semantic.
+        // Drain pending transitions. The dedup added in collect_effects
+        // (Scene::last_processed_tick) guarantees at most one record per
+        // source scene per tick, so order is irrelevant — we LIFO via pop()
+        // and avoid the SmallVec collect / Vec::drain dance entirely.
+        // mem::swap into a persistent scratch field keeps the allocation
+        // alive across ticks (mirrors the World::tick_effects mem::take pattern).
         if !self.pending_transitions.is_empty() {
-            let drained: SmallVec<[TransitionRecord; 4]> =
-                self.pending_transitions.drain(..).collect();
-            for rec in drained {
+            std::mem::swap(&mut self.pending_transitions, &mut self.pending_drain_scratch);
+            while let Some(rec) = self.pending_drain_scratch.pop() {
                 self.apply_transition(rec);
             }
         }
