@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 thin-vec = "0.2"
-glam = "0.29"
+glam     = "0.29"
+rayon    = "1"
 
 [dev-dependencies]
 slotmap = "1"
@@ -22,3 +23,11 @@ harness = false
 [[bench]]
 name = "game_tick"
 harness = false
+
+[profile.release]
+lto           = "fat"
+codegen-units = 1
+
+[profile.bench]
+lto           = "fat"
+codegen-units = 1

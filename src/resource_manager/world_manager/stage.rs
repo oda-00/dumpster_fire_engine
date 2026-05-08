@@ -286,12 +286,11 @@ impl Stage {
         // Static-troupe fast path: if the script never moves this troupe AND
         // this particular cue's delta is identity, the only observable effect
         // would be a redundant dirty mark. Skip the whole walk.
-        if delta == Affine3A::IDENTITY {
-            if let Some(play) = play.as_ref() {
-                if play.static_troupes.iter().any(|t| *t == troupe) {
-                    return;
-                }
-            }
+        if delta == Affine3A::IDENTITY
+            && let Some(play) = play.as_ref()
+            && play.static_troupes.contains(&troupe)
+        {
+            return;
         }
 
         cue_scratch.clear();
@@ -299,10 +298,10 @@ impl Stage {
         if let Some(play) = play.as_ref() {
             for &leaf in play.active_leaves.iter() {
                 let scene = &play.scenes[leaf];
-                if let Some(idx) = scene.troupe_idx(troupe) {
-                    if let Some(group) = scene.actors.group(idx) {
-                        for a in group { cue_scratch.push(a.actor_h); }
-                    }
+                if let Some(idx) = scene.troupe_idx(troupe)
+                    && let Some(group) = scene.actors.group(idx)
+                {
+                    for a in group { cue_scratch.push(a.actor_h); }
                 }
             }
         }
@@ -310,9 +309,9 @@ impl Stage {
         // Identity short-circuit: ambient cues that re-publish the current
         // pose still want every member marked dirty/cued, but pay no math.
         if delta == Affine3A::IDENTITY {
-            apply_identity_block_soa(locals, dirty_flags, dirty_actors, &cue_scratch);
+            apply_identity_block_soa(locals, dirty_flags, dirty_actors, cue_scratch);
         } else {
-            apply_delta_block_soa(locals, dirty_flags, dirty_actors, &cue_scratch, delta);
+            apply_delta_block_soa(locals, dirty_flags, dirty_actors, cue_scratch, delta);
         }
     }
 
@@ -344,6 +343,11 @@ impl Stage {
 
         dirty_actors.clear();
     }
+
+    /// Number of actors with a pending transform update. Used by the parallel
+    /// propagate threshold in `World::propagate_transforms`.
+    #[inline]
+    pub fn dirty_count(&self) -> usize { self.dirty_actors.len() }
 
     // ── Internal helpers ──────────────────────────────────────────────────
 
