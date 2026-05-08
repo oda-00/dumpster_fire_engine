@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use glam::Affine3A;
+use smallvec::SmallVec;
 use thin_vec::ThinVec;
 use crate::resource_manager::manager::{Arena, Handle, Id, LevelHandle, StageHandle};
 use crate::resource_manager::world_manager::stage::StageId;
@@ -9,6 +10,11 @@ use super::scene::{
     SceneKind, SceneTag, TroupeId,
 };
 use super::script::{Script, ScriptId};
+
+/// Inline capacity for ancestor chains and region target buffers. HSM trees in
+/// authored scripts are essentially never deeper than this; staying within this
+/// bound means the SmallVec lives entirely on the stack with no heap allocation.
+const HSM_INLINE_CAP: usize = 8;
 
 // ── Tags / markers / Ids owned by play.rs ───────────────────────────────────
 
@@ -50,8 +56,9 @@ pub struct Play {
     /// History pseudostate cache: (parent_scene_id, last_visited_child_id).
     pub history: ThinVec<(SceneId, SceneId)>,
 
-    /// Resolution table: SceneId → SceneHandle. Linear search is fine at
-    /// typical script sizes.
+    /// Resolution table: SceneId → SceneHandle. Sorted by SceneId at instantiate
+    /// time so `handle_for` can binary-search instead of linear-scan — no HashMap,
+    /// keeps the engine convention of flat allocation-friendly buffers.
     pub by_id: ThinVec<(SceneId, SceneHandle)>,
 
     pub handlers: ThinVec<Handler>,
@@ -64,8 +71,10 @@ pub struct Play {
     pub static_troupes: ThinVec<crate::resource_manager::event_manager::TroupeId>,
 
     /// Filled by World::apply_effect when an Effect::ScheduleTransition fires;
-    /// consumed by post_tick_bookkeeping during pass 3.
-    pub pending_transition: Option<TransitionRecord>,
+    /// drained by post_tick_bookkeeping during pass 3. Multiple transitions
+    /// scheduled in the same tick are applied in scheduling order (FIFO),
+    /// not last-write-wins.
+    pub pending_transitions: ThinVec<TransitionRecord>,
 
     /// Mealy outputs accumulated when a transition is applied; drained by
     /// World::tick at the start of the *next* tick's pass 2 so the one-tick
@@ -112,9 +121,14 @@ impl Play {
             by_id.push((def.id, h));
         }
 
-        let root_h = by_id.iter()
-            .find(|(id, _)| *id == script.entry)
-            .map(|(_, h)| *h)
+        // Sort once so handle_for can binary-search; avoids per-lookup linear scan
+        // without introducing a HashMap.
+        by_id.sort_unstable_by_key(|(id, _)| *id);
+
+        let root_h = by_id
+            .binary_search_by_key(&script.entry, |(id, _)| *id)
+            .ok()
+            .map(|i| by_id[i].1)
             .expect("Script::entry must reference a scene that was added via add_scene");
 
         // Static-troupe analysis: collect every troupe id that appears in the
@@ -139,7 +153,7 @@ impl Play {
             handlers: script.handlers.iter().cloned().collect(),
             queue: ThinVec::new(),
             static_troupes,
-            pending_transition: None,
+            pending_transitions: ThinVec::new(),
             pending_mealy: Vec::new(),
             paused: false,
             finished: false,
@@ -157,8 +171,13 @@ impl Play {
         play
     }
 
+    /// O(log N) lookup against the sorted by_id table (built at instantiate).
+    #[inline]
     pub fn handle_for(&self, id: SceneId) -> Option<SceneHandle> {
-        self.by_id.iter().find(|(k, _)| *k == id).map(|(_, h)| *h)
+        self.by_id
+            .binary_search_by_key(&id, |(k, _)| *k)
+            .ok()
+            .map(|i| self.by_id[i].1)
     }
 
     /// All scenes currently active = each leaf plus its ancestor chain (deduped).
@@ -177,30 +196,53 @@ impl Play {
     /// Walk from `start` through Compound::initial / AndParallel regions,
     /// pushing every reached leaf into active_leaves.
     fn descend_to_leaves(&mut self, start: SceneHandle) {
-        let scene = &self.scenes[start];
-        match &scene.kind {
-            SceneKind::Atomic => {
-                self.active_leaves.push(start);
-            }
-            SceneKind::Compound { initial, history, .. } => {
-                let initial = *initial;
-                let history = *history;
-                let target = self.history_for(self.scenes[start].id)
-                    .or(history)
-                    .unwrap_or(initial);
-                if let Some(child_h) = self.handle_for(target) {
-                    self.descend_to_leaves(child_h);
-                } else {
-                    self.active_leaves.push(start);
+        // Snapshot the per-kind targets into stack-resident buffers so we can
+        // release the borrow on `self.scenes[start]` before recursing.
+        // ThinVec<Region> used to be cloned here on every AndParallel descent —
+        // SmallVec keeps the targets entirely on the stack for typical region
+        // counts (≤ HSM_INLINE_CAP).
+        let mut targets: SmallVec<[SceneId; HSM_INLINE_CAP]> = SmallVec::new();
+        let is_atomic;
+        {
+            let scene = &self.scenes[start];
+            match &scene.kind {
+                SceneKind::Atomic => {
+                    is_atomic = true;
+                }
+                SceneKind::Compound { initial, history, .. } => {
+                    is_atomic = false;
+                    let chosen = self.history_for(scene.id)
+                        .or(*history)
+                        .unwrap_or(*initial);
+                    targets.push(chosen);
+                }
+                SceneKind::AndParallel { regions } => {
+                    is_atomic = false;
+                    for region in regions.iter() {
+                        targets.push(region.history.unwrap_or(region.initial));
+                    }
                 }
             }
-            SceneKind::AndParallel { regions } => {
-                let regions = regions.clone();
-                for region in regions.iter() {
-                    let target = region.history.unwrap_or(region.initial);
-                    if let Some(child_h) = self.handle_for(target) {
-                        self.descend_to_leaves(child_h);
-                    }
+        }
+
+        if is_atomic {
+            self.active_leaves.push(start);
+            return;
+        }
+
+        // For Compound: a single target. If it doesn't resolve, treat `start`
+        // as a degenerate leaf (matches old behavior).
+        // For AndParallel: every region descends; missing targets are skipped.
+        if targets.len() == 1 {
+            if let Some(child_h) = self.handle_for(targets[0]) {
+                self.descend_to_leaves(child_h);
+            } else {
+                self.active_leaves.push(start);
+            }
+        } else {
+            for &t in targets.iter() {
+                if let Some(child_h) = self.handle_for(t) {
+                    self.descend_to_leaves(child_h);
                 }
             }
         }
@@ -216,15 +258,62 @@ impl Play {
     pub fn collect_effects(&self, _dt: f32, world: &World, out: &mut Vec<Effect>) {
         if self.paused || self.finished { return; }
 
-        let mut play_queue_dispatched = false;
-        // Single Vec reused across all leaves; avoids one allocation per leaf.
-        let mut chain: Vec<SceneHandle> = Vec::with_capacity(8);
+        // ── Play-global handler dispatch (once per tick, anchored at root) ──
+        // Was previously fired once per ancestor of the first leaf — a 3-deep
+        // HSM dispatched 3× per event. It also failed to dispatch at all when
+        // active_leaves was empty.
+        {
+            let root_scene = &self.scenes[self.root];
+            let play_ctx = EvalCtx {
+                world,
+                level_h:     self.level_h,
+                stage_h:     self.stage_h,
+                scene_id:    root_scene.id,
+                elapsed:     root_scene.elapsed,
+                tick_count:  root_scene.tick_count,
+                events_seen: &root_scene.queue,
+                actors:      &root_scene.actors,
+                troupes:     &root_scene.troupes,
+            };
+            for ev in self.queue.iter() {
+                for h in self.handlers.iter() {
+                    if h.matcher.matches(ev) {
+                        (h.action)(ev, &play_ctx, out);
+                    }
+                }
+            }
+        }
+
+        // Stack-resident ancestor chain + per-tick "scene already processed" set.
+        // The dedup is critical: when multiple active leaves share an ancestor
+        // (e.g. AndParallel: leaves [a, b] both have parent `Climax`), naive
+        // per-leaf chain walks evaluate the parent's BT/handlers/transitions
+        // multiple times — and worse, schedule the same transition once per
+        // leaf, causing duplicate apply_transition calls (which then push
+        // duplicate target leaves, growing active_leaves exponentially).
+        let mut chain:    SmallVec<[SceneHandle; HSM_INLINE_CAP]> = SmallVec::new();
+        let mut seen:     SmallVec<[SceneHandle; HSM_INLINE_CAP]> = SmallVec::new();
 
         for &leaf in self.active_leaves.iter() {
-            ancestors_into_fields(&self.scenes, &self.by_id, leaf, &mut chain);
+            chain.clear();
+            let mut cur = leaf;
+            loop {
+                chain.push(cur);
+                match self.scenes[cur].parent {
+                    None => break,
+                    Some(pid) => match self.handle_for(pid) {
+                        Some(ph) => cur = ph,
+                        None => break,
+                    },
+                }
+            }
+            chain.reverse();
 
             // leaf-first walk so innermost transition wins.
             for &handle in chain.iter().rev() {
+                if seen.contains(&handle) { continue; }
+                seen.push(handle);
+
                 let scene = &self.scenes[handle];
 
                 let ctx = EvalCtx {
@@ -253,18 +342,7 @@ impl Play {
                     }
                 }
 
-                // 3. Play-global handler dispatch (once per tick).
-                if !play_queue_dispatched {
-                    for ev in self.queue.iter() {
-                        for h in self.handlers.iter() {
-                            if h.matcher.matches(ev) {
-                                (h.action)(ev, &ctx, out);
-                            }
-                        }
-                    }
-                }
-
-                // 4. Transition evaluation — first match wins. Arc::clone is a
+                // 3. Transition evaluation — first match wins. Arc::clone is a
                 //    single atomic refcount bump — no heap allocation.
                 for t in scene.transitions.iter() {
                     if t.condition.eval(&ctx) {
@@ -279,8 +357,6 @@ impl Play {
                     }
                 }
             }
-
-            play_queue_dispatched = true;
         }
     }
 
@@ -314,8 +390,15 @@ impl Play {
 
         self.queue.clear();
 
-        if let Some(rec) = self.pending_transition.take() {
-            self.apply_transition(rec);
+        // Drain pending transitions in scheduling order. Each apply_transition
+        // mutates active_leaves/history/scene state; subsequent transitions
+        // see the post-mutation HSM, which matches the "FIFO, in order" semantic.
+        if !self.pending_transitions.is_empty() {
+            let drained: SmallVec<[TransitionRecord; 4]> =
+                self.pending_transitions.drain(..).collect();
+            for rec in drained {
+                self.apply_transition(rec);
+            }
         }
     }
 
@@ -452,6 +535,7 @@ impl Play {
 // `&self` / `&mut self` method boundaries.
 
 /// Write the ancestor chain [root → … → leaf] into `out` (cleared first).
+/// `by_id` must be sorted by SceneId (Play::instantiate guarantees this).
 fn ancestors_into_fields(
     scenes: &Arena<SceneTag, Scene>,
     by_id:  &ThinVec<(SceneId, SceneHandle)>,
@@ -465,7 +549,7 @@ fn ancestors_into_fields(
         match scenes[cur].parent {
             None => break,
             Some(pid) => {
-                match by_id.iter().find(|(k, _)| *k == pid).map(|(_, h)| *h) {
+                match by_id.binary_search_by_key(&pid, |(k, _)| *k).ok().map(|i| by_id[i].1) {
                     Some(ph) => cur = ph,
                     None     => break,
                 }

@@ -222,6 +222,18 @@ impl World {
         let mut effects = std::mem::take(&mut self.tick_effects);
         effects.clear();
 
+        // Pass 0 — emit the per-tick `Event::Tick { dt }` into every play queue
+        // so EventMatcher::Tick handlers actually fire (was previously dead).
+        for level in self.levels.values_mut() {
+            for stage in level.stages.values_mut() {
+                if let Some(play) = stage.play.as_mut() {
+                    play.queue.push(
+                        crate::resource_manager::event_manager::Event::Tick { dt },
+                    );
+                }
+            }
+        }
+
         // Pass 2-prelude: drain Mealy effects from the previous tick's transitions.
         for level in self.levels.values_mut() {
             level.drain_pending_mealy(effects.as_vec_mut());
@@ -338,10 +350,10 @@ impl World {
                     && let Some(stage) = level.stages.get_mut(stage_h)
                     && let Some(play) = stage.play.as_mut()
                 {
-                    // Last-write-wins if multiple transitions schedule
-                    // in the same tick; pass 3 will pick this one.
-                    play.pending_transition =
-                        Some(crate::resource_manager::event_manager::TransitionRecord {
+                    // Multiple transitions scheduled in the same tick are
+                    // applied in FIFO order by post_tick_bookkeeping.
+                    play.pending_transitions.push(
+                        crate::resource_manager::event_manager::TransitionRecord {
                             source, target, mealy,
                         });
                 }

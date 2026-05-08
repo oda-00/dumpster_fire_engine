@@ -280,13 +280,14 @@ impl Stage {
         troupe: crate::resource_manager::event_manager::TroupeId,
         delta: Affine3A,
     ) {
-        // Disjoint-field borrow: we mutate `cue_scratch` while reading `play`.
+        // Disjoint-field borrow: we mutate `cue_scratch` while reading/mutating `play`.
         let Self { play, cue_scratch, locals, dirty_flags, dirty_actors, .. } = self;
+        let is_identity = delta == Affine3A::IDENTITY;
 
         // Static-troupe fast path: if the script never moves this troupe AND
         // this particular cue's delta is identity, the only observable effect
         // would be a redundant dirty mark. Skip the whole walk.
-        if delta == Affine3A::IDENTITY
+        if is_identity
             && let Some(play) = play.as_ref()
             && play.static_troupes.contains(&troupe)
         {
@@ -295,6 +296,13 @@ impl Stage {
 
         cue_scratch.clear();
 
+        // TODO: Condition::ActorMovedThisTick (scene.rs) reads ActiveActor.cued,
+        // but nothing currently sets it. Setting it here would mean mutating
+        // every troupe member's ActiveActor every tick — measured ~5MB/tick of
+        // extra cache traffic at xlarge scales. Until ActorMovedThisTick has
+        // a real consumer, leave `cued` dead. When wiring it up, prefer a
+        // tick-local Vec<ActorId> on the Stage that the condition consults,
+        // rather than mutating per-actor state in the cue hot path.
         if let Some(play) = play.as_ref() {
             for &leaf in play.active_leaves.iter() {
                 let scene = &play.scenes[leaf];
@@ -308,7 +316,7 @@ impl Stage {
 
         // Identity short-circuit: ambient cues that re-publish the current
         // pose still want every member marked dirty/cued, but pay no math.
-        if delta == Affine3A::IDENTITY {
+        if is_identity {
             apply_identity_block_soa(locals, dirty_flags, dirty_actors, cue_scratch);
         } else {
             apply_delta_block_soa(locals, dirty_flags, dirty_actors, cue_scratch, delta);
@@ -376,6 +384,12 @@ fn propagate_one(
 ) {
     let idx = actor_h.idx as usize;
     if idx >= cap { return }
+    // Note: the `actors.get_mut` below gates sub-entity composition behind a
+    // generation check. The two SoA writes that follow execute unconditionally,
+    // which is intentional: in normal operation `dirty_actors` only contains
+    // live handles (spawn pushes, despawn drops). The pathological case (a
+    // stale handle stranded in dirty_actors) writes correct data to the slot
+    // because spawn_actor overwrites `locals[idx]` before any tick can read it.
     let actor_world = locals[idx];
     worlds[idx] = actor_world;
     dirty_flags[idx] = false;

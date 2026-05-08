@@ -69,8 +69,12 @@ impl<Tag, T> Arena<Tag, T> {
         if slot.generation != h.generation { return None; }
         let val = slot.val.take()?;
         // Increment generation so any surviving copies of h are now stale.
-        slot.generation = NonZeroU32::new(slot.generation.get().wrapping_add(1))
-            .unwrap_or(NonZeroU32::new(1).unwrap());
+        // On overflow we wrap to NonZeroU32::MIN+1 (=2) so we never collide with
+        // the initial generation of fresh slots (=1) — preserves the invariant
+        // that stale handles never validate, even after 2^32 remove cycles.
+        slot.generation = slot.generation.checked_add(1).unwrap_or_else(|| {
+            NonZeroU32::new(2).expect("2 is non-zero")
+        });
         self.free.push(h.idx);
         Some(val)
     }
@@ -126,6 +130,8 @@ impl<T> Copy for Id<T> {}
 impl<T> Clone for Id<T> { fn clone(&self) -> Self { *self } }
 impl<T> PartialEq for Id<T> { fn eq(&self, o: &Self) -> bool { self.0 == o.0 } }
 impl<T> Eq for Id<T> {}
+impl<T> PartialOrd for Id<T> { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) } }
+impl<T> Ord for Id<T> { fn cmp(&self, o: &Self) -> std::cmp::Ordering { self.0.cmp(&o.0) } }
 impl<T> Hash for Id<T> { fn hash<H: Hasher>(&self, h: &mut H) { self.0.hash(h) } }
 impl<T> fmt::Debug for Id<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "Id({})", self.0) }
