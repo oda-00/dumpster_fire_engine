@@ -1,3 +1,4 @@
+pub mod asset_manager;
 pub mod component;
 pub mod manager;
 pub mod world_manager;
