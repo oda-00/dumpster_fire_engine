@@ -432,7 +432,7 @@ fn main() {
 
     let mut player_h: Option<ActorHandle> = None;
     for (y, row) in MAP.iter().enumerate() {
-        for (x, ch) in row.chars().enumerate() {w
+        for (x, ch) in row.chars().enumerate() {
             let (xi, yi) = (x as i32, y as i32);
             match ch {
                 '+' => spawn_wall(&mut world, lh, sh, &mut id, xi, yi),
