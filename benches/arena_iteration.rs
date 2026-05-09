@@ -1,3 +1,4 @@
+read al of it
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use slotmap::{DenseSlotMap, SlotMap, new_key_type};
 

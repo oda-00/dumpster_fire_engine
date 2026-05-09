@@ -24,6 +24,10 @@ harness = false
 name = "game_tick"
 harness = false
 
+[[bench]]
+name = "isolated_functions"
+harness = false
+
 [profile.release]
 lto           = "fat"
 codegen-units = 1
