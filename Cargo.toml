@@ -18,18 +18,12 @@ iai-callgrind = "0.14"
 name = "component_storage"
 harness = false
 
-[[bench]]
-name = "arena_iteration"
-harness = false
 
 [[bench]]
 name = "game_tick"
 harness = false
 
 [[bench]]
-<<<<<<< HEAD
-name = "isolated_functions"
-=======
 name = "arena_micro"
 harness = false
 
@@ -67,7 +61,6 @@ harness = false
 
 [[bench]]
 name = "iai_critical"
->>>>>>> origin/claude/add-pipeline-struct-1qG2K
 harness = false
 
 [profile.release]
