@@ -474,12 +474,40 @@ pub enum BtStatus { Running, Success, Failure }
 #[derive(Clone, Copy)]
 pub enum ParallelPolicy { AllSucceed, AnySucceed, AllComplete }
 
-#[derive(Clone)]
 pub enum Decorator {
     Inverter,
     Guard(Condition),
     UntilSuccess,
-    Cooldown(f32),
+    /// Gates the child: skips it while fewer than `duration` seconds have
+    /// elapsed since the child last returned `Success`. `last_success_at`
+    /// stores the scene-elapsed time of the most recent success as f32 bits
+    /// in an AtomicU32 (same interior-mutability pattern as `Repeat::current`
+    /// so the read-only pass-1 walk can update it without an exclusive borrow).
+    /// Initialised to `NEG_INFINITY` so the first tick always passes the gate.
+    Cooldown { duration: f32, last_success_at: AtomicU32 },
+}
+
+impl Decorator {
+    pub fn cooldown(duration: f32) -> Self {
+        Decorator::Cooldown {
+            duration,
+            last_success_at: AtomicU32::new(f32::NEG_INFINITY.to_bits()),
+        }
+    }
+}
+
+impl Clone for Decorator {
+    fn clone(&self) -> Self {
+        match self {
+            Decorator::Inverter     => Decorator::Inverter,
+            Decorator::Guard(c)     => Decorator::Guard(c.clone()),
+            Decorator::UntilSuccess => Decorator::UntilSuccess,
+            Decorator::Cooldown { duration, last_success_at } => Decorator::Cooldown {
+                duration:        *duration,
+                last_success_at: AtomicU32::new(last_success_at.load(Ordering::Relaxed)),
+            },
+        }
+    }
 }
 
 pub enum BtNode {
@@ -612,7 +640,17 @@ impl BtNode {
                     BtStatus::Success => BtStatus::Success,
                     _ => BtStatus::Running,
                 },
-                Decorator::Cooldown(_s) => child.tick(ctx, out),
+                Decorator::Cooldown { duration, last_success_at } => {
+                    let last = f32::from_bits(last_success_at.load(Ordering::Relaxed));
+                    if ctx.elapsed - last < *duration {
+                        return BtStatus::Running;
+                    }
+                    let status = child.tick(ctx, out);
+                    if status == BtStatus::Success {
+                        last_success_at.store(ctx.elapsed.to_bits(), Ordering::Relaxed);
+                    }
+                    status
+                }
             },
             BtNode::Leaf(op) => {
                 if op.once && op.fired.load(Ordering::Relaxed) {
@@ -643,7 +681,12 @@ impl BtNode {
                 current.store(0, Ordering::Relaxed);
                 child.reset();
             }
-            BtNode::Decorator { child, .. } => child.reset(),
+            BtNode::Decorator { decorator, child } => {
+                if let Decorator::Cooldown { last_success_at, .. } = decorator {
+                    last_success_at.store(f32::NEG_INFINITY.to_bits(), Ordering::Relaxed);
+                }
+                child.reset();
+            }
             BtNode::Leaf(op) => op.fired.store(false, Ordering::Relaxed),
         }
     }
