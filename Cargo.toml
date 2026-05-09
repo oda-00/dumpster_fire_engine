@@ -11,6 +11,8 @@ rayon    = "1"
 [dev-dependencies]
 slotmap = "1"
 criterion = "0.5"
+divan = "0.1"
+iai-callgrind = "0.14"
 
 [[bench]]
 name = "component_storage"
@@ -25,7 +27,47 @@ name = "game_tick"
 harness = false
 
 [[bench]]
+<<<<<<< HEAD
 name = "isolated_functions"
+=======
+name = "arena_micro"
+harness = false
+
+[[bench]]
+name = "transform_kernels"
+harness = false
+
+[[bench]]
+name = "condition_eval"
+harness = false
+
+[[bench]]
+name = "bt_nodes"
+harness = false
+
+[[bench]]
+name = "effect_dispatch"
+harness = false
+
+[[bench]]
+name = "play_paths"
+harness = false
+
+[[bench]]
+name = "cache_ops"
+harness = false
+
+[[bench]]
+name = "asset_pipeline"
+harness = false
+
+[[bench]]
+name = "event_dispatch"
+harness = false
+
+[[bench]]
+name = "iai_critical"
+>>>>>>> origin/claude/add-pipeline-struct-1qG2K
 harness = false
 
 [profile.release]
