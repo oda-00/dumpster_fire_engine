@@ -15,7 +15,7 @@ impl PartialOrd for QueueEntry { fn partial_cmp(&self, o: &Self) -> Option<Order
 impl Ord        for QueueEntry { fn cmp(&self, o: &Self) -> Ordering { self.priority.cmp(&o.priority) } }
 
 pub struct Pipeline {
-    pub pipes:    ThinVec<AssetArena>,
+    pub pipes:    ThinVec<>,
     pub fetchers: ThinVec<AssetArena>,
     pub senders:  ThinVec<AssetArena>,
     pub queue:    BinaryHeap<QueueEntry>,

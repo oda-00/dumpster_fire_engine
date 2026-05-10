@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use thin_vec::ThinVec;
+
 use crate::resource_manager::manager::{Arena, Handle, Id};
 
 // ── Arena tag / handles ─────────────────────────────────────────────────────
@@ -15,11 +17,11 @@ pub type AssetId = Id<AssetMarker>;
 
 #[repr(u8)]
 pub enum AssetType {
-    Texture   = 0,
+    Texture   = 0, //texture assets: images, spritesheets, etc.
     TitleText = 1,
-    Visual    = 2,
+    Visual    = 2, //visual assets: shaders, materials, images, etc.
     Audio     = 3,
-    Mesh      = 4,
+    Mesh     = 4, //3D visual assets
 }
 
 impl AssetType {
@@ -58,23 +60,26 @@ pub struct Asset {
 
 pub struct Texture   { pub path: Arc<str> }
 pub struct TitleText { pub text: Arc<str> }
-// Visual: shader/material description; Mesh: raw geometry.
 pub struct Visual    { pub path: Arc<str> }
-pub struct Mesh      { pub path: Arc<str> }
+pub struct Mesh       { pub path: Arc<str> }
 pub struct Audio     { pub path: Arc<str> }
 
 // ── Arena ───────────────────────────────────────────────────────────────────
 
 pub struct AssetArena {
     pub assets: Arena<AssetTag, Asset>,
-    pub cache:  [Vec<AssetHandle>; AssetType::COUNT],
+    pub cache:  [ThinVec<AssetHandle>; AssetType::COUNT],
 }
 
 impl AssetArena {
     pub fn new() -> Self {
         Self {
             assets: Arena::new(),
-            cache:  std::array::from_fn(|_| Vec::new()),
+            cache:  std::array::from_fn(|_| ThinVec::new()),
         }
+    }
+
+    pub fn id(&self, handle: AssetHandle) -> Option<AssetId> {
+        self.assets.get(handle).map(|asset| asset.id)
     }
 }
