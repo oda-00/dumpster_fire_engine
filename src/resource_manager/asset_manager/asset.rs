@@ -3,34 +3,40 @@ use thin_vec::ThinVec;
 
 use crate::resource_manager::manager::{Arena, Handle, Id};
 
-// ── Arena tag / handles ─────────────────────────────────────────────────────
-
-#[derive(Copy, Clone, PartialEq, Eq)] pub struct AssetTag;
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct AssetTag;
 pub type AssetHandle = Handle<AssetTag>;
-
-// ── Database ID ─────────────────────────────────────────────────────────────
 
 pub struct AssetMarker;
 pub type AssetId = Id<AssetMarker>;
 
-// ── Discriminant enum (array index) ────────────────────────────────────────
-
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AssetType {
-    Texture   = 0, //texture assets: images, spritesheets, etc.
+    Texture = 0,
     TitleText = 1,
-    Visual    = 2, //visual assets: shaders, materials, images, etc.
-    Audio     = 3,
-    Mesh     = 4, //3D visual assets
+    Visual = 2,
+    Audio = 3,
+    Mesh = 4,
 }
 
 impl AssetType {
-    pub const COUNT: usize = 5;
-    pub const fn index(self) -> usize { self as usize }
+    pub const ALL: [AssetType; 5] = [
+        AssetType::Texture,
+        AssetType::TitleText,
+        AssetType::Visual,
+        AssetType::Audio,
+        AssetType::Mesh,
+    ];
+
+    pub const COUNT: usize = Self::ALL.len();
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
 }
 
-// ── Data-carrying enum ──────────────────────────────────────────────────────
-
+#[derive(Debug, Clone)]
 pub enum AssetKind {
     Texture(Texture),
     TitleText(TitleText),
@@ -42,44 +48,88 @@ pub enum AssetKind {
 impl AssetKind {
     pub fn asset_type(&self) -> AssetType {
         match self {
-            AssetKind::Texture(_)   => AssetType::Texture,
+            AssetKind::Texture(_) => AssetType::Texture,
             AssetKind::TitleText(_) => AssetType::TitleText,
-            AssetKind::Visual(_)    => AssetType::Visual,
-            AssetKind::Audio(_)     => AssetType::Audio,
-            AssetKind::Mesh(_)      => AssetType::Mesh,
+            AssetKind::Visual(_) => AssetType::Visual,
+            AssetKind::Audio(_) => AssetType::Audio,
+            AssetKind::Mesh(_) => AssetType::Mesh,
         }
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Asset {
-    pub id:   AssetId,
-    pub data: AssetKind,
+    id: AssetId,
+    data: AssetKind,
 }
 
-// ── Asset subtypes ──────────────────────────────────────────────────────────
+impl Asset {
+    pub(super) fn new(id: AssetId, data: AssetKind) -> Self {
+        Self { id, data }
+    }
 
-pub struct Texture   { pub path: Arc<str> }
-pub struct TitleText { pub text: Arc<str> }
-pub struct Visual    { pub path: Arc<str> }
-pub struct Mesh       { pub path: Arc<str> }
-pub struct Audio     { pub path: Arc<str> }
+    pub fn id(&self) -> AssetId {
+        self.id
+    }
 
-// ── Arena ───────────────────────────────────────────────────────────────────
+    pub fn data(&self) -> &AssetKind {
+        &self.data
+    }
+
+    pub fn asset_type(&self) -> AssetType {
+        self.data.asset_type()
+    }
+
+    pub(super) fn replace_kind(&mut self, kind: AssetKind) -> AssetKind {
+        std::mem::replace(&mut self.data, kind)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Texture {
+    pub path: Arc<str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TitleText {
+    pub text: Arc<str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Visual {
+    pub path: Arc<str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Mesh {
+    pub path: Arc<str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Audio {
+    pub path: Arc<str>,
+}
 
 pub struct AssetArena {
-    pub assets: Arena<AssetTag, Asset>,
-    pub cache:  [ThinVec<AssetHandle>; AssetType::COUNT],
+    pub(super) assets: Arena<AssetTag, Asset>,
+    pub(super) cache: [ThinVec<AssetHandle>; AssetType::COUNT],
 }
 
 impl AssetArena {
     pub fn new() -> Self {
         Self {
             assets: Arena::new(),
-            cache:  std::array::from_fn(|_| ThinVec::new()),
+            cache: std::array::from_fn(|_| ThinVec::new()),
         }
     }
 
     pub fn id(&self, handle: AssetHandle) -> Option<AssetId> {
-        self.assets.get(handle).map(|asset| asset.id)
+        self.assets.get(handle).map(Asset::id)
+    }
+}
+
+impl Default for AssetArena {
+    fn default() -> Self {
+        Self::new()
     }
 }

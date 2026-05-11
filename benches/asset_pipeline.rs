@@ -3,15 +3,14 @@
 //
 //   cargo bench --bench asset_pipeline
 
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use dumpster_fire_engine::resource_manager::asset_manager::{
+    AssetArena, AssetHandle, AssetId, AssetKind, AssetSource, AssetType, Audio, Mesh, Pipeline,
+    QueueEntry, Texture, TitleText, Visual,
+};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use dumpster_fire_engine::resource_manager::asset_manager::{
-    AssetArena, AssetHandle, AssetId, AssetKind, AssetType,
-    Texture, TitleText, Visual, Mesh, Audio,
-    Pipeline, QueueEntry,
-};
 
 // ── AssetArena ─────────────────────────────────────────────────────────────
 
@@ -108,18 +107,19 @@ fn bench_pipeline_queue(c: &mut Criterion) {
         b.iter(|| {
             let mut p = Pipeline::new();
             for &pri in &[5u32, 3, 9, 1, 7] {
-                p.queue.push(QueueEntry {
-                    priority: pri,
-                    id: AssetId::new(pri as i64),
-                    handle: AssetHandle {
+                p.push_queue(QueueEntry::new(
+                    pri,
+                    AssetId::new(pri as i64),
+                    AssetSource::Fetcher(0),
+                    AssetHandle {
                         idx: 0,
                         generation: std::num::NonZeroU32::new(1).unwrap(),
                         _tag: std::marker::PhantomData,
                     },
-                });
+                ));
             }
             let mut order: Vec<u32> = Vec::with_capacity(5);
-            while let Some(e) = p.queue.pop() {
+            while let Some(e) = p.pop_queue() {
                 order.push(e.priority);
             }
             assert_eq!(order, vec![9, 7, 5, 3, 1]);
@@ -134,18 +134,21 @@ fn bench_pipeline_queue(c: &mut Criterion) {
             b.iter(|| {
                 let mut p = Pipeline::with_capacity(n);
                 for i in 0..n {
-                    p.queue.push(QueueEntry {
-                        priority: ((i * 2654435761usize) & 0xFFFF_FFFF) as u32,
-                        id: AssetId::new(i as i64),
-                        handle: AssetHandle {
+                    p.push_queue(QueueEntry::new(
+                        ((i * 2654435761usize) & 0xFFFF_FFFF) as u32,
+                        AssetId::new(i as i64),
+                        AssetSource::Fetcher(0),
+                        AssetHandle {
                             idx: i as u32,
                             generation: std::num::NonZeroU32::new(1).unwrap(),
                             _tag: std::marker::PhantomData,
                         },
-                    });
+                    ));
                 }
                 let mut count = 0u64;
-                while p.queue.pop().is_some() { count += 1; }
+                while p.pop_queue().is_some() {
+                    count += 1;
+                }
                 black_box(count);
             });
         });
@@ -170,7 +173,9 @@ fn bench_baseline_sorted_vec(c: &mut Criterion) {
                     h.push(((i * 2654435761usize) & 0xFFFF_FFFF) as u32);
                 }
                 let mut count = 0u64;
-                while h.pop().is_some() { count += 1; }
+                while h.pop().is_some() {
+                    count += 1;
+                }
                 black_box(count);
             });
         });
@@ -183,7 +188,9 @@ fn bench_baseline_sorted_vec(c: &mut Criterion) {
                     h.push(Reverse(((i * 2654435761usize) & 0xFFFF_FFFF) as u32));
                 }
                 let mut count = 0u64;
-                while h.pop().is_some() { count += 1; }
+                while h.pop().is_some() {
+                    count += 1;
+                }
                 black_box(count);
             });
         });
@@ -197,7 +204,9 @@ fn bench_baseline_sorted_vec(c: &mut Criterion) {
                 }
                 v.sort_unstable_by(|a, b| b.cmp(a)); // max-first
                 let mut count = 0u64;
-                for _ in v.drain(..) { count += 1; }
+                for _ in v.drain(..) {
+                    count += 1;
+                }
                 black_box(count);
             });
         });
