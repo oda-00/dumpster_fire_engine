@@ -73,7 +73,9 @@ impl Level {
         let Some(stage) = self.stages.get_mut(stage_h) else { return };
         stage.despawn_actor(actor_h);
         for cache_slot in self.cache.iter_mut() {
-            cache_slot.retain(|(sh, ah)| !(*sh == stage_h && *ah == actor_h));
+                if let Some(pos) = cache_slot.iter().position(|(sh, ah)| *sh == stage_h && *ah == actor_h) {
+                    cache_slot.swap_remove(pos);
+                }
         }
     }
 
@@ -89,7 +91,12 @@ impl Level {
         // where the actor no longer appears in Stage's cache for that component.
         for ct_idx in 0..ComponentType::COUNT {
             if !stage.cache[ct_idx].contains(&actor_h) {
-                self.cache[ct_idx].retain(|(sh, ah)| !(*sh == stage_h && *ah == actor_h));
+               if let Some(pos) = self.cache[ct_idx]
+            .iter()
+            .position(|(sh, ah)| *sh == stage_h && *ah == actor_h)
+        {
+            self.cache[ct_idx].swap_remove(pos);
+        }
             }
         }
     }
