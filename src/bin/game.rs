@@ -8,7 +8,9 @@
 
 use dumpster_fire_engine::resource_manager::*;
 use glam::{Affine3A, Vec3};
-use std::io::{self, Write};
+use std::{io::{self, Write}, sync::Arc};
+
+
 
 const MAP: [&str; 10] = [
     "++++++++++++",
@@ -41,7 +43,7 @@ fn tag<'a>(world: &'a World, lh: LevelHandle, sh: StageHandle, ah: ActorHandle) 
     let actor = &world.levels[lh].stages[sh].actors[ah];
     for sub in actor.sub_entities.iter().flatten() {
         if let Some(Component::Utility(u)) = sub.component(ComponentType::Utility) {
-            return u.name.as_str();
+            return u.name.as_ref();
         }
     }
     ""
@@ -83,8 +85,8 @@ fn mutate_phys(
 fn gold_value(world: &World, lh: LevelHandle, sh: StageHandle, ah: ActorHandle) -> i32 {
     let actor = &world.levels[lh].stages[sh].actors[ah];
     for sub in actor.sub_entities.iter().flatten() {
-        if let Some(Component::Utility(u)) = sub.component(ComponentType::Utility) {
-            return u.description.parse().unwrap_or(0);
+        if let ActorType::Item(item) = &sub.actor_type {
+            return item.quantity.0 as i32;
         }
     }
     0
@@ -158,7 +160,7 @@ fn spawn_wall(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64,
         vi,
         UtilityComponent {
             name: "wall".into(),
-            description: String::new(),
+            description: Arc::from(""),
         },
     );
 }
@@ -208,7 +210,7 @@ fn spawn_player(
         vi,
         UtilityComponent {
             name: "player".into(),
-            description: String::new(),
+            description: Arc::from(""),
         },
     );
     ah
@@ -251,7 +253,7 @@ fn spawn_enemy(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64
         vi,
         UtilityComponent {
             name: "enemy".into(),
-            description: String::new(),
+            description: Arc::from(""),
         },
     );
 }
@@ -274,22 +276,26 @@ fn spawn_gold(
             sh,
             ah,
             ActorType::Item(Item {
-                id: ItemId::new(next_id(id)),
-                name: "gold".into(),
-                visible: true,
-                physical: false,
-            }),
+                id:          ItemId::new(next_id(id)),
+                name:        "gold".into(),
+                quantity:    (value as u32, value as u32, 0), // current/max/stack
+                description: Arc::from("A pile of gold coins"),
+                stackable:   false,
+                visible:     true,
+                physical:    false,
+        }),
             Affine3A::IDENTITY,
         )
         .unwrap();
-    world.add_component(
+        
+        world.add_component(
         lh,
         sh,
         ah,
         vi,
         UtilityComponent {
-            name: "gold".into(),
-            description: value.to_string(),
+            name:        "gold".into(),
+            description: Arc::from(""),
         },
     );
 }
@@ -319,7 +325,7 @@ fn spawn_exit(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64,
         vi,
         UtilityComponent {
             name: "exit".into(),
-            description: String::new(),
+            description: Arc::from(""),
         },
     );
 }
@@ -363,7 +369,7 @@ fn spawn_meta(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64)
         vi,
         UtilityComponent {
             name: "meta".into(),
-            description: String::new(),
+            description: Arc::from(""),
         },
     );
     ah
@@ -568,4 +574,3 @@ fn main() {
         }
     }
 }
- 

@@ -104,9 +104,13 @@ fn build_world(scale: Scale) -> (World, Vec<StageHandles>) {
                 let ivi = world.spawn_sub_entity(
                     lh, sh, ah,
                     ActorType::Item(Item {
-                        id: ItemId::new(actor_id_counter),
-                        name: "trinket".into(),
-                        visible: true, physical: false,
+                        id:          ItemId::new(actor_id_counter),
+                        name:        "trinket".into(),
+                        quantity:    (1, 1, 1),
+                        description: Arc::from(""),
+                        stackable:   false,
+                        visible:     true,
+                        physical:    false,
                     }),
                     Affine3A::from_translation(Vec3::new(0.0, 1.0, 0.0)),
                 ).unwrap();

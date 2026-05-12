@@ -214,6 +214,9 @@ pub struct Environment {
 pub struct Item {
     pub id:       ItemId,
     pub name:     Arc<str>,
+    pub quantity: (u32, u32, u32), // (current, max, stack_size)
+    pub description: Arc<str>,
+    pub stackable: bool,
     pub visible:  bool,
     pub physical: bool,
 }

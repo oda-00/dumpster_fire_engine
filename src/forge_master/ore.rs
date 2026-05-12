@@ -1,6 +1,7 @@
 use ash::vk;
 use std::mem::size_of;
 use std::path::PathBuf;
+use thin_vec::ThinVec;
 
 use super::master::{ForgeError, ForgeResult};
 
@@ -68,13 +69,13 @@ impl ForgeVertex {
 
 #[derive(Debug, Clone)]
 pub struct MeshOre {
-    pub vertices: Vec<ForgeVertex>,
-    pub indices: Vec<u32>,
+    pub vertices: ThinVec<ForgeVertex>,
+    pub indices: ThinVec<u32>,
 }
 
 impl MeshOre {
-    pub fn new(vertices: Vec<ForgeVertex>, indices: Vec<u32>) -> Self {
-        Self { vertices, indices }
+    pub fn new(vertices: ThinVec<ForgeVertex>, indices: Vec<u32>) -> Self {
+        Self { vertices, indices: indices.into() }
     }
 }
 

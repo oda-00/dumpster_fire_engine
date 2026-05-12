@@ -1,6 +1,7 @@
 use ash::vk;
 use std::error::Error;
 use std::fmt;
+use thin_vec::ThinVec;
 
 use super::forge::{Forge, write_forge_descriptors};
 use super::ingot::Ingot;
@@ -63,7 +64,7 @@ pub struct ForgeMaster {
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     descriptor_pool: vk::DescriptorPool,
     fence: vk::Fence,
-    forges: Vec<Forge>,
+    forges: ThinVec<Forge>,
 }
 
 impl ForgeMaster {
@@ -94,7 +95,7 @@ impl ForgeMaster {
             memory_properties,
             descriptor_pool,
             fence,
-            forges: Vec::new(),
+            forges: ThinVec::new(),
         })
     }
 
@@ -210,7 +211,7 @@ impl ForgeMaster {
 
     pub unsafe fn destroy(&mut self) {
         for forge in &mut self.forges {
-            unsafe { forge.destroy(&self.device) };
+            unsafe { forge.destroy(&self.device); }
         }
         self.forges.clear();
         unsafe {

@@ -45,12 +45,15 @@ fn main() {
 
     let sword_vi = world.spawn_sub_entity(
         lh, sh, ah,
-        ActorType::Item(Item {
-            id:       ItemId::new(7),
-            name:     "iron sword".into(),
-            visible:  true,
-            physical: true,
-        }),
+       ActorType::Item(Item {
+            id:          ItemId::new(7),
+            name:        "iron sword".into(),
+            quantity:    (1, 1, 1),
+            description: Arc::from(""),
+            stackable:   false,
+            visible:     true,
+            physical:    true,
+}),
         Affine3A::from_scale_rotation_translation(
             glam::Vec3::new(0.2, 1.0, 0.2),
             glam::Quat::IDENTITY,

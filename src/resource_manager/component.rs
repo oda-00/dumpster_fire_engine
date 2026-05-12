@@ -2,6 +2,7 @@ mod sealed {
     pub trait Sealed {}
 }
 
+use std::sync::Arc;
 pub trait ComponentData: sealed::Sealed {
     const TYPE: ComponentType;
 }
@@ -101,8 +102,8 @@ pub struct CollisionComponent {
 
 #[derive(Debug)]
 pub struct UtilityComponent {
-    pub name:        String,
-    pub description: String,
+    pub name:        Arc<str>,
+    pub description: Arc<str>,
 }
 
 #[derive(Debug)]

@@ -155,9 +155,14 @@ fn bench_apply_effect(c: &mut Criterion) {
             w.spawn_sub_entity(
                 lh, sh, ah,
                 ActorType::Item(Item {
-                    id: ItemId::new(next_id), name: "i".into(),
-                    visible: true, physical: false,
-                }),
+                    id:          ItemId::new(next_id),
+                    name:        "i".into(),
+                    quantity:    (1, 1, 1),
+                    description: Arc::from(""),
+                    stackable:   false,
+                    visible:     true,
+                    physical:    false,
+        }),
                 Affine3A::IDENTITY,
             );
             w.apply_effect(Effect::DespawnSubEntity {

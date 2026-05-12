@@ -9,6 +9,7 @@
 use divan::{black_box, Bencher};
 use glam::Affine3A;
 use dumpster_fire_engine::resource_manager::*;
+use std::sync::Arc;
 
 fn main() { divan::main(); }
 
@@ -191,8 +192,13 @@ fn stage_despawn_subentity_partial_evict(b: Bencher) {
         let ivi = w.spawn_sub_entity(
             lh, sh, ah,
             ActorType::Item(Item {
-                id: ItemId::new(1), name: "i".into(),
-                visible: true, physical: false,
+                id:          ItemId::new(1),
+                name:        "i".into(),
+                quantity:    (1, 1, 1),
+                description: Arc::from(""),
+                stackable:   false,
+                visible:     true,
+                physical:    false,
             }),
             Affine3A::IDENTITY,
         ).unwrap();

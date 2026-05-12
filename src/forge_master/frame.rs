@@ -1,19 +1,21 @@
 use std::path::PathBuf;
+use thin_vec::ThinVec;
+use std::sync::Arc;
 
 use super::ingot::Ingot;
 use super::master::{ForgeMaster, ForgeResult};
 use super::ore::{IngotSpec, Ore, OreKind};
 
-pub struct ForgeFramePlan {
-    pub name: String,
-    pub ores: Vec<Ore>,
+pub struct FramePlan {
+    pub name: Arc<str>,
+    pub ores: ThinVec<Ore>,
 }
 
-impl ForgeFramePlan {
-    pub fn new(name: impl Into<String>) -> Self {
+impl FramePlan {
+    pub fn new(name: impl Into<Arc<str>>) -> Self {
         Self {
             name: name.into(),
-            ores: Vec::new(),
+            ores: ThinVec::new(),
         }
     }
 
@@ -21,8 +23,8 @@ impl ForgeFramePlan {
         self.ores.push(ore);
     }
 
-    pub fn refine(self, master: &mut ForgeMaster) -> ForgeResult<ForgeFrame> {
-        let mut frame = ForgeFrame::new(self.name);
+    pub fn refine(self, master: &mut ForgeMaster) -> ForgeResult<Frame> {
+        let mut frame = Frame::new(self.name);
         for ore in self.ores {
             frame.ingots.push(master.refine(ore)?);
         }
@@ -30,16 +32,16 @@ impl ForgeFramePlan {
     }
 }
 
-pub struct ForgeFrame {
-    pub name: String,
-    pub ingots: Vec<Ingot>,
+pub struct Frame {
+    pub name: Arc<str>,
+    pub ingots: ThinVec<Ingot>,
 }
 
-impl ForgeFrame {
-    pub fn new(name: impl Into<String>) -> Self {
+impl Frame {
+    pub fn new(name: impl Into<Arc<str>>) -> Self {
         Self {
             name: name.into(),
-            ingots: Vec::new(),
+            ingots: ThinVec::new(),
         }
     }
 
@@ -47,13 +49,13 @@ impl ForgeFrame {
         self.ingots.push(ingot);
     }
 
-    pub fn manifest(&self) -> ForgeFrameManifest {
-        ForgeFrameManifest {
+    pub fn manifest(&self) -> FrameManifest {
+        FrameManifest {
             name: self.name.clone(),
             entries: self
                 .ingots
                 .iter()
-                .map(|ingot| ForgeFrameEntry {
+                .map(|ingot| FrameEntry {
                     kind: ingot.kind,
                     byte_len: ingot.as_bytes().len() as u64,
                     save_path: ingot.save_path.clone(),
@@ -71,13 +73,13 @@ impl ForgeFrame {
 }
 
 #[derive(Debug, Clone)]
-pub struct ForgeFrameManifest {
-    pub name: String,
-    pub entries: Vec<ForgeFrameEntry>,
+pub struct FrameManifest {
+    pub name: Arc<str>,
+    pub entries: ThinVec<FrameEntry>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ForgeFrameEntry {
+pub struct  FrameEntry {
     pub kind: OreKind,
     pub byte_len: u64,
     pub save_path: Option<PathBuf>,
@@ -85,13 +87,13 @@ pub struct ForgeFrameEntry {
 
 pub fn ore_for_buffer(
     kind: OreKind,
-    bytes: Vec<u8>,
+    bytes: ThinVec<u8>,
     output_size: ash::vk::DeviceSize,
     workgroups: [u32; 3],
 ) -> Ore {
     Ore::new(
         kind,
-        super::ore::OreInput::Bytes(bytes),
+        super::ore::OreInput::Bytes(bytes.to_vec()  ),
         IngotSpec::Buffer {
             size: output_size,
             save_path: None,

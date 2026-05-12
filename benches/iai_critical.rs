@@ -12,8 +12,9 @@
 //   Cycles (estimated)
 
 use iai_callgrind::{
-    library_benchmark, library_benchmark_group, main, black_box,
+    library_benchmark, library_benchmark_group, main,
 };
+use std::hint::black_box;
 use glam::Affine3A;
 use thin_vec::thin_vec;
 use dumpster_fire_engine::resource_manager::*;

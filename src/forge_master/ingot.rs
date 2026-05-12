@@ -3,6 +3,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use thin_vec::ThinVec;
+
 use super::master::ForgeResult;
 use super::ore::{
     ForgeBuffer, ForgeImage, IngotSpec, OreKind, non_zero_size, storage_buffer_readback_barrier,
@@ -16,12 +18,12 @@ pub enum IngotArtifact {
     Buffer {
         result: ForgeBuffer,
         readback: ForgeBuffer,
-        bytes: Vec<u8>,
+        bytes: ThinVec<u8>,
     },
     Image2d {
         result: ForgeImage,
         readback: ForgeBuffer,
-        bytes: Vec<u8>,
+        bytes: ThinVec<u8>,
         byte_size: vk::DeviceSize,
     },
 }
@@ -62,7 +64,7 @@ impl Ingot {
                     artifact: IngotArtifact::Buffer {
                         result,
                         readback,
-                        bytes: Vec::new(),
+                        bytes: ThinVec::new(),
                     },
                     save_path: save_path.clone(),
                 })
@@ -96,7 +98,7 @@ impl Ingot {
                     artifact: IngotArtifact::Image2d {
                         result,
                         readback,
-                        bytes: Vec::new(),
+                        bytes: ThinVec::new(),
                         byte_size,
                     },
                     save_path: save_path.clone(),
@@ -240,7 +242,7 @@ impl Ingot {
                 readback,
                 bytes,
             } => {
-                *bytes = readback.read_bytes(device, result.size)?;
+                *bytes = readback.read_bytes(device, result.size)?.into();
             }
             IngotArtifact::Image2d {
                 readback,
@@ -248,7 +250,7 @@ impl Ingot {
                 byte_size,
                 ..
             } => {
-                *bytes = readback.read_bytes(device, *byte_size)?;
+                *bytes = readback.read_bytes(device, *byte_size)?.into();
             }
         }
 

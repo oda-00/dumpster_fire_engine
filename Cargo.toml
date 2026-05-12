@@ -9,12 +9,13 @@ glam     = "0.29"
 rayon    = "1"
 ash = "0.38.0"
 sdl2 = "0.38.0"
+winit = "0.30.13"
 
 [dev-dependencies]
 slotmap = "1"
 criterion = "0.5"
 divan = "0.1"
-iai-callgrind = "0.14"
+iai-callgrind = "0.16.1"
 
 [[bench]]
 name = "component_storage"
