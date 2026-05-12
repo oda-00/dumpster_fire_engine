@@ -245,8 +245,8 @@ impl Stage {
         &self,
         dt: f32,
         world: &crate::resource_manager::world_manager::world::World,
-        sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
-        chain: &mut Vec<crate::resource_manager::event_manager::SceneHandle>,
+        sink: &mut ThinVec<crate::resource_manager::event_manager::Effect>,
+        chain: &mut ThinVec<crate::resource_manager::event_manager::SceneHandle>,
     ) {
         if let Some(play) = self.play.as_ref() {
             play.collect_effects(dt, world, sink, chain);
@@ -261,7 +261,7 @@ impl Stage {
 
     pub fn drain_pending_mealy(
         &mut self,
-        sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
+        sink: &mut ThinVec<crate::resource_manager::event_manager::Effect>,
     ) {
         if let Some(play) = self.play.as_mut() {
             play.drain_pending_mealy(sink);

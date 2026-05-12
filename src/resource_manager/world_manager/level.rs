@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use glam::Affine3A;
+use thin_vec::ThinVec;
 use crate::resource_manager::component::{Component, ComponentType};
 use crate::resource_manager::manager::{
     ActorHandle, ActorId, ActorType, Arena, Id, StageHandle, StageTag,
@@ -23,7 +24,7 @@ pub struct Level {
     pub name:   Arc<str>,
     pub stages: Arena<StageTag, Stage>,
     // cache[i] = (stage, actor) pairs where the actor has ≥1 sub-entity with ComponentType i
-    pub cache:  [Vec<(StageHandle, ActorHandle)>; ComponentType::COUNT],
+    pub cache:  [ThinVec<(StageHandle, ActorHandle)>; ComponentType::COUNT],
 }
 
 impl Level {
@@ -32,7 +33,7 @@ impl Level {
             id,
             name:   name.into(),
             stages: Arena::new(),
-            cache:  std::array::from_fn(|_| Vec::new()),
+            cache:  std::array::from_fn(|_| ThinVec::new()),
         }
     }
 
@@ -170,8 +171,8 @@ impl Level {
         &self,
         dt: f32,
         world: &crate::resource_manager::world_manager::world::World,
-        sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
-        chain: &mut Vec<crate::resource_manager::event_manager::SceneHandle>,
+        sink: &mut ThinVec<crate::resource_manager::event_manager::Effect>,
+        chain: &mut ThinVec<crate::resource_manager::event_manager::SceneHandle>,
     ) {
         for stage in self.stages.values() {
             stage.collect_effects(dt, world, sink, chain);
@@ -186,7 +187,7 @@ impl Level {
 
     pub fn drain_pending_mealy(
         &mut self,
-        sink: &mut Vec<crate::resource_manager::event_manager::Effect>,
+        sink: &mut ThinVec<crate::resource_manager::event_manager::Effect>,
     ) {
         for stage in self.stages.values_mut() {
             stage.drain_pending_mealy(sink);

@@ -68,7 +68,7 @@ fn make_events(n: usize) -> Vec<Event> {
 }
 
 fn make_handlers(m: usize) -> Vec<Handler> {
-    fn no_op(_: &Event, _: &EvalCtx<'_>, _: &mut Vec<Effect>) {}
+    fn no_op(_: &Event, _: &EvalCtx<'_>, _: &mut thin_vec::ThinVec<Effect>) {}
     (0..m).map(|i| Handler {
         matcher: match i % 5 {
             0 => EventMatcher::Tick,
@@ -97,7 +97,7 @@ fn handler_dispatch(b: Bencher, args: (usize, usize)) {
     world.propagate_transforms();
 
     let troupe_ids: Vec<TroupeId> = vec![];
-    let actors = Troupe(vec![]);
+    let actors = Troupe(thin_vec::ThinVec::new());
     let ctx = EvalCtx {
         world: &world, level_h: lh, stage_h: sh,
         scene_id: SceneId::new(1),
@@ -105,7 +105,7 @@ fn handler_dispatch(b: Bencher, args: (usize, usize)) {
         events_seen: &events, actors: &actors, troupes: &troupe_ids,
     };
 
-    let mut sink: Vec<Effect> = Vec::with_capacity(8);
+    let mut sink: thin_vec::ThinVec<Effect> = thin_vec::ThinVec::with_capacity(8);
     b.bench_local(|| {
         sink.clear();
         for ev in &events {
@@ -119,10 +119,10 @@ fn handler_dispatch(b: Bencher, args: (usize, usize)) {
     });
 }
 
-// ── Troupe iteration — iter_all() flattens nested Vec<Vec<ActiveActor>> ────
+// ── Troupe iteration — iter_all() flattens nested ThinVec<ThinVec<ActiveActor>> ────
 
 fn build_troupe(n_groups: usize, group_size: usize, lh: LevelHandle, sh: StageHandle) -> Troupe {
-    let groups: Vec<Vec<ActiveActor>> = (0..n_groups).map(|g| {
+    let groups: thin_vec::ThinVec<thin_vec::ThinVec<ActiveActor>> = (0..n_groups).map(|g| {
         (0..group_size).map(|a| ActiveActor::new(
             lh, sh,
             ActorHandle {

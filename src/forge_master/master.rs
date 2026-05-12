@@ -1,9 +1,10 @@
 use ash::vk;
 use std::error::Error;
 use std::fmt;
-use thin_vec::ThinVec;
 
-use super::forge::{Forge, write_forge_descriptors};
+use crate::resource_manager::manager::Arena;
+
+use super::forge::{Forge, ForgeHandle, ForgeId, ForgeTag, write_forge_descriptors};
 use super::ingot::Ingot;
 use super::ore::{IngotSpec, Ore, OreKind};
 
@@ -21,6 +22,9 @@ pub enum ForgeError {
     EmptyShader {
         kind: OreKind,
     },
+    NoCompatibleQueue,
+    NoPhysicalDevice,
+    LoaderUnavailable(ash::LoadingError),
 }
 
 impl fmt::Display for ForgeError {
@@ -39,7 +43,22 @@ impl fmt::Display for ForgeError {
             }
             ForgeError::MissingForge(kind) => write!(f, "no forge registered for {kind:?}"),
             ForgeError::EmptyShader { kind } => write!(f, "forge shader for {kind:?} is empty"),
+            ForgeError::NoCompatibleQueue => {
+                write!(f, "no queue family supports COMPUTE on the selected device")
+            }
+            ForgeError::NoPhysicalDevice => {
+                write!(f, "no Vulkan physical device available")
+            }
+            ForgeError::LoaderUnavailable(err) => {
+                write!(f, "vulkan loader unavailable: {err}")
+            }
         }
+    }
+}
+
+impl From<ash::LoadingError> for ForgeError {
+    fn from(value: ash::LoadingError) -> Self {
+        ForgeError::LoaderUnavailable(value)
     }
 }
 
@@ -57,6 +76,16 @@ impl From<std::io::Error> for ForgeError {
     }
 }
 
+// OreKind is the dispatch key during refine; ForgeId is the stable identity.
+// Slotted directly by OreKind::index() so the cache is one indexed load —
+// matches AssetArena::cache and Stage::cache. ForgeId lookup is a linear
+// scan across <= OreKind::COUNT entries.
+#[derive(Clone, Copy)]
+pub struct ForgeCacheEntry {
+    pub id: ForgeId,
+    pub handle: ForgeHandle,
+}
+
 pub struct ForgeMaster {
     pub device: ash::Device,
     pub queue: vk::Queue,
@@ -64,7 +93,8 @@ pub struct ForgeMaster {
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     descriptor_pool: vk::DescriptorPool,
     fence: vk::Fence,
-    forges: ThinVec<Forge>,
+    forges: Arena<ForgeTag, Forge>,
+    cache: [Option<ForgeCacheEntry>; OreKind::COUNT],
 }
 
 impl ForgeMaster {
@@ -95,36 +125,69 @@ impl ForgeMaster {
             memory_properties,
             descriptor_pool,
             fence,
-            forges: ThinVec::new(),
+            forges: Arena::with_capacity(OreKind::COUNT),
+            cache: [None; OreKind::COUNT],
         })
     }
 
-    pub fn add_forge(&mut self, forge: Forge) {
-        self.forges.retain(|existing| existing.kind != forge.kind);
-        self.forges.push(forge);
+    // At most one forge per OreKind. Inserting a second for the same kind
+    // evicts and destroys the previous one so we don't leak its pipeline.
+    pub fn add_forge(&mut self, forge: Forge) -> ForgeHandle {
+        let kind_idx = forge.kind.index();
+        if let Some(stale) = self.cache[kind_idx].take()
+            && let Some(mut old) = self.forges.remove(stale.handle)
+        {
+            unsafe { old.destroy(&self.device) };
+        }
+        let id = forge.id;
+        let handle = self.forges.insert(forge);
+        self.cache[kind_idx] = Some(ForgeCacheEntry { id, handle });
+        handle
     }
 
-    pub fn add_forge_from_spirv_bytes(&mut self, kind: OreKind, spirv: &[u8]) -> ForgeResult<()> {
-        let forge = Forge::from_spirv_bytes(&self.device, kind, spirv)?;
-        self.add_forge(forge);
-        Ok(())
+    pub fn add_forge_from_spirv_bytes(
+        &mut self,
+        id: ForgeId,
+        kind: OreKind,
+        spirv: &[u8],
+    ) -> ForgeResult<ForgeHandle> {
+        let forge = Forge::from_spirv_bytes(&self.device, id, kind, spirv)?;
+        Ok(self.add_forge(forge))
     }
 
-    pub fn add_forge_from_spirv_words(&mut self, kind: OreKind, spirv: &[u32]) -> ForgeResult<()> {
-        let forge = Forge::from_spirv_words(&self.device, kind, spirv)?;
-        self.add_forge(forge);
-        Ok(())
+    pub fn add_forge_from_spirv_words(
+        &mut self,
+        id: ForgeId,
+        kind: OreKind,
+        spirv: &[u32],
+    ) -> ForgeResult<ForgeHandle> {
+        let forge = Forge::from_spirv_words(&self.device, id, kind, spirv)?;
+        Ok(self.add_forge(forge))
     }
 
     pub fn forge(&self, kind: OreKind) -> Option<&Forge> {
-        self.forges.iter().find(|forge| forge.kind == kind)
+        self.handle_for_kind(kind).and_then(|h| self.forges.get(h))
+    }
+
+    pub fn forge_by_id(&self, id: ForgeId) -> Option<&Forge> {
+        self.handle_of(id).and_then(|h| self.forges.get(h))
+    }
+
+    pub fn handle_for_kind(&self, kind: OreKind) -> Option<ForgeHandle> {
+        self.cache[kind.index()].map(|e| e.handle)
+    }
+
+    pub fn handle_of(&self, id: ForgeId) -> Option<ForgeHandle> {
+        self.cache
+            .iter()
+            .flatten()
+            .find(|e| e.id == id)
+            .map(|e| e.handle)
     }
 
     pub fn refine(&mut self, ore: Ore) -> ForgeResult<Ingot> {
-        let forge_idx = self
-            .forges
-            .iter()
-            .position(|forge| forge.kind == ore.kind)
+        let forge_handle = self
+            .handle_for_kind(ore.kind)
             .ok_or(ForgeError::MissingForge(ore.kind))?;
 
         let mut staged = ore.stage(&self.device, &self.memory_properties)?;
@@ -132,7 +195,7 @@ impl ForgeMaster {
             Ingot::create(ore.kind, &ore.output, &self.device, &self.memory_properties)?;
 
         let descriptor_set =
-            self.allocate_descriptor_set(self.forges[forge_idx].descriptor_layout())?;
+            self.allocate_descriptor_set(self.forges[forge_handle].descriptor_layout())?;
         write_forge_descriptors(&self.device, descriptor_set, &staged, &ingot);
 
         let command_buffer = self.allocate_command_buffer()?;
@@ -144,7 +207,7 @@ impl ForgeMaster {
 
             staged.record_upload(&self.device, command_buffer);
             ingot.record_prepare_for_compute(&self.device, command_buffer);
-            self.forges[forge_idx].record_dispatch(
+            self.forges[forge_handle].record_dispatch(
                 &self.device,
                 command_buffer,
                 descriptor_set,
@@ -210,10 +273,10 @@ impl ForgeMaster {
     }
 
     pub unsafe fn destroy(&mut self) {
-        for forge in &mut self.forges {
+        for forge in self.forges.values_mut() {
             unsafe { forge.destroy(&self.device); }
         }
-        self.forges.clear();
+        self.cache = [None; OreKind::COUNT];
         unsafe {
             if self.fence != vk::Fence::null() {
                 self.device.destroy_fence(self.fence, None);

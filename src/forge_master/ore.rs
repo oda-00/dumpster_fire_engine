@@ -37,6 +37,8 @@ impl OreKind {
         OreKind::VisibilityPass,
     ];
 
+    pub const COUNT: usize = Self::ALL.len();
+
     pub const fn index(self) -> usize {
         self as usize
     }
@@ -74,8 +76,8 @@ pub struct MeshOre {
 }
 
 impl MeshOre {
-    pub fn new(vertices: ThinVec<ForgeVertex>, indices: Vec<u32>) -> Self {
-        Self { vertices, indices: indices.into() }
+    pub fn new(vertices: ThinVec<ForgeVertex>, indices: ThinVec<u32>) -> Self {
+        Self { vertices, indices }
     }
 }
 
@@ -84,11 +86,11 @@ pub struct TextureOre {
     pub width: u32,
     pub height: u32,
     pub format: vk::Format,
-    pub pixels: Vec<u8>,
+    pub pixels: ThinVec<u8>,
 }
 
 impl TextureOre {
-    pub fn new(width: u32, height: u32, format: vk::Format, pixels: Vec<u8>) -> Self {
+    pub fn new(width: u32, height: u32, format: vk::Format, pixels: ThinVec<u8>) -> Self {
         Self {
             width,
             height,
@@ -100,7 +102,7 @@ impl TextureOre {
 
 #[derive(Debug, Clone)]
 pub enum OreInput {
-    Bytes(Vec<u8>),
+    Bytes(ThinVec<u8>),
     Mesh(MeshOre),
     Texture(TextureOre),
     Empty,
@@ -139,21 +141,21 @@ impl Ore {
         }
     }
 
-    pub fn primary_bytes(&self) -> Vec<u8> {
+    pub fn primary_bytes(&self) -> ThinVec<u8> {
         match &self.input {
             OreInput::Bytes(bytes) => bytes.clone(),
-            OreInput::Mesh(mesh) => vertices_as_bytes(&mesh.vertices).to_vec(),
+            OreInput::Mesh(mesh) => vertices_as_bytes(&mesh.vertices).iter().copied().collect(),
             OreInput::Texture(texture) => texture.pixels.clone(),
-            OreInput::Empty => vec![0; 4],
+            OreInput::Empty => thin_vec::thin_vec![0; 4],
         }
     }
 
-    pub fn secondary_bytes(&self) -> Vec<u8> {
+    pub fn secondary_bytes(&self) -> ThinVec<u8> {
         match &self.input {
             OreInput::Mesh(mesh) if !mesh.indices.is_empty() => {
-                indices_as_bytes(&mesh.indices).to_vec()
+                indices_as_bytes(&mesh.indices).iter().copied().collect()
             }
-            _ => vec![0; 4],
+            _ => thin_vec::thin_vec![0; 4],
         }
     }
 
@@ -331,12 +333,13 @@ impl ForgeBuffer {
         Ok(())
     }
 
-    pub fn read_bytes(&self, device: &ash::Device, len: vk::DeviceSize) -> ForgeResult<Vec<u8>> {
+    pub fn read_bytes(&self, device: &ash::Device, len: vk::DeviceSize) -> ForgeResult<ThinVec<u8>> {
         let len = len.min(self.size) as usize;
         if len == 0 {
-            return Ok(Vec::new());
+            return Ok(ThinVec::new());
         }
-        let mut bytes = vec![0u8; len];
+        let mut bytes: ThinVec<u8> = ThinVec::with_capacity(len);
+        bytes.resize(len, 0u8);
         unsafe {
             let ptr = device.map_memory(
                 self.memory,

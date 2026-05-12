@@ -1,19 +1,30 @@
 use std::path::PathBuf;
-use thin_vec::ThinVec;
 use std::sync::Arc;
+use thin_vec::ThinVec;
+
+use crate::resource_manager::manager::{Handle, Id};
 
 use super::ingot::Ingot;
 use super::master::{ForgeMaster, ForgeResult};
 use super::ore::{IngotSpec, Ore, OreKind};
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct FrameTag;
+pub type FrameHandle = Handle<FrameTag>;
+
+pub struct FrameMarker;
+pub type FrameId = Id<FrameMarker>;
+
 pub struct FramePlan {
+    pub id: FrameId,
     pub name: Arc<str>,
     pub ores: ThinVec<Ore>,
 }
 
 impl FramePlan {
-    pub fn new(name: impl Into<Arc<str>>) -> Self {
+    pub fn new(id: FrameId, name: impl Into<Arc<str>>) -> Self {
         Self {
+            id,
             name: name.into(),
             ores: ThinVec::new(),
         }
@@ -24,7 +35,7 @@ impl FramePlan {
     }
 
     pub fn refine(self, master: &mut ForgeMaster) -> ForgeResult<Frame> {
-        let mut frame = Frame::new(self.name);
+        let mut frame = Frame::new(self.id, self.name);
         for ore in self.ores {
             frame.ingots.push(master.refine(ore)?);
         }
@@ -33,13 +44,15 @@ impl FramePlan {
 }
 
 pub struct Frame {
+    pub id: FrameId,
     pub name: Arc<str>,
     pub ingots: ThinVec<Ingot>,
 }
 
 impl Frame {
-    pub fn new(name: impl Into<Arc<str>>) -> Self {
+    pub fn new(id: FrameId, name: impl Into<Arc<str>>) -> Self {
         Self {
+            id,
             name: name.into(),
             ingots: ThinVec::new(),
         }
@@ -51,6 +64,7 @@ impl Frame {
 
     pub fn manifest(&self) -> FrameManifest {
         FrameManifest {
+            id: self.id,
             name: self.name.clone(),
             entries: self
                 .ingots
@@ -74,12 +88,13 @@ impl Frame {
 
 #[derive(Debug, Clone)]
 pub struct FrameManifest {
+    pub id: FrameId,
     pub name: Arc<str>,
     pub entries: ThinVec<FrameEntry>,
 }
 
 #[derive(Debug, Clone)]
-pub struct  FrameEntry {
+pub struct FrameEntry {
     pub kind: OreKind,
     pub byte_len: u64,
     pub save_path: Option<PathBuf>,
@@ -93,7 +108,7 @@ pub fn ore_for_buffer(
 ) -> Ore {
     Ore::new(
         kind,
-        super::ore::OreInput::Bytes(bytes.to_vec()  ),
+        super::ore::OreInput::Bytes(bytes),
         IngotSpec::Buffer {
             size: output_size,
             save_path: None,

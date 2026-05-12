@@ -57,18 +57,18 @@ impl ActiveActor {
 
 // ── Troupe (partitioned cast) ───────────────────────────────────────────────
 
-/// Outer Vec aligns with Scene::troupes — troupes[i] keys actors.0[i].
+/// Outer ThinVec aligns with Scene::troupes — troupes[i] keys actors.0[i].
 #[derive(Clone)]
-pub struct Troupe(pub Vec<Vec<ActiveActor>>);
+pub struct Troupe(pub ThinVec<ThinVec<ActiveActor>>);
 
 impl Troupe {
-    pub fn new() -> Self { Troupe(Vec::new()) }
+    pub fn new() -> Self { Troupe(ThinVec::new()) }
 
     pub fn group(&self, idx: usize) -> Option<&[ActiveActor]> {
         self.0.get(idx).map(|v| v.as_slice())
     }
 
-    pub fn group_mut(&mut self, idx: usize) -> Option<&mut Vec<ActiveActor>> {
+    pub fn group_mut(&mut self, idx: usize) -> Option<&mut ThinVec<ActiveActor>> {
         self.0.get_mut(idx)
     }
 
@@ -439,7 +439,7 @@ impl EventMatcher {
 #[derive(Clone)]
 pub struct Handler {
     pub matcher: EventMatcher,
-    pub action:  fn(&Event, &EvalCtx<'_>, &mut Vec<Effect>),
+    pub action:  fn(&Event, &EvalCtx<'_>, &mut ThinVec<Effect>),
 }
 
 // ── SceneOperation ──────────────────────────────────────────────────────────
@@ -511,9 +511,9 @@ impl Clone for Decorator {
 }
 
 pub enum BtNode {
-    Sequence(Vec<BtNode>),
-    Selector(Vec<BtNode>),
-    Parallel { children: Vec<BtNode>, policy: ParallelPolicy },
+    Sequence(ThinVec<BtNode>),
+    Selector(ThinVec<BtNode>),
+    Parallel { children: ThinVec<BtNode>, policy: ParallelPolicy },
     /// Repeat counter is an `AtomicU32` so the read-only pass-1 walk can step
     /// it without an exclusive borrow. `Clone` resets the per-node counter to
     /// the source's last-observed value so each materialized scene starts from
@@ -554,11 +554,11 @@ impl BtNode {
     }
 
     /// Empty BT — used by Compound / AndParallel scenes whose body lives in their children.
-    pub fn empty() -> Self { BtNode::Sequence(Vec::new()) }
+    pub fn empty() -> Self { BtNode::Sequence(ThinVec::new()) }
 
     /// Tick this node; push fired effects into `out`. &self because pass 1 is
     /// read-only with respect to World; per-node mutable state uses Cell.
-    pub fn tick(&self, ctx: &EvalCtx<'_>, out: &mut Vec<Effect>) -> BtStatus {
+    pub fn tick(&self, ctx: &EvalCtx<'_>, out: &mut ThinVec<Effect>) -> BtStatus {
         match self {
             BtNode::Sequence(children) => {
                 for c in children {
@@ -758,12 +758,12 @@ pub struct Scene {
     pub stage:       StageId,
     pub parent:      Option<SceneId>,
     pub kind:        SceneKind,
-    pub troupes:     Vec<TroupeId>,
+    pub troupes:     ThinVec<TroupeId>,
     pub actors:      Troupe,
     pub root:        BtNode,
     pub bt_state:    BtState,
-    pub handlers:    Vec<Handler>,
-    pub transitions: Vec<Transition>,
+    pub handlers:    ThinVec<Handler>,
+    pub transitions: ThinVec<Transition>,
     pub queue:       ThinVec<Event>,
     pub elapsed:     f32,
     pub tick_count:  u64,
@@ -776,7 +776,7 @@ impl Scene {
         let actors = Troupe(
             def.initial_actors
                 .iter()
-                .map(|group| group.iter().cloned().collect::<Vec<_>>())
+                .map(|group| group.iter().cloned().collect::<ThinVec<_>>())
                 .collect(),
         );
         Scene {

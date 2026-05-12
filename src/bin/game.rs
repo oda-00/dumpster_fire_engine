@@ -6,6 +6,7 @@
 //
 // Run with:  cargo run --bin game
 
+use dumpster_fire_engine::ThinVec;
 use dumpster_fire_engine::resource_manager::*;
 use glam::{Affine3A, Vec3};
 use std::{io::{self, Write}, sync::Arc};
@@ -522,7 +523,7 @@ fn main() {
         // ── enemy turns ────────────────────────────────────────────────────
         // Pull handles into a scratch Vec so we can mutate the world inside
         // the loop.  Cache contains player, enemies, and meta — filter them.
-        let mut enemy_handles: Vec<ActorHandle> = Vec::new();
+        let mut enemy_handles: ThinVec<ActorHandle> = ThinVec::new();
         for &ah in &world.levels[lh].stages[sh].cache[ComponentType::Physics.index()] {
             if ah != player_h && ah != meta_h {
                 enemy_handles.push(ah);
