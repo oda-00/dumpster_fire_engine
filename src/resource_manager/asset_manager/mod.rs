@@ -1,10 +1,12 @@
 pub mod asset;
-pub mod deliver;
+pub mod send;
 pub mod fetch;
 pub mod pipe;
 pub mod pipeline;
 
 pub use asset::*;
+pub use send::*;
+pub use fetch::*;
 pub use pipe::*;
 pub use pipeline::*;
 
@@ -12,7 +14,9 @@ pub use pipeline::*;
 mod tests {
     use std::sync::Arc;
 
-    use super::*;
+    use crate::resource_manager::asset_manager::fetch::Fetcher;
+
+use super::*;
 
     fn texture(path: &str) -> AssetKind {
         AssetKind::Texture(Texture {
@@ -28,7 +32,7 @@ mod tests {
 
     #[test]
     fn fetch_and_evict_keep_type_cache_consistent() {
-        let mut arena = AssetArena::new();
+        let mut arena = Fetcher::new(AssetArena::new());
         let tex = arena.fetch(AssetId::new(1), texture("albedo.png"));
         let mesh = arena.fetch(AssetId::new(2), mesh("crate.mesh"));
 
@@ -46,7 +50,7 @@ mod tests {
 
     #[test]
     fn replace_kind_moves_handle_between_type_buckets() {
-        let mut arena = AssetArena::new();
+        let mut arena = Fetcher::new(AssetArena::new());
         let handle = arena.fetch(AssetId::new(7), texture("source.png"));
 
         let old = arena
@@ -61,7 +65,7 @@ mod tests {
 
     #[test]
     fn stale_handles_do_not_resolve_after_evict() {
-        let mut arena = AssetArena::new();
+        let mut arena = Fetcher::new(AssetArena::new());
         let handle = arena.fetch(AssetId::new(3), texture("gone.png"));
 
         assert!(arena.evict(handle).is_some());
@@ -72,10 +76,10 @@ mod tests {
 
     #[test]
     fn queue_entries_resolve_against_their_declared_source() {
-        let mut a = AssetArena::new();
+        let mut a = Fetcher::new(AssetArena::new());
         let h_a = a.fetch(AssetId::new(10), texture("a.png"));
 
-        let mut b = AssetArena::new();
+        let mut b = Fetcher::new(AssetArena::new());
         let h_b = b.fetch(AssetId::new(20), texture("b.png"));
 
         let mut manager = Pipeline::new();

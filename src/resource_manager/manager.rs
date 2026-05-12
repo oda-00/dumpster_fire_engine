@@ -63,7 +63,10 @@ impl<Tag, T> Arena<Tag, T> {
             Handle { idx, generation, _tag: PhantomData }
         }
     }
-
+    pub fn len(&self) -> usize {
+        self.slots.len() - self.free.len()
+    }
+    
     pub fn remove(&mut self, h: Handle<Tag>) -> Option<T> {
         let slot = self.slots.get_mut(h.idx as usize)?;
         if slot.generation != h.generation { return None; }

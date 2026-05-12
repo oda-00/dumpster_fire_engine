@@ -5,7 +5,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use dumpster_fire_engine::resource_manager::asset_manager::{
-    AssetArena, AssetHandle, AssetId, AssetKind, AssetSource, AssetType, Audio, Mesh, Pipeline,
+    AssetArena, AssetHandle, AssetId, AssetKind, AssetSource, AssetType, Audio, Fetcher, Mesh, Pipeline,
     QueueEntry, Texture, TitleText, Visual,
 };
 use std::cmp::Reverse;
@@ -31,7 +31,7 @@ fn bench_asset_fetch(c: &mut Criterion) {
         g.throughput(Throughput::Elements(n as u64));
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter(|| {
-                let mut arena = AssetArena::new();
+                let mut arena = Fetcher::new(AssetArena::new());
                 for i in 0..n {
                     arena.fetch(AssetId::new(i as i64 + 1), make_kind(i));
                 }
@@ -48,7 +48,7 @@ fn bench_asset_evict(c: &mut Criterion) {
     // Mid-list eviction triggers cache_slot.retain() over the whole list.
     g.bench_function("mid_list_1024", |b| {
         b.iter(|| {
-            let mut arena = AssetArena::new();
+            let mut arena = Fetcher::new(AssetArena::new());
             let mut handles = Vec::with_capacity(1024);
             for i in 0..1024 {
                 handles.push(arena.fetch(AssetId::new(i as i64 + 1), make_kind(i)));
@@ -63,7 +63,7 @@ fn bench_asset_evict(c: &mut Criterion) {
 
     g.bench_function("tail_1024", |b| {
         b.iter(|| {
-            let mut arena = AssetArena::new();
+            let mut arena = Fetcher::new(AssetArena::new());
             let mut handles = Vec::with_capacity(1024);
             for i in 0..1024 {
                 handles.push(arena.fetch(AssetId::new(i as i64 + 1), make_kind(i)));
@@ -82,7 +82,7 @@ fn bench_asset_evict(c: &mut Criterion) {
 fn bench_asset_of_type(c: &mut Criterion) {
     let mut g = c.benchmark_group("asset_of_type");
     for &n in &[64usize, 1024, 10_000] {
-        let mut arena = AssetArena::new();
+        let mut arena = Fetcher::new(AssetArena::new());
         for i in 0..n {
             arena.fetch(AssetId::new(i as i64 + 1), make_kind(i));
         }
