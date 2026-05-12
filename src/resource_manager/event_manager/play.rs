@@ -140,7 +140,7 @@ pub struct Play {
     /// Mealy outputs accumulated when a transition is applied; drained by
     /// World::tick at the start of the *next* tick's pass 2 so the one-tick
     /// latency rule holds.
-    pub pending_mealy: Vec<Effect>,
+    pub pending_mealy: ThinVec<Effect>,
 
     pub paused:   bool,
     pub finished: bool,
@@ -180,9 +180,9 @@ pub struct Play {
     // config_scratch:          active configuration set in post_tick_bookkeeping
     // pending_drain_scratch:   swap-target for pending_transitions during drain;
     //                          allocation persists across ticks.
-    ancestor_scratch:       Vec<SceneHandle>,
-    transition_scratch:     Vec<SceneHandle>,
-    config_scratch:         Vec<SceneHandle>,
+    ancestor_scratch:       ThinVec<SceneHandle>,
+    transition_scratch:     ThinVec<SceneHandle>,
+    config_scratch:         ThinVec<SceneHandle>,
     pending_drain_scratch:  ThinVec<TransitionRecord>,
 }
 
@@ -283,15 +283,15 @@ impl Play {
             queue: ThinVec::new(),
             static_troupes,
             pending_transitions: ThinVec::new(),
-            pending_mealy: Vec::new(),
+            pending_mealy: ThinVec::new(),
             paused: false,
             finished: false,
             wants_tick,
             tick_counter: AtomicU64::new(0),
             stats: PlayStats::default(),
-            ancestor_scratch:      Vec::with_capacity(16),
-            transition_scratch:    Vec::with_capacity(16),
-            config_scratch:        Vec::with_capacity(16),
+            ancestor_scratch:      ThinVec::with_capacity(16),
+            transition_scratch:    ThinVec::with_capacity(16),
+            config_scratch:        ThinVec::with_capacity(16),
             pending_drain_scratch: ThinVec::with_capacity(4),
         };
 
@@ -312,9 +312,9 @@ impl Play {
     }
 
     /// All scenes currently active = each leaf plus its ancestor chain (deduped).
-    pub fn active_configuration(&self) -> Vec<SceneHandle> {
-        let mut out: Vec<SceneHandle> = Vec::new();
-        let mut scratch = Vec::with_capacity(8);
+    pub fn active_configuration(&self) -> ThinVec<SceneHandle> {
+        let mut out: ThinVec<SceneHandle> = ThinVec::new();
+        let mut scratch: ThinVec<SceneHandle> = ThinVec::with_capacity(8);
         for &leaf in self.active_leaves.iter() {
             ancestors_into_fields(&self.parents, leaf, &mut scratch);
             for &h in scratch.iter() {
@@ -404,7 +404,7 @@ impl Play {
     /// Pass 1 — read-only — walk the active configuration, tick BTs, dispatch
     /// handlers, evaluate transitions.
     ///
-    /// `chain` is a `&mut Vec<SceneHandle>` scratch buffer threaded down from
+    /// `chain` is a `&mut ThinVec<SceneHandle>` scratch buffer threaded down from
     /// `World::tick` (lifted out via `mem::take` so the allocation persists
     /// across ticks). We clear-and-reuse it per active leaf — zero heap
     /// allocation in steady state, no SmallVec inline-vs-heap branch on push.
@@ -418,8 +418,8 @@ impl Play {
         &self,
         _dt:   f32,
         world: &World,
-        out:   &mut Vec<Effect>,
-        chain: &mut Vec<SceneHandle>,
+        out:   &mut ThinVec<Effect>,
+        chain: &mut ThinVec<SceneHandle>,
     ) {
         if self.paused || self.finished { return; }
 
@@ -589,8 +589,8 @@ impl Play {
     /// Drain Mealy effects accumulated by the most recent transition. Called by
     /// World::tick at the start of pass 2 each tick so Mealy outputs are
     /// applied alongside fresh op effects (one-tick latency from the transition).
-    pub fn drain_pending_mealy(&mut self, sink: &mut Vec<Effect>) {
-        sink.append(&mut self.pending_mealy);
+    pub fn drain_pending_mealy(&mut self, sink: &mut ThinVec<Effect>) {
+        sink.extend(self.pending_mealy.drain(..));
     }
 
     fn apply_transition(&mut self, rec: TransitionRecord) {
@@ -719,7 +719,7 @@ impl Play {
 fn ancestors_into_fields(
     parents: &[Option<SceneHandle>],
     leaf:    SceneHandle,
-    out:     &mut Vec<SceneHandle>,
+    out:     &mut ThinVec<SceneHandle>,
 ) {
     out.clear();
     let mut cur = leaf;
@@ -738,8 +738,8 @@ fn ancestors_into_fields(
 fn active_configuration_into(
     parents:       &[Option<SceneHandle>],
     active_leaves: &ThinVec<SceneHandle>,
-    out:           &mut Vec<SceneHandle>,
-    scratch:       &mut Vec<SceneHandle>,
+    out:           &mut ThinVec<SceneHandle>,
+    scratch:       &mut ThinVec<SceneHandle>,
 ) {
     out.clear();
     for &leaf in active_leaves.iter() {

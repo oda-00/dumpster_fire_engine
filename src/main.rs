@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use dumpster_fire_engine::{ThinVec, thin_vec};
 use dumpster_fire_engine::resource_manager::*;
 use glam::{Affine3A, Vec3};
 
@@ -360,7 +361,7 @@ fn main() {
     for tick_n in 0..150 {
         world.tick(1.0 / 60.0);
 
-        let leaves: Vec<i64> = world.levels[lh].stages[sh].play.as_ref()
+        let leaves: ThinVec<i64> = world.levels[lh].stages[sh].play.as_ref()
             .map(|p| p.active_leaves.iter()
                  .map(|&h| p.scenes[h].id.raw())
                  .collect())

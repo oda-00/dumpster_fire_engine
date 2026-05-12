@@ -242,7 +242,7 @@ impl Ingot {
                 readback,
                 bytes,
             } => {
-                *bytes = readback.read_bytes(device, result.size)?.into();
+                *bytes = readback.read_bytes(device, result.size)?;
             }
             IngotArtifact::Image2d {
                 readback,
@@ -250,7 +250,7 @@ impl Ingot {
                 byte_size,
                 ..
             } => {
-                *bytes = readback.read_bytes(device, *byte_size)?.into();
+                *bytes = readback.read_bytes(device, *byte_size)?;
             }
         }
 

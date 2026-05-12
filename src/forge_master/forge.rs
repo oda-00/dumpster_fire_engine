@@ -2,6 +2,8 @@ use ash::vk;
 use std::ffi::CStr;
 use std::io::Cursor;
 
+use crate::resource_manager::manager::{Handle, Id};
+
 use super::ingot::{Ingot, IngotArtifact};
 use super::master::{ForgeError, ForgeResult};
 use super::ore::{OreKind, StagedOre};
@@ -11,8 +13,16 @@ pub const ORE_SECONDARY_BINDING: u32 = 1;
 pub const INGOT_BUFFER_BINDING: u32 = 2;
 pub const INGOT_IMAGE_BINDING: u32 = 3;
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ForgeTag;
+pub type ForgeHandle = Handle<ForgeTag>;
+
+pub struct ForgeMarker;
+pub type ForgeId = Id<ForgeMarker>;
+
 #[derive(Debug)]
 pub struct Forge {
+    pub id: ForgeId,
     pub kind: OreKind,
     mold: ForgeMold,
 }
@@ -27,16 +37,18 @@ struct ForgeMold {
 impl Forge {
     pub fn from_spirv_bytes(
         device: &ash::Device,
+        id: ForgeId,
         kind: OreKind,
         spirv: &[u8],
     ) -> ForgeResult<Self> {
         let mut cursor = Cursor::new(spirv);
         let words = ash::util::read_spv(&mut cursor)?;
-        Self::from_spirv_words(device, kind, &words)
+        Self::from_spirv_words(device, id, kind, &words)
     }
 
     pub fn from_spirv_words(
         device: &ash::Device,
+        id: ForgeId,
         kind: OreKind,
         spirv: &[u32],
     ) -> ForgeResult<Self> {
@@ -91,6 +103,7 @@ impl Forge {
         unsafe { device.destroy_shader_module(shader, None) };
 
         Ok(Self {
+            id,
             kind,
             mold: ForgeMold {
                 descriptor_layout,

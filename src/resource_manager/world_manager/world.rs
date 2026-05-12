@@ -31,8 +31,8 @@ pub struct World {
     /// Reusable per-tick ancestor-chain scratch shared across every Play's
     /// `collect_effects` call. Lifted out via `mem::take` so the allocation
     /// persists across ticks (same pattern as `tick_effects`). Replaced the
-    /// per-call `Vec::with_capacity(8)` and the SmallVec experiment.
-    tick_chain: Vec<crate::resource_manager::event_manager::SceneHandle>,
+    /// per-call `ThinVec::with_capacity(8)` and the SmallVec experiment.
+    tick_chain: ThinVec<crate::resource_manager::event_manager::SceneHandle>,
 }
 
 impl World {
@@ -42,7 +42,7 @@ impl World {
             levels: Arena::new(),
             roots: ThinVec::new(),
             tick_effects: crate::resource_manager::event_manager::EffectArena::with_capacity(4096),
-            tick_chain:   Vec::with_capacity(16),
+            tick_chain:   ThinVec::with_capacity(16),
         }
     }
 
@@ -210,14 +210,14 @@ impl World {
         }
 
         if total_dirty >= 1024 && stage_count >= 2 {
-            let mut stages: Vec<&mut crate::resource_manager::world_manager::stage::Stage> =
-                Vec::with_capacity(stage_count);
+            let mut stages: ThinVec<&mut crate::resource_manager::world_manager::stage::Stage> =
+                ThinVec::with_capacity(stage_count);
             for level in self.levels.values_mut() {
                 for stage in level.stages.values_mut() {
                     stages.push(stage);
                 }
             }
-            stages.par_iter_mut().for_each(|s| s.propagate_transforms());
+            stages.as_mut_slice().par_iter_mut().for_each(|s| s.propagate_transforms());
         } else {
             for level in self.levels.values_mut() {
                 for stage in level.stages.values_mut() {
@@ -262,7 +262,7 @@ impl World {
 
         // Pass 2-prelude: drain Mealy effects from the previous tick's transitions.
         for level in self.levels.values_mut() {
-            level.drain_pending_mealy(effects.as_vec_mut());
+            level.drain_pending_mealy(effects.as_thin_vec_mut());
         }
 
         // Pass 1 — read-only collect. Reborrow self as &World so condition
@@ -272,7 +272,7 @@ impl World {
         {
             let world_view: &World = &*self;
             for level in world_view.levels.values() {
-                level.collect_effects(dt, world_view, effects.as_vec_mut(), &mut chain);
+                level.collect_effects(dt, world_view, effects.as_thin_vec_mut(), &mut chain);
             }
         }
 
