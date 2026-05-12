@@ -329,6 +329,10 @@ impl Stage {
     /// OOO core can keep multiple actor publishes (locals → worlds copy,
     /// dirty_flag clear, sub-entity composition) in flight at once.
     pub fn propagate_transforms(&mut self) {
+        if self.dirty_actors.is_empty() {
+            return;
+        }
+
         let Self { dirty_actors, locals, worlds, dirty_flags, actors, .. } = self;
         let n = dirty_actors.len();
         let cap = locals.len();

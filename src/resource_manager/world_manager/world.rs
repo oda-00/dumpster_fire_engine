@@ -196,20 +196,34 @@ impl World {
     /// stages with rayon. Below the threshold (or with a single stage) we stay
     /// sequential — rayon's fork/join overhead dominates at small dirty counts.
     pub fn propagate_transforms(&mut self) {
-        // Gather disjoint &mut Stage references from all levels into a flat Vec.
-        let mut stages: Vec<&mut crate::resource_manager::world_manager::stage::Stage> =
-            Vec::new();
-        for level in self.levels.values_mut() {
-            for stage in level.stages.values_mut() {
-                stages.push(stage);
+        let mut total_dirty = 0usize;
+        let mut stage_count = 0usize;
+        for level in self.levels.values() {
+            for stage in level.stages.values() {
+                total_dirty += stage.dirty_count();
+                stage_count += 1;
             }
         }
 
-        let total_dirty: usize = stages.iter().map(|s| s.dirty_count()).sum();
-        if total_dirty >= 1024 && stages.len() >= 2 {
+        if total_dirty == 0 {
+            return;
+        }
+
+        if total_dirty >= 1024 && stage_count >= 2 {
+            let mut stages: Vec<&mut crate::resource_manager::world_manager::stage::Stage> =
+                Vec::with_capacity(stage_count);
+            for level in self.levels.values_mut() {
+                for stage in level.stages.values_mut() {
+                    stages.push(stage);
+                }
+            }
             stages.par_iter_mut().for_each(|s| s.propagate_transforms());
         } else {
-            for s in stages { s.propagate_transforms(); }
+            for level in self.levels.values_mut() {
+                for stage in level.stages.values_mut() {
+                    stage.propagate_transforms();
+                }
+            }
         }
     }
 
