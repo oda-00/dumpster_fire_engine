@@ -5,7 +5,7 @@
 use divan::{black_box, Bencher};
 use glam::{Affine3A, Vec3};
 use std::sync::Arc;
-use thin_vec::{ThinVec, thin_vec};
+use thin_vec::ThinVec;
 use dumpster_fire_engine::resource_manager::*;
 
 fn main() { divan::main(); }
@@ -30,7 +30,7 @@ fn build_fixture(troupe_size: usize, n_events: usize) -> Fixture {
 
     let troupe_a = TroupeId::new(1);
     let mut actor_ids = Vec::with_capacity(troupe_size);
-    let mut active: ThinVec<ActiveActor> = ThinVec::with_capacity(troupe_size);
+    let mut active = Vec::with_capacity(troupe_size);
     for i in 0..troupe_size {
         let aid = ActorId::new(i as i64 + 1);
         let ah = world.spawn_actor(
@@ -56,7 +56,7 @@ fn build_fixture(troupe_size: usize, n_events: usize) -> Fixture {
     }
     world.propagate_transforms();
 
-    let actors = Troupe(thin_vec![active]);
+    let actors = Troupe(vec![active]);
     let troupes = vec![troupe_a];
 
     let events: Vec<Event> = (0..n_events)
