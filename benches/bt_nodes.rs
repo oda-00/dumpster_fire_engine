@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use divan::{black_box, Bencher};
 use glam::Affine3A;
+use thin_vec::{ThinVec, thin_vec};
 use dumpster_fire_engine::resource_manager::*;
 
 fn main() { divan::main(); }
@@ -29,13 +30,19 @@ fn build_fixture() -> Fixture {
     let ah = world.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
     world.propagate_transforms();
 
-    let actives = vec![ActiveActor::new(lh, sh, ah, aid)];
+    let actives: ThinVec<ActiveActor> = thin_vec![ActiveActor::new(lh, sh, ah, aid)];
     Fixture {
         world,
         lh, sh,
+<<<<<<< HEAD
         actors: Troupe(ThinVec![actives]),
         troupes: ThinVec![TroupeId::new(1)],
         events: ThinVec::new(),
+=======
+        actors: Troupe(thin_vec![actives]),
+        troupes: vec![TroupeId::new(1)],
+        events: Vec::new(),
+>>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
     }
 }
 
@@ -81,7 +88,11 @@ fn leaf_pass(b: Bencher) {
 fn leaf_fail(b: Bencher) {
     let f = build_fixture();
     let n = fail_leaf();
+<<<<<<< HEAD
     let mut sink: ThinVec<Effect> = ThinThinVec::with_capacity(8);
+=======
+    let mut sink: ThinVec<Effect> = ThinVec::with_capacity(8);
+>>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
     b.bench_local(|| {
         sink.clear();
         black_box(n.tick(&ctx(&f, 0.0), &mut sink))
@@ -92,7 +103,11 @@ fn leaf_fail(b: Bencher) {
 fn leaf_once_fired_skip(b: Bencher) {
     let f = build_fixture();
     let n = BtNode::leaf(Condition::Always, dummy_effect(), true);
+<<<<<<< HEAD
     let mut sink: Vec<Effect> = ThinVec::with_capacity(8);
+=======
+    let mut sink: ThinVec<Effect> = ThinVec::with_capacity(8);
+>>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
     n.tick(&ctx(&f, 0.0), &mut sink); // prime: sets the AtomicBool
     b.bench_local(|| {
         sink.clear();
@@ -105,7 +120,7 @@ fn leaf_once_fired_skip(b: Bencher) {
 #[divan::bench(args = &[1usize, 4, 16, 64])]
 fn sequence_n_success(b: Bencher, n: usize) {
     let f = build_fixture();
-    let nodes = (0..n).map(|_| pass_leaf()).collect();
+    let nodes: ThinVec<BtNode> = (0..n).map(|_| pass_leaf()).collect();
     let seq = BtNode::Sequence(nodes);
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(64);
     b.bench_local(|| {
@@ -117,7 +132,7 @@ fn sequence_n_success(b: Bencher, n: usize) {
 #[divan::bench(args = &[1usize, 4, 16, 64])]
 fn selector_all_fail(b: Bencher, n: usize) {
     let f = build_fixture();
-    let nodes = (0..n).map(|_| fail_leaf()).collect();
+    let nodes: ThinVec<BtNode> = (0..n).map(|_| fail_leaf()).collect();
     let sel = BtNode::Selector(nodes);
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(64);
     b.bench_local(|| {
@@ -129,10 +144,17 @@ fn selector_all_fail(b: Bencher, n: usize) {
 #[divan::bench(args = &[1usize, 4, 16, 64])]
 fn selector_first_succeeds(b: Bencher, n: usize) {
     let f = build_fixture();
+<<<<<<< HEAD
     let mut nodes = ThinVec![pass_leaf()];
     for _ in 1..n { nodes.push(fail_leaf()); }
     let sel = BtNode::Selector(nodes);
     let mut sink: ThinVec<Effect> = ThinThinThinVec::with_capacity(64);
+=======
+    let mut nodes: ThinVec<BtNode> = thin_vec![pass_leaf()];
+    for _ in 1..n { nodes.push(fail_leaf()); }
+    let sel = BtNode::Selector(nodes);
+    let mut sink: ThinVec<Effect> = ThinVec::with_capacity(64);
+>>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
     b.bench_local(|| {
         sink.clear();
         black_box(sel.tick(&ctx(&f, 0.0), &mut sink))
@@ -144,7 +166,7 @@ fn selector_first_succeeds(b: Bencher, n: usize) {
 #[divan::bench]
 fn parallel_all_succeed(b: Bencher) {
     let f = build_fixture();
-    let children = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
+    let children: ThinVec<BtNode> = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
     let par = BtNode::Parallel { children, policy: ParallelPolicy::AllSucceed };
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(16);
     b.bench_local(|| {
@@ -156,7 +178,7 @@ fn parallel_all_succeed(b: Bencher) {
 #[divan::bench]
 fn parallel_any_succeed(b: Bencher) {
     let f = build_fixture();
-    let children = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
+    let children: ThinVec<BtNode> = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
     let par = BtNode::Parallel { children, policy: ParallelPolicy::AnySucceed };
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(16);
     b.bench_local(|| {
@@ -168,7 +190,7 @@ fn parallel_any_succeed(b: Bencher) {
 #[divan::bench]
 fn parallel_all_complete(b: Bencher) {
     let f = build_fixture();
-    let children = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
+    let children: ThinVec<BtNode> = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
     let par = BtNode::Parallel { children, policy: ParallelPolicy::AllComplete };
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(16);
     b.bench_local(|| {
@@ -302,8 +324,13 @@ fn decorator_cooldown_ready(b: Bencher) {
 
 #[divan::bench]
 fn reset_full_tree(b: Bencher) {
+<<<<<<< HEAD
     let tree = BtNode::Sequence(ThinVec![
         BtNode::Selector(ThinVec![pass_leaf(), fail_leaf()]),
+=======
+    let tree = BtNode::Sequence(thin_vec![
+        BtNode::Selector(thin_vec![pass_leaf(), fail_leaf()]),
+>>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
         BtNode::Repeat {
             child: Arc::new(pass_leaf()),
             count: 5,
@@ -314,7 +341,11 @@ fn reset_full_tree(b: Bencher) {
             child: Arc::new(pass_leaf()),
         },
         BtNode::Parallel {
+<<<<<<< HEAD
             children: ThinVec![pass_leaf(), pass_leaf(), fail_leaf()],
+=======
+            children: thin_vec![pass_leaf(), pass_leaf(), fail_leaf()],
+>>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
             policy: ParallelPolicy::AllComplete,
         },
     ]);

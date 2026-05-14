@@ -7,9 +7,14 @@ edition = "2024"
 thin-vec = "0.2"
 glam     = "0.29"
 rayon    = "1"
+<<<<<<< HEAD
 ash = { version = "0.38", features = ["loaded"] }
 sdl2 = "0.38"
 bytemuck = "1.25.0"
+=======
+ash = "0.38.0"
+winit = "0.30.13"
+>>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
 
 [dev-dependencies]
 slotmap = "1"
