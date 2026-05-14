@@ -11,7 +11,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use glam::{Affine3A, Vec3};
 use std::sync::Arc;
-use thin_vec::thin_vec;
+use thin_vec::{ThinVec, thin_vec};
 
 use dumpster_fire_engine::resource_manager::*;
 
@@ -175,7 +175,7 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
     let bt_actor = stage.actors[0].1;
 
     let make_per_tick_bt = || -> BtNode {
-        let mut nodes = Vec::with_capacity(scale.bt_leaves);
+        let mut nodes: ThinVec<BtNode> = ThinVec::with_capacity(scale.bt_leaves);
         for k in 0..scale.bt_leaves {
             let dx = (k as f32) * 0.01;
             nodes.push(BtNode::leaf(
@@ -199,7 +199,7 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
             rhs_actors.iter().cloned().collect(),
         ],
         root: BtNode::Parallel {
-            children: vec![
+            children: thin_vec![
                 make_per_tick_bt(),
                 BtNode::leaf(
                     Condition::Always,
@@ -229,7 +229,7 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
             lhs_actors.iter().cloned().collect(),
             rhs_actors.iter().cloned().collect(),
         ],
-        root: BtNode::Sequence(vec![
+        root: BtNode::Sequence(thin_vec![
             BtNode::leaf(
                 Condition::Always,
                 Effect::CueTroupe {
@@ -393,8 +393,8 @@ fn bench_tick_phases(c: &mut Criterion) {
 
     g.bench_function("collect_effects", |b| {
         b.iter(|| {
-            let mut sink: Vec<Effect> = Vec::new();
-            let mut chain: Vec<SceneHandle> = Vec::with_capacity(8);
+            let mut sink: ThinVec<Effect> = ThinVec::new();
+            let mut chain: ThinVec<SceneHandle> = ThinVec::with_capacity(8);
             for level in world.levels.values() {
                 level.collect_effects(black_box(DT), &world, &mut sink, &mut chain);
             }
@@ -443,7 +443,7 @@ fn build_script_storm(scale: Scale, stage: &StageHandles, stage_id: StageId) -> 
 
     let bt_actor = stage.actors[0].1;
     let make_bt = || -> BtNode {
-        let mut nodes = Vec::with_capacity(scale.bt_leaves);
+        let mut nodes: ThinVec<BtNode> = ThinVec::with_capacity(scale.bt_leaves);
         for k in 0..scale.bt_leaves {
             let dx = (k as f32) * 0.01;
             nodes.push(BtNode::leaf(

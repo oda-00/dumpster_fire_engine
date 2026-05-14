@@ -16,7 +16,7 @@ use iai_callgrind::{
 };
 use std::hint::black_box;
 use glam::Affine3A;
-use thin_vec::thin_vec;
+use thin_vec::{ThinVec, thin_vec};
 use dumpster_fire_engine::resource_manager::*;
 
 // ── Setup helpers (NOT timed — iai measures only the #[library_benchmark] body) ──
@@ -99,7 +99,7 @@ fn condition_always() {
     )).collect::<Vec<_>>();
     let _ = actives;
 
-    let actors = Troupe(vec![]);
+    let actors = Troupe(ThinVec::new());
     let troupes: Vec<TroupeId> = vec![];
     let events: Vec<Event> = vec![];
     let ctx = EvalCtx {
@@ -119,8 +119,8 @@ fn condition_actor_near() {
     let _ah = w.spawn_actor(lh, sh, aid, Affine3A::from_translation(glam::Vec3::new(3.0, 0.0, 0.0))).unwrap();
     w.propagate_transforms();
 
-    let actives = vec![ActiveActor::new(lh, sh, _ah, aid)];
-    let actors = Troupe(vec![actives]);
+    let actives: ThinVec<ActiveActor> = thin_vec![ActiveActor::new(lh, sh, _ah, aid)];
+    let actors = Troupe(thin_vec![actives]);
     let troupes: Vec<TroupeId> = vec![TroupeId::new(1)];
     let events: Vec<Event> = vec![];
     let ctx = EvalCtx {
@@ -144,8 +144,8 @@ fn bt_leaf_pass() {
         generation: std::num::NonZeroU32::new(1).unwrap(),
         _tag: std::marker::PhantomData,
     };
-    let actives = vec![ActiveActor::new(lh, sh, placeholder_ah, aid)];
-    let actors = Troupe(vec![actives]);
+    let actives: ThinVec<ActiveActor> = thin_vec![ActiveActor::new(lh, sh, placeholder_ah, aid)];
+    let actors = Troupe(thin_vec![actives]);
     let troupes: Vec<TroupeId> = vec![];
     let events: Vec<Event> = vec![];
     let ctx = EvalCtx {
@@ -164,7 +164,7 @@ fn bt_leaf_pass() {
         },
         false,
     );
-    let mut sink: Vec<Effect> = Vec::with_capacity(8);
+    let mut sink: ThinVec<Effect> = ThinVec::with_capacity(8);
     for _ in 0..1000 {
         sink.clear();
         black_box(n.tick(&ctx, &mut sink));

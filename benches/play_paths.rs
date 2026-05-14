@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use glam::Affine3A;
-use thin_vec::thin_vec;
+use thin_vec::{ThinVec, thin_vec};
 use dumpster_fire_engine::resource_manager::*;
 
 fn world_with_one_actor() -> (World, LevelHandle, StageHandle, ActorHandle, ActorId) {
@@ -173,8 +173,8 @@ fn bench_collect_effects(c: &mut Criterion) {
 
         g.throughput(Throughput::Elements(depth as u64));
         g.bench_with_input(BenchmarkId::from_parameter(format!("depth_{depth}")), &depth, |b, _| {
-            let mut sink: Vec<Effect> = Vec::with_capacity(64);
-            let mut chain: Vec<SceneHandle> = Vec::with_capacity(depth);
+            let mut sink: ThinVec<Effect> = ThinVec::with_capacity(64);
+            let mut chain: ThinVec<SceneHandle> = ThinVec::with_capacity(depth);
             b.iter(|| {
                 sink.clear();
                 chain.clear();
