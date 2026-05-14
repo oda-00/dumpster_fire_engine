@@ -217,7 +217,7 @@ fn bench_apply_effect(c: &mut Criterion) {
 
     g.bench_function("schedule_transition", |b| {
         let (mut w, lh, sh, _, _) = build_world_with_play();
-        let mealy: Arc<[Effect]> = Arc::from(Vec::<Effect>::new());
+        let mealy: Arc<[Effect]> = Arc::from(ThinVec::<Effect>::new());
         b.iter(|| {
             w.apply_effect(Effect::ScheduleTransition {
                 level_h: lh, stage_h: sh,
@@ -255,7 +255,7 @@ fn bench_effect_clone(c: &mut Criterion) {
     });
 
     g.bench_function("schedule_transition_arc_slice_bump", |b| {
-        let mealy: Arc<[Effect]> = Arc::from(Vec::<Effect>::new());
+        let mealy: Arc<[Effect]> = Arc::from(ThinVec::<Effect>::new());
         let e = Effect::ScheduleTransition {
             level_h: lh, stage_h: sh,
             source: SceneId::new(1), target: SceneId::new(2),
@@ -285,7 +285,7 @@ fn bench_effect_clone_batch(c: &mut Criterion) {
     let ah = ActorHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData };
 
     for &n in &[16usize, 256, 4096] {
-        let effs: Vec<Effect> = (0..n).map(|i| {
+        let effs: ThinVec<Effect> = (0..n).map(|i| {
             if i % 3 == 0 {
                 Effect::SetActorLocal { level_h: lh, stage_h: sh, actor_h: ah, local: Affine3A::IDENTITY }
             } else if i % 3 == 1 {
@@ -297,7 +297,7 @@ fn bench_effect_clone_batch(c: &mut Criterion) {
 
         g.bench_with_input(BenchmarkId::from_parameter(n), &effs, |b, effs| {
             b.iter(|| {
-                let cloned: Vec<Effect> = effs.iter().cloned().collect();
+                let cloned: ThinVec<Effect> = effs.iter().cloned().collect();
                 black_box(cloned)
             });
         });

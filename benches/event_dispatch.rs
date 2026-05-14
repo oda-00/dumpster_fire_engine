@@ -58,7 +58,7 @@ fn matcher_actor_moved(b: Bencher) {
 
 // ── Handler dispatch — N events × M handlers (the inner loop in Play::collect_effects) ─
 
-fn make_events(n: usize) -> Vec<Event> {
+fn make_events(n: usize) -> ThinVec<Event> {
     (0..n).map(|i| match i % 4 {
         0 => Event::Tick { dt: 1.0 / 60.0 },
         1 => Event::SceneEntered(SceneId::new(i as i64)),
@@ -67,7 +67,7 @@ fn make_events(n: usize) -> Vec<Event> {
     }).collect()
 }
 
-fn make_handlers(m: usize) -> Vec<Handler> {
+fn make_handlers(m: usize) -> ThinVec<Handler> {
     fn no_op(_: &Event, _: &EvalCtx<'_>, _: &mut thin_vec::ThinVec<Effect>) {}
     (0..m).map(|i| Handler {
         matcher: match i % 5 {
@@ -96,8 +96,8 @@ fn handler_dispatch(b: Bencher, args: (usize, usize)) {
     let _ = ah;
     world.propagate_transforms();
 
-    let troupe_ids: Vec<TroupeId> = vec![];
-    let actors = Troupe(thin_vec::ThinVec::new());
+    let troupe_ids: ThinVec<TroupeId> = ThinVec![];
+    let actors = Troupe(thin_ThinVec::ThinVec::new());
     let ctx = EvalCtx {
         world: &world, level_h: lh, stage_h: sh,
         scene_id: SceneId::new(1),

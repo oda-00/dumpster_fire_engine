@@ -46,7 +46,7 @@ fn make_transform() -> Component {
     })
 }
 
-fn build_map_entities(n: usize) -> Vec<EntityMap> {
+fn build_map_entities(n: usize) -> ThinVec<EntityMap> {
     (0..n)
         .map(|i| {
             let mut e = EntityMap::new();
@@ -57,7 +57,7 @@ fn build_map_entities(n: usize) -> Vec<EntityMap> {
         .collect()
 }
 
-fn build_arr_entities(n: usize) -> Vec<EntityArr> {
+fn build_arr_entities(n: usize) -> ThinVec<EntityArr> {
     (0..n)
         .map(|i| {
             let mut e = EntityArr::new();

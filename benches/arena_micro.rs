@@ -12,7 +12,7 @@ const N: usize = 10_000;
 
 fn build_full() -> (Arena<ActorTag, u64>, Vec<Handle<ActorTag>>) {
     let mut a: Arena<ActorTag, u64> = Arena::with_capacity(N);
-    let h: Vec<_> = (0..N).map(|i| a.insert(i as u64)).collect();
+    let h: ThinVec<_> = (0..N).map(|i| a.insert(i as u64)).collect();
     (a, h)
 }
 

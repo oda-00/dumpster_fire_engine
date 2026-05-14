@@ -46,12 +46,12 @@ impl Scale {
 struct StageHandles {
     lh: LevelHandle,
     sh: StageHandle,
-    actors: Vec<(ActorId, ActorHandle)>,
+    actors: ThinVec<(ActorId, ActorHandle)>,
 }
 
-fn build_world(scale: Scale) -> (World, Vec<StageHandles>) {
+fn build_world(scale: Scale) -> (World, ThinVec<StageHandles>) {
     let mut world = World::new(WorldId::new(1));
-    let mut handles = Vec::with_capacity(scale.levels * scale.stages_per_level);
+    let mut handles = ThinVec::with_capacity(scale.levels * scale.stages_per_level);
 
     let mut sid_counter: i64 = 1;
     let mut actor_id_counter: i64 = 1;
@@ -66,7 +66,7 @@ fn build_world(scale: Scale) -> (World, Vec<StageHandles>) {
                 .unwrap();
             sid_counter += 1;
 
-            let mut actors = Vec::with_capacity(scale.actors_per_stage);
+            let mut actors = ThinVec::with_capacity(scale.actors_per_stage);
             for ai in 0..scale.actors_per_stage {
                 let aid = ActorId::new(actor_id_counter);
                 actor_id_counter += 1;
@@ -165,17 +165,17 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
     let troupe_rhs = TroupeId::new(2);
 
     let (lhs, rhs) = stage.actors.split_at(stage.actors.len() / 2);
-    let lhs_actors: Vec<ActiveActor> = lhs.iter()
+    let lhs_actors: ThinVec<ActiveActor> = lhs.iter()
         .map(|(id, h)| ActiveActor::new(stage.lh, stage.sh, *h, *id))
         .collect();
-    let rhs_actors: Vec<ActiveActor> = rhs.iter()
+    let rhs_actors: ThinVec<ActiveActor> = rhs.iter()
         .map(|(id, h)| ActiveActor::new(stage.lh, stage.sh, *h, *id))
         .collect();
 
     let bt_actor = stage.actors[0].1;
 
     let make_per_tick_bt = || -> BtNode {
-        let mut nodes = Vec::with_capacity(scale.bt_leaves);
+        let mut nodes = ThinVec::with_capacity(scale.bt_leaves);
         for k in 0..scale.bt_leaves {
             let dx = (k as f32) * 0.01;
             nodes.push(BtNode::leaf(
@@ -224,12 +224,12 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
     let action = SceneDef {
         id: s_action, stage: stage_id, parent: Some(s_root),
         kind: SceneKind::Atomic,
-        troupes: thin_vec![troupe_lhs, troupe_rhs],
-        initial_actors: thin_vec![
+        troupes: thin_ThinThinVec![troupe_lhs, troupe_rhs],
+        initial_actors: thin_ThinVec![
             lhs_actors.iter().cloned().collect(),
             rhs_actors.iter().cloned().collect(),
         ],
-        root: BtNode::Sequence(vec![
+        root: BtNode::Sequence(ThinVec![
             BtNode::leaf(
                 Condition::Always,
                 Effect::CueTroupe {

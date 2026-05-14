@@ -49,7 +49,7 @@ fn build_full_dense() -> DenseSlotMap<NodeKey, Node> {
 
 fn build_half_deleted_slotmap() -> SlotMap<NodeKey, Node> {
     let mut m: SlotMap<NodeKey, Node> = SlotMap::with_key();
-    let keys: Vec<_> = (0..N).map(|i| m.insert(make_node(i))).collect();
+    let keys: ThinVec<_> = (0..N).map(|i| m.insert(make_node(i))).collect();
     for (i, k) in keys.iter().enumerate() {
         if i % 2 == 0 { m.remove(*k); }
     }
@@ -58,7 +58,7 @@ fn build_half_deleted_slotmap() -> SlotMap<NodeKey, Node> {
 
 fn build_half_deleted_dense() -> DenseSlotMap<NodeKey, Node> {
     let mut m: DenseSlotMap<NodeKey, Node> = DenseSlotMap::with_key();
-    let keys: Vec<_> = (0..N).map(|i| m.insert(make_node(i))).collect();
+    let keys: ThinVec<_> = (0..N).map(|i| m.insert(make_node(i))).collect();
     for (i, k) in keys.iter().enumerate() {
         if i % 2 == 0 { m.remove(*k); }
     }

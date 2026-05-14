@@ -15,11 +15,11 @@ fn main() { divan::main(); }
 
 const SIZES: &[usize] = &[64, 1024, 10_000];
 
-fn build_world(n: usize) -> (World, LevelHandle, StageHandle, Vec<ActorHandle>) {
+fn build_world(n: usize) -> (World, LevelHandle, StageHandle, ThinVec<ActorHandle>) {
     let mut w = World::new(WorldId::new(1));
     let lh = w.spawn_level(LevelId::new(1), "L");
     let sh = w.spawn_stage(lh, StageId::new(1), "S").unwrap();
-    let actors: Vec<_> = (0..n).map(|i| {
+    let actors: ThinVec<_> = (0..n).map(|i| {
         let aid = ActorId::new(i as i64 + 1);
         let ah = w.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
         w.spawn_sub_entity(

@@ -21,16 +21,16 @@ const DT: f32 = 1.0 / 60.0;
 /// Minimal single-stage world with `n` actors, each carrying a Character
 /// sub-entity (Physics + Transform) and an Item sub-entity (Collision).
 /// Returns (world, level_handle, stage_handle, actor_handles).
-fn build_flat_world(n: usize) -> (World, LevelHandle, StageHandle, Vec<ActorHandle>) {
+fn build_flat_world(n: usize) -> (World, LevelHandle, StageHandle, ThinVec<ActorHandle>) {
     let mut world = World::new(WorldId::new(1));
     let lh = world.spawn_level(LevelId::new(1), "bench_level");
     let sh = world.spawn_stage(lh, StageId::new(1), "bench_stage").unwrap();
 
-    let mut actors = Vec::with_capacity(n);
+    let mut actors = ThinVec::with_capacity(n);
     for i in 0..n {
         let ah = world.spawn_actor(
             lh, sh, ActorId::new(i as i64 + 1),
-            Affine3A::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
+            Affine3A::from_translation(ThinVec3::new(i as f32, 0.0, 0.0)),
         ).unwrap();
 
         let cvi = world.spawn_sub_entity(
@@ -72,12 +72,12 @@ fn build_flat_world(n: usize) -> (World, LevelHandle, StageHandle, Vec<ActorHand
 }
 
 /// Build a world with a Play bound (for event_manager benches).
-fn build_world_with_play(n: usize) -> (World, LevelHandle, StageHandle, Vec<ActorHandle>) {
+fn build_world_with_play(n: usize) -> (World, LevelHandle, StageHandle, ThinVec<ActorHandle>) {
     let (mut world, lh, sh, actors) = build_flat_world(n);
 
     let stage_id = world.levels[lh].stages[sh].id;
     let troupe_all = TroupeId::new(1);
-    let all_actors: Vec<ActiveActor> = actors.iter().enumerate()
+    let all_actors: ThinVec<ActiveActor> = actors.iter().enumerate()
         .map(|(i, &ah)| ActiveActor::new(lh, sh, ah, ActorId::new(i as i64 + 1)))
         .collect();
 
@@ -260,7 +260,7 @@ fn bench_add_remove_component(c: &mut Criterion) {
         let lh = world.spawn_level(LevelId::new(1), "bench_level");
         let sh = world.spawn_stage(lh, StageId::new(1), "bench_stage").unwrap();
 
-        let mut actor_data: Vec<(ActorHandle, usize)> = Vec::with_capacity(n as usize);
+        let mut actor_data: ThinThinVec<(ActorHandle, usize)> = ThinVec::with_capacity(n as usize);
         for i in 0..n as i64 {
             let ah = world.spawn_actor(
                 lh, sh, ActorId::new(i + 1),
@@ -388,8 +388,8 @@ fn bench_collect_effects_isolated(c: &mut Criterion) {
         g.throughput(Throughput::Elements(n as u64));
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                let mut sink: Vec<Effect> = Vec::new();
-                let mut chain: Vec<SceneHandle> = Vec::with_capacity(8);
+                let mut sink: ThinVec<Effect> = ThinVec::new();
+                let mut chain: ThinVec<SceneHandle> = ThinVec::with_capacity(8);
                 for level in world.levels.values() {
                     level.collect_effects(black_box(DT), &world, &mut sink, &mut chain);
                 }
@@ -463,7 +463,7 @@ fn bench_bt_node_tick(c: &mut Criterion) {
     let leaf = make_leaf();
     g.bench_function("leaf_always", |b| {
         b.iter(|| {
-            let mut out = Vec::new();
+            let mut out = ThinVec::new();
             leaf.tick(&ctx, &mut out);
             black_box(out);
         });
@@ -474,7 +474,7 @@ fn bench_bt_node_tick(c: &mut Criterion) {
     g.throughput(Throughput::Elements(8));
     g.bench_function("sequence_8", |b| {
         b.iter(|| {
-            let mut out = Vec::new();
+            let mut out = ThinThinVec::new();
             seq.tick(&ctx, &mut out);
             black_box(out);
         });
@@ -487,7 +487,7 @@ fn bench_bt_node_tick(c: &mut Criterion) {
     };
     g.bench_function("parallel_8", |b| {
         b.iter(|| {
-            let mut out = Vec::new();
+            let mut out = ThinVec::new();
             par.tick(&ctx, &mut out);
             black_box(out);
         });
@@ -500,7 +500,7 @@ fn bench_bt_node_tick(c: &mut Criterion) {
     };
     g.bench_function("decorator_guard", |b| {
         b.iter(|| {
-            let mut out = Vec::new();
+            let mut out = ThinVec::new();
             guarded.tick(&ctx, &mut out);
             black_box(out);
         });
@@ -517,7 +517,7 @@ fn bench_bt_node_tick(c: &mut Criterion) {
     );
     g.bench_function("leaf_after_seconds", |b| {
         b.iter(|| {
-            let mut out = Vec::new();
+            let mut out = ThinVec::new();
             timed_leaf.tick(&ctx, &mut out);
             black_box(out);
         });
@@ -534,7 +534,7 @@ fn bench_condition_eval(c: &mut Criterion) {
     let mut g = c.benchmark_group("condition_eval");
 
     let (world, lh, sh, actors) = build_flat_world(100);
-    let all_actors: Vec<ActiveActor> = actors.iter().enumerate()
+    let all_actors: ThinVec<ActiveActor> = actors.iter().enumerate()
         .map(|(i, &ah)| ActiveActor::new(lh, sh, ah, ActorId::new(i as i64 + 1)))
         .collect();
     let troupe = Troupe(vec![all_actors]);

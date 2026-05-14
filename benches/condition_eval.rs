@@ -5,7 +5,7 @@
 use divan::{black_box, Bencher};
 use glam::{Affine3A, Vec3};
 use std::sync::Arc;
-use thin_vec::ThinVec;
+use thin_ThinVec::ThinVec;
 use dumpster_fire_engine::resource_manager::*;
 
 fn main() { divan::main(); }
@@ -17,10 +17,10 @@ struct Fixture {
     lh: LevelHandle,
     sh: StageHandle,
     troupe_a: TroupeId,
-    troupes: Vec<TroupeId>,
+    troupes: ThinVec<TroupeId>,
     actors: Troupe,
-    events: Vec<Event>,
-    actor_ids: Vec<ActorId>,
+    events: ThinVec<Event>,
+    actor_ids: ThinVec<ActorId>,
 }
 
 fn build_fixture(troupe_size: usize, n_events: usize) -> Fixture {
@@ -29,13 +29,13 @@ fn build_fixture(troupe_size: usize, n_events: usize) -> Fixture {
     let sh = world.spawn_stage(lh, StageId::new(1), "S").unwrap();
 
     let troupe_a = TroupeId::new(1);
-    let mut actor_ids = Vec::with_capacity(troupe_size);
-    let mut active = Vec::with_capacity(troupe_size);
+    let mut actor_ids = ThinVec::with_capacity(troupe_size);
+    let mut active = ThinVec::with_capacity(troupe_size);
     for i in 0..troupe_size {
         let aid = ActorId::new(i as i64 + 1);
         let ah = world.spawn_actor(
             lh, sh, aid,
-            Affine3A::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
+            Affine3A::from_translation(ThinVec3::new(i as f32, 0.0, 0.0)),
         ).unwrap();
         // Give every actor a Character sub-entity with one Component for
         // ActorHasComponent to find.
@@ -59,7 +59,7 @@ fn build_fixture(troupe_size: usize, n_events: usize) -> Fixture {
     let actors = Troupe(vec![active]);
     let troupes = vec![troupe_a];
 
-    let events: Vec<Event> = (0..n_events)
+    let events: ThinVec<Event> = (0..n_events)
         .map(|i| Event::Custom(EventId::new(i as i64), Arc::new(Payload::None)))
         .collect();
 

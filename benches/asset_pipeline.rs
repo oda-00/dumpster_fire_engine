@@ -49,7 +49,7 @@ fn bench_asset_evict(c: &mut Criterion) {
     g.bench_function("mid_list_1024", |b| {
         b.iter(|| {
             let mut arena = Fetcher::new(AssetArena::new());
-            let mut handles = Vec::with_capacity(1024);
+            let mut handles = ThinVec::with_capacity(1024);
             for i in 0..1024 {
                 handles.push(arena.fetch(AssetId::new(i as i64 + 1), make_kind(i)));
             }
@@ -64,7 +64,7 @@ fn bench_asset_evict(c: &mut Criterion) {
     g.bench_function("tail_1024", |b| {
         b.iter(|| {
             let mut arena = Fetcher::new(AssetArena::new());
-            let mut handles = Vec::with_capacity(1024);
+            let mut handles = ThinVec::with_capacity(1024);
             for i in 0..1024 {
                 handles.push(arena.fetch(AssetId::new(i as i64 + 1), make_kind(i)));
             }
@@ -118,7 +118,7 @@ fn bench_pipeline_queue(c: &mut Criterion) {
                     },
                 ));
             }
-            let mut order: Vec<u32> = Vec::with_capacity(5);
+            let mut order: ThinVec<u32> = ThinVec::with_capacity(5);
             while let Some(e) = p.pop_queue() {
                 order.push(e.priority);
             }
@@ -195,10 +195,10 @@ fn bench_baseline_sorted_vec(c: &mut Criterion) {
             });
         });
 
-        // Sorted-Vec — push then sort, drain in order.
-        g.bench_with_input(BenchmarkId::new("sorted_vec_drain", n), &n, |b, &n| {
+        // Sorted-ThinVec — push then sort, drain in order.
+        g.bench_with_input(BenchmarkId::new("sorted_ThinVec_drain", n), &n, |b, &n| {
             b.iter(|| {
-                let mut v: Vec<u32> = Vec::with_capacity(n);
+                let mut v: ThinThinVec<u32> = Vec::with_capacity(n);
                 for i in 0..n {
                     v.push(((i * 2654435761usize) & 0xFFFF_FFFF) as u32);
                 }
