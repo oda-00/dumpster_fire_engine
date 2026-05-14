@@ -169,8 +169,6 @@ fn main() {
     // ─────────────────────────────────────────────────────────────────────
     println!("=== event_manager smoke test ===");
 
-    use thin_vec::thin_vec;
-
     // Add a second actor (Carol) so AndParallel regions have something to do.
     let ah_carol = world.spawn_actor(
         lh, sh,
@@ -198,7 +196,7 @@ fn main() {
 
     // ── Act1: Atomic with a 2-leaf BT Sequence ────────────────────────────
 
-    let act1_bt = BtNode::Sequence(vec![
+    let act1_bt = BtNode::Sequence(thin_vec![
         BtNode::leaf(
             Condition::OnTick(0),
             Effect::SetActorLocal {

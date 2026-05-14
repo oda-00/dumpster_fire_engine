@@ -8,7 +8,6 @@ thin-vec = "0.2"
 glam     = "0.29"
 rayon    = "1"
 ash = "0.38.0"
-sdl2 = "0.38.0"
 winit = "0.30.13"
 
 [dev-dependencies]
