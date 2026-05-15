@@ -148,10 +148,7 @@ impl<'src> Lexer<'src> {
         let line = self.line;
         let col  = self.col;
         self.advance(); // opening "
-        // Build the string into a temp Vec<u8>, then intern as Arc<str>.
-        // The Vec is scratch (not stored anywhere), so it does not violate the
-        // "no std::Vec in stored types" rule.
-        let mut buf: Vec<u8> = Vec::new();
+        let mut buf: ThinVec<u8> = ThinVec::new();
         loop {
             match self.advance() {
                 Some(b'"') => break,
@@ -163,17 +160,17 @@ impl<'src> Lexer<'src> {
                     Some(b'\\') => buf.push(b'\\'),
                     Some(b'0')  => buf.push(0),
                     _ => return Err(LexError {
-                        msg: "invalid escape sequence".into(), line, col,
+                        msg: Arc::from("invalid escape sequence"), line, col,
                     }),
                 },
                 Some(c) => buf.push(c),
                 None => return Err(LexError {
-                    msg: "unterminated string".into(), line, col,
+                    msg: Arc::from("unterminated string"), line, col,
                 }),
             }
         }
         let text = core::str::from_utf8(&buf)
-            .map_err(|_| LexError { msg: "non-utf8 string".into(), line, col })?;
+            .map_err(|_| LexError { msg: Arc::from("non-utf8 string"), line, col })?;
         Ok(TokenKind::StringLit(Arc::<str>::from(text)))
     }
 
@@ -214,18 +211,19 @@ impl<'src> Lexer<'src> {
             self.advance(); // '.'
             while self.peek().is_some_and(|b| b.is_ascii_digit() || b == b'_') { self.advance(); }
         }
-        // Use a local Vec<u8> only as scratch — not stored in any data structure.
         let raw_slice = &self.src[start..self.pos];
-        let mut cleaned: Vec<u8> = Vec::with_capacity(raw_slice.len());
+        let mut cleaned: ThinVec<u8> = ThinVec::with_capacity(raw_slice.len());
         for &b in raw_slice { if b != b'_' { cleaned.push(b); } }
         let s = core::str::from_utf8(&cleaned).unwrap();
         if is_float {
             s.parse::<f64>().map(TokenKind::FloatLit).map_err(|_| LexError {
-                msg: format!("invalid float literal `{s}`"), line, col,
+                msg: Arc::<str>::from(format!("invalid float literal `{s}`").as_str()),
+                line, col,
             })
         } else {
             s.parse::<i64>().map(TokenKind::IntLit).map_err(|_| LexError {
-                msg: format!("invalid integer literal `{s}`"), line, col,
+                msg: Arc::<str>::from(format!("invalid integer literal `{s}`").as_str()),
+                line, col,
             })
         }
     }
@@ -275,11 +273,11 @@ fn keyword_or_ident(w: &str) -> TokenKind {
     }
 }
 
-fn format_unexpected(b: u8) -> String {
+fn format_unexpected(b: u8) -> Arc<str> {
     if b.is_ascii_graphic() {
-        format!("unexpected character '{}'", b as char)
+        Arc::<str>::from(format!("unexpected character '{}'", b as char).as_str())
     } else {
-        format!("unexpected byte 0x{b:02x}")
+        Arc::<str>::from(format!("unexpected byte 0x{b:02x}").as_str())
     }
 }
 
@@ -287,7 +285,7 @@ fn format_unexpected(b: u8) -> String {
 
 #[derive(Debug)]
 pub struct LexError {
-    pub msg:  String,
+    pub msg:  Arc<str>,
     pub line: u32,
     pub col:  u32,
 }

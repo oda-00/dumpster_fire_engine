@@ -51,14 +51,14 @@ pub fn compile_to_object(
     out_obj: &std::path::Path,
 ) -> Result<(), CodegenError> {
     Target::initialize_native(&InitializationConfig::default())
-        .map_err(|e| CodegenError::Llvm(format!("target init: {e}")))?;
+        .map_err(|e| CodegenError::Llvm(std::sync::Arc::<str>::from(format!("target init: {e}").as_str())))?;
 
     let triple   = TargetMachine::get_default_triple();
     let cpu      = TargetMachine::get_host_cpu_name().to_string();
     let features = TargetMachine::get_host_cpu_features().to_string();
 
     let target = Target::from_triple(&triple)
-        .map_err(|e| CodegenError::Llvm(format!("target lookup: {e}")))?;
+        .map_err(|e| CodegenError::Llvm(std::sync::Arc::<str>::from(format!("target lookup: {e}").as_str())))?;
     let tm = target.create_target_machine(
         &triple, &cpu, &features,
         opt_level, RelocMode::PIC, CodeModel::Default,
@@ -78,13 +78,13 @@ pub fn compile_to_object(
         OptimizationLevel::Aggressive  => "default<O3>",
     };
     cg.module.run_passes(passes, &tm, PassBuilderOptions::create())
-        .map_err(|e| CodegenError::Llvm(format!("opt: {e}")))?;
+        .map_err(|e| CodegenError::Llvm(std::sync::Arc::<str>::from(format!("opt: {e}").as_str())))?;
 
     cg.module.verify()
-        .map_err(|e| CodegenError::Llvm(format!("verify: {e}")))?;
+        .map_err(|e| CodegenError::Llvm(std::sync::Arc::<str>::from(format!("verify: {e}").as_str())))?;
 
     tm.write_to_file(&cg.module, FileType::Object, out_obj)
-        .map_err(|e| CodegenError::Llvm(format!("emit obj: {e}")))?;
+        .map_err(|e| CodegenError::Llvm(std::sync::Arc::<str>::from(format!("emit obj: {e}").as_str())))?;
     Ok(())
 }
 
@@ -167,6 +167,7 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn compile(&mut self, hir: &HirScript) -> Result<(), CodegenError> {
+        self.emit_abi_version_fn();
         self.emit_state_size_fn(hir.state_size);
         self.emit_state_version_fn(hir.state_version);
         self.emit_init_state_fn(hir)?;
@@ -186,6 +187,17 @@ impl<'ctx> Codegen<'ctx> {
         self.emit_create_scene_defs_fn(entries.len() as u32);
 
         Ok(())
+    }
+
+    // ── df_abi_version ────────────────────────────────────────────────────────
+
+    fn emit_abi_version_fn(&self) {
+        let ty = self.i32_ty.fn_type(&[], false);
+        let f = self.module.add_function("df_abi_version", ty, Some(Linkage::External));
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        let v = self.i32_ty.const_int(ENGINE_ABI_VERSION as u64, false);
+        self.builder.build_return(Some(&v)).unwrap();
     }
 
     // ── df_state_size / df_state_version ─────────────────────────────────────
@@ -278,9 +290,13 @@ impl<'ctx> Codegen<'ctx> {
                 let bb = self.ctx.append_basic_block(f, &format!("mig_{}", m.from_version));
                 cases.push((self.i32_ty.const_int(m.from_version as u64, false), bb));
             }
-            // build_switch wants a &[(IntValue, BasicBlock)]; collect into a temp.
-            let case_pairs: Vec<_> = cases.iter().map(|(v, b)| (*v, *b)).collect();
-            self.builder.build_switch(old_version, done_bb, &case_pairs).unwrap();
+            // build_switch wants a `&[(IntValue, BasicBlock)]`.  We rebuild into
+            // a `ThinVec` so the slice it expects can come from `.as_slice()`
+            // without going through `std::Vec`.
+            let mut case_pairs: ThinVec<(IntValue<'ctx>, BasicBlock<'ctx>)> =
+                ThinVec::with_capacity(cases.len());
+            for (v, b) in cases.iter() { case_pairs.push((*v, *b)); }
+            self.builder.build_switch(old_version, done_bb, &case_pairs[..]).unwrap();
 
             for (m, (_, bb)) in hir.migrations.iter().zip(cases.iter()) {
                 self.builder.position_at_end(*bb);
@@ -1063,7 +1079,7 @@ impl<'ctx> Codegen<'ctx> {
 
 #[derive(Debug)]
 pub enum CodegenError {
-    Llvm(String),
+    Llvm(std::sync::Arc<str>),
 }
 
 impl core::fmt::Display for CodegenError {

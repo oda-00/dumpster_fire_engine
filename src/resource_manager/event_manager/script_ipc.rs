@@ -31,7 +31,7 @@ pub enum EngineMsg {
 }
 
 pub enum DaemonMsg {
-    CompileOk  { script_id: i64, so_path: Arc<str>, state_size: u32, state_version: u32 },
+    CompileOk  { script_id: i64, o_path: Arc<str>, state_size: u32, state_version: u32 },
     CompileErr { script_id: i64, diagnostics: ThinVec<Arc<str>> },
 }
 
@@ -60,10 +60,10 @@ pub fn write_engine_msg<W: Write>(w: &mut W, m: &EngineMsg) -> std::io::Result<(
 pub fn write_daemon_msg<W: Write>(w: &mut W, m: &DaemonMsg) -> std::io::Result<()> {
     let mut buf: ThinVec<u8> = ThinVec::new();
     match m {
-        DaemonMsg::CompileOk { script_id, so_path, state_size, state_version } => {
+        DaemonMsg::CompileOk { script_id, o_path, state_size, state_version } => {
             buf.push(TAG_COMPILE_OK);
             buf.extend_from_slice(&script_id.to_le_bytes());
-            put_str(&mut buf, so_path);
+            put_str(&mut buf, o_path);
             buf.extend_from_slice(&state_size.to_le_bytes());
             buf.extend_from_slice(&state_version.to_le_bytes());
         }
@@ -102,7 +102,7 @@ pub fn read_daemon_msg<R: Read>(r: &mut R) -> std::io::Result<DaemonMsg> {
     match tag {
         TAG_COMPILE_OK => Ok(DaemonMsg::CompileOk {
             script_id:     c.i64()?,
-            so_path:       c.string()?,
+            o_path:       c.string()?,
             state_size:    c.u32()?,
             state_version: c.u32()?,
         }),

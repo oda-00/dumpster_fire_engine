@@ -86,11 +86,12 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut body = ThinVec::new();
         while !self.check_kind(&TokenKind::RBrace) {
-            // <field> = <expr>;
+            // <field> = <expr>[;] — trailing semicolon is optional, matching
+            // the scene-body grammar.
             let field = self.expect_ident()?;
             self.expect(TokenKind::Eq)?;
             let value = self.parse_expr()?;
-            self.expect(TokenKind::Semi)?;
+            self.consume(&TokenKind::Semi);
             body.push(MigrateStmt::Assign { field, value });
         }
         self.expect(TokenKind::RBrace)?;
@@ -433,7 +434,7 @@ impl Parser {
         else {
             let t = self.peek();
             Err(ParseError {
-                msg: format!("expected {:?}, got {:?}", k, t.kind),
+                msg: Arc::<str>::from(format!("expected {:?}, got {:?}", k, t.kind).as_str()),
                 line: t.line, col: t.col,
             })
         }
@@ -444,7 +445,7 @@ impl Parser {
         match t.kind {
             TokenKind::Ident(s) => Ok(s),
             _ => Err(ParseError {
-                msg: format!("expected identifier, got {:?}", t.kind),
+                msg: Arc::<str>::from(format!("expected identifier, got {:?}", t.kind).as_str()),
                 line: t.line, col: t.col,
             }),
         }
@@ -455,7 +456,7 @@ impl Parser {
         match t.kind {
             TokenKind::StringLit(s) => Ok(s),
             _ => Err(ParseError {
-                msg: format!("expected string literal, got {:?}", t.kind),
+                msg: Arc::<str>::from(format!("expected string literal, got {:?}", t.kind).as_str()),
                 line: t.line, col: t.col,
             }),
         }
@@ -496,7 +497,7 @@ fn same_kind(a: &TokenKind, b: &TokenKind) -> bool {
 
 #[derive(Debug)]
 pub struct ParseError {
-    pub msg:  String,
+    pub msg:  Arc<str>,
     pub line: u32,
     pub col:  u32,
 }

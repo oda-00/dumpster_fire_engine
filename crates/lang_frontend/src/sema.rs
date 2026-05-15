@@ -48,14 +48,21 @@ fn type_align(ty: Ty) -> u32 { type_size(ty) }
 /// + type-tag sequence in declaration order, truncated to 32 bits. Adding,
 /// removing, renaming, or retyping a field changes the version deterministically.
 fn compute_state_version(fields: &[ast::StateField]) -> u32 {
-    let mut buf: Vec<u8> = Vec::new();
+    // Hash incrementally so no scratch buffer is needed — preserves the
+    // "no std::Vec scratch" invariant.
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME:  u64 = 0x100000001b3;
+    let mut h: u64 = OFFSET;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes { h = (h ^ b as u64).wrapping_mul(PRIME); }
+    };
     for f in fields {
-        buf.extend_from_slice(f.name.as_bytes());
-        buf.push(b':');
-        buf.extend_from_slice(type_tag(f.ty).as_bytes());
-        buf.push(b'\n');
+        mix(f.name.as_bytes());
+        mix(b":");
+        mix(type_tag(f.ty).as_bytes());
+        mix(b"\n");
     }
-    fnv1a(&buf) as u32
+    h as u32
 }
 
 fn scene_raw_id(script_name: &str, scene_name: &str) -> i64 {
@@ -126,7 +133,7 @@ impl Sema {
             let pos = self.scenes.partition_point(|(n, _)| n.as_ref() < s.name.as_ref());
             if self.scenes.get(pos).is_some_and(|(n, _)| n.as_ref() == s.name.as_ref()) {
                 return Err(SemaError {
-                    msg: format!("duplicate scene `{}`", s.name),
+                    msg: Arc::<str>::from(format!("duplicate scene `{}`", s.name).as_str()),
                 });
             }
             self.scenes.insert(pos, (s.name.clone(), raw));
@@ -309,7 +316,7 @@ impl Sema {
                     HirExpr::StateLoad { offset, ty }
                 } else {
                     return Err(SemaError {
-                        msg: format!("unknown scope `{scope}`; expected `old` or `new`"),
+                        msg: Arc::<str>::from(format!("unknown scope `{scope}`; expected `old` or `new`").as_str()),
                     });
                 }
             }
@@ -334,12 +341,16 @@ impl Sema {
 
     fn lookup_field(&self, name: &str) -> Result<(u32, Ty), SemaError> {
         binary_lookup(&self.fields, name)
-            .ok_or_else(|| SemaError { msg: format!("unknown state field `{name}`") })
+            .ok_or_else(|| SemaError {
+                msg: Arc::<str>::from(format!("unknown state field `{name}`").as_str()),
+            })
     }
 
     fn lookup_old_field(&self, name: &str) -> Result<(u32, Ty), SemaError> {
         binary_lookup(&self.old_fields, name)
-            .ok_or_else(|| SemaError { msg: format!("`old.{name}` not in previous layout") })
+            .ok_or_else(|| SemaError {
+                msg: Arc::<str>::from(format!("`old.{name}` not in previous layout").as_str()),
+            })
     }
 
     fn lookup_scene(&self, name: &str) -> Result<i64, SemaError> {
@@ -347,7 +358,9 @@ impl Sema {
         self.scenes.get(pos)
             .filter(|(n, _)| n.as_ref() == name)
             .map(|(_, id)| *id)
-            .ok_or_else(|| SemaError { msg: format!("unknown scene `{name}`") })
+            .ok_or_else(|| SemaError {
+                msg: Arc::<str>::from(format!("unknown scene `{name}`").as_str()),
+            })
     }
 }
 
@@ -373,7 +386,7 @@ fn binary_lookup(table: &ThinVec<(Arc<str>, u32, Ty)>, key: &str) -> Option<(u32
 
 #[derive(Debug)]
 pub struct SemaError {
-    pub msg: String,
+    pub msg: Arc<str>,
 }
 
 impl core::fmt::Display for SemaError {
@@ -434,5 +447,73 @@ mod tests {
     fn fnv_hash_stable() {
         assert_eq!(fnv1a(b""),     0xcbf29ce484222325);
         assert_eq!(fnv1a(b"abc"),  0xe71fa2190541574b);
+    }
+
+    #[test]
+    fn migration_old_state_load_resolves() {
+        let src = r#"
+            script "m" {
+                state {
+                    x: i32 = 0
+                    y: f64 = 0.0
+                }
+                migrate from 123 {
+                    x = old.x
+                    y = old.y + 1.0
+                }
+                scene s { }
+            }
+        "#;
+        let h = lower_str(src);
+        assert_eq!(h.migrations.len(), 1);
+        let m = &h.migrations[0];
+        assert_eq!(m.from_version, 123);
+        assert_eq!(m.stmts.len(), 2);
+        // y at offset 8 — first migration stmt writes x (offset 0), second y (offset 8).
+        assert_eq!(m.stmts[0].new_offset, 0);
+        assert_eq!(m.stmts[1].new_offset, 8);
+    }
+
+    #[test]
+    fn migration_old_field_outside_block_errors() {
+        let src = r#"
+            script "m" {
+                state { x: i32 = 0 }
+                scene s {
+                    on_enter => x = old.x;
+                }
+            }
+        "#;
+        let toks = Lexer::new(src).tokenise().unwrap();
+        let ast  = Parser::new(toks).parse_script().unwrap();
+        match super::lower(ast) {
+            Ok(_) => panic!("expected `old.x` outside migrate to fail"),
+            Err(e) => assert!(e.msg.contains("only valid in `migrate")),
+        }
+    }
+
+    #[test]
+    fn duplicate_scene_errors() {
+        let src = r#"
+            script "m" {
+                scene s { }
+                scene s { }
+            }
+        "#;
+        let toks = Lexer::new(src).tokenise().unwrap();
+        let ast  = Parser::new(toks).parse_script().unwrap();
+        match super::lower(ast) {
+            Ok(_) => panic!("expected duplicate-scene error"),
+            Err(e) => assert!(e.msg.contains("duplicate scene")),
+        }
+    }
+
+    #[test]
+    fn state_version_changes_with_layout() {
+        let v_a = lower_str(r#"script "a" { state { x: i32 = 0 } scene s {} }"#).state_version;
+        let v_b = lower_str(r#"script "a" { state { x: f64 = 0.0 } scene s {} }"#).state_version;
+        let v_c = lower_str(r#"script "a" { state { x: i32 = 0, y: i32 = 0 } scene s {} }"#).state_version;
+        assert_ne!(v_a, v_b, "type change must change version");
+        assert_ne!(v_a, v_c, "adding a field must change version");
     }
 }

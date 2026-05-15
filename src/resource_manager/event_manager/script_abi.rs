@@ -6,6 +6,10 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+/// ABI contract version exported by every compiled `.lang` script as
+/// `df_abi_version() -> u32`.  Must match `ENGINE_ABI_VERSION` in `langc`.
+pub const ENGINE_ABI_VERSION: u32 = 1;
+
 /// Wide-form ActorHandle packed for FFI: `(generation << 32) | idx`.
 pub type ActorHandlePacked = u64;
 
@@ -20,6 +24,13 @@ pub struct ComponentCacheSlice {
 ///
 /// Field order, sizes, and offsets are part of the public ABI (see the
 /// `static_assertions` below).  Adding fields means bumping the SO ABI version.
+/// SAFETY: `EngineAPI` carries raw pointers into engine-owned arrays and
+/// effect sinks.  `Send`/`Sync` are sound because the engine constructs one
+/// `EngineAPI` per active script and never shares pointers across them
+/// (`script::tick_batch` requires non-aliasing sinks; see its docs).
+unsafe impl Send for EngineAPI {}
+unsafe impl Sync for EngineAPI {}
+
 #[repr(C)]
 pub struct EngineAPI {
     /// Stage SoA: actor-local transforms (`Affine3A` = `[f32;12]`).

@@ -581,7 +581,9 @@ dependencies = [
  "glam",
  "gltf",
  "iai-callgrind",
- "libloading",
+ "lang_frontend",
+ "langc",
+ "object",
  "rayon",
  "rustix 0.38.44",
  "slotmap",
@@ -997,7 +999,7 @@ version = "0.1.0"
 dependencies = [
  "inkwell",
  "lang_frontend",
- "libloading",
+ "rayon",
  "rustix 0.38.44",
  "thin-vec",
 ]
@@ -1383,6 +1385,15 @@ dependencies = [
  "objc2",
  "objc2-core-location",
  "objc2-foundation",
+]
+
+[[package]]
+name = "object"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
