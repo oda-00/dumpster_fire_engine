@@ -85,6 +85,7 @@ harness = false
 [[bench]]
 name = "iai_critical"
 harness = false
+required-features = ["iai-bench"]
 
 [[bench]]
 name = "mesh_pipeline"
@@ -117,6 +118,12 @@ path = "src/bin/game.rs"
 [[bin]]
 name = "render_demo"
 path = "src/bin/render_demo.rs"
+
+[features]
+# Run iai-callgrind instruction-count benchmarks.  Requires iai-callgrind-runner
+# to be installed separately:  cargo install iai-callgrind-runner --version 0.16.1
+# Then:  cargo bench --bench iai_critical --features iai-bench
+iai-bench = []
 
 [profile.release]
 lto           = "fat"
