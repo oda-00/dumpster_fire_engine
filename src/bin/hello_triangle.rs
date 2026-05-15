@@ -108,6 +108,7 @@ impl ApplicationHandler for App {
             ctx.queue,
             ctx.queue_family_index,
             &ctx.memory_properties,
+            ctx.depth_format,
             &ctx.entry,
             graphics_forge,
         )
@@ -150,9 +151,10 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            WindowEvent::Resized(_) => {
-                // Swapchain recreation on resize is left as a future exercise;
-                // for now just skip the next frame to avoid a validation error.
+            WindowEvent::Resized(new_size) => {
+                if let Some(window) = live.renderer.window_mut(live.window_handle) {
+                    window.resize(new_size.width, new_size.height);
+                }
             }
             WindowEvent::RedrawRequested => {
                 let window = live
@@ -163,7 +165,7 @@ impl ApplicationHandler for App {
                 // draw_frame issues all GraphicsFrame draw calls from every
                 // factory the window owns.
                 let result = unsafe {
-                    window.draw_frame(&live.ctx.device, live.ctx.queue)
+                    window.draw_frame(&live.ctx.instance, &live.ctx.device, live.ctx.queue)
                 };
                 if let Err(e) = result {
                     eprintln!("draw_frame error: {e:?}");

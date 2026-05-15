@@ -67,6 +67,10 @@ harness = false
 name = "iai_critical"
 harness = false
 
+[[bench]]
+name = "mesh_pipeline"
+harness = false
+
 [[bin]]
 name = "hello_triangle"
 path = "src/bin/hello_triangle.rs"

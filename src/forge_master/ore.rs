@@ -456,6 +456,23 @@ pub struct ForgeImage {
     pub extent: vk::Extent3D,
 }
 
+/// Infer the correct `ImageAspectFlags` from a format.
+/// Depth-only formats → DEPTH; combined depth-stencil → DEPTH | STENCIL;
+/// everything else (colour, storage) → COLOR.
+pub fn aspect_mask_for_format(format: vk::Format) -> vk::ImageAspectFlags {
+    match format {
+        vk::Format::D16_UNORM
+        | vk::Format::D32_SFLOAT
+        | vk::Format::X8_D24_UNORM_PACK32 => vk::ImageAspectFlags::DEPTH,
+        vk::Format::D16_UNORM_S8_UINT
+        | vk::Format::D24_UNORM_S8_UINT
+        | vk::Format::D32_SFLOAT_S8_UINT => {
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        }
+        _ => vk::ImageAspectFlags::COLOR,
+    }
+}
+
 impl ForgeImage {
     pub fn create_2d(
         device: &ash::Device,
@@ -493,13 +510,14 @@ impl ForgeImage {
         let memory = unsafe { device.allocate_memory(&alloc, None)? };
         unsafe { device.bind_image_memory(handle, memory, 0)? };
 
+        let aspect_mask = aspect_mask_for_format(format);
         let view_info = vk::ImageViewCreateInfo::default()
             .image(handle)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .aspect_mask(aspect_mask)
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
@@ -549,6 +567,33 @@ pub const MAT4_IDENTITY: [f32; 16] = [
     0.0, 0.0, 0.0, 1.0,
 ];
 
+/// Everything `GpuMesh::upload` needs in one bundle.
+///
+/// Best-practice version supports a **dedicated transfer queue** (a queue
+/// family that exposes `TRANSFER` but not `GRAPHICS`/`COMPUTE` — typical on
+/// discrete GPUs). When `transfer_family != graphics_family`, the upload
+/// performs a queue-family **ownership release** on the transfer queue and
+/// a matching **acquire** on the graphics queue so the buffer is legal to
+/// read in the vertex shader stage.
+///
+/// When both families are equal (integrated GPU, fallback), the same code
+/// path collapses to a normal single-queue submit — barriers degrade to a
+/// pipeline barrier without an ownership transfer.
+pub struct MeshUploadCtx<'a> {
+    pub device:             &'a ash::Device,
+    pub memory_properties:  &'a vk::PhysicalDeviceMemoryProperties,
+    /// Queue used to perform the staging→device copy.
+    pub transfer_queue:        vk::Queue,
+    pub transfer_queue_family: u32,
+    pub transfer_command_pool: vk::CommandPool,
+    /// Queue family the buffer will eventually be read on (vertex shader).
+    pub graphics_queue:        vk::Queue,
+    pub graphics_queue_family: u32,
+    /// Used to record the matching acquire barrier when families differ.
+    /// May equal `transfer_command_pool` when families are equal.
+    pub graphics_command_pool: vk::CommandPool,
+}
+
 #[derive(Debug)]
 pub struct GpuMesh {
     pub vertex_buffer: ForgeBuffer,
@@ -557,17 +602,15 @@ pub struct GpuMesh {
 }
 
 impl GpuMesh {
-    /// Upload `ore` to GPU-local vertex and index buffers.
+    /// Upload `ore` to GPU-local vertex and index buffers using a dedicated
+    /// transfer queue when available.
     ///
-    /// Uses a one-shot command buffer on `command_pool`; blocks until the
-    /// transfer queue is idle. Both staging buffers are freed before returning.
-    pub fn upload(
-        device:            &ash::Device,
-        queue:             vk::Queue,
-        command_pool:      vk::CommandPool,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
-        ore:               &MeshOre,
-    ) -> ForgeResult<Self> {
+    /// Blocks until the transfer completes (one-shot path — fine for asset
+    /// boot; for streaming, batch many meshes per submit and use a fence
+    /// instead of `queue_wait_idle`).
+    pub fn upload(ctx: &MeshUploadCtx, ore: &MeshOre) -> ForgeResult<Self> {
+        let device            = ctx.device;
+        let memory_properties = ctx.memory_properties;
         let vb_bytes = vertices_as_bytes(&ore.vertices);
         let ib_bytes = indices_as_bytes(&ore.indices);
 
@@ -601,39 +644,154 @@ impl GpuMesh {
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
 
-        // One-shot copy command buffer.
+        let need_ownership_xfer =
+            ctx.transfer_queue_family != ctx.graphics_queue_family;
+
+        // ── Transfer queue: copy + (optional) release barriers ──────────────
         unsafe {
-            let cb = {
+            let transfer_cb = {
                 let alloc = vk::CommandBufferAllocateInfo::default()
-                    .command_pool(command_pool)
+                    .command_pool(ctx.transfer_command_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1);
                 device.allocate_command_buffers(&alloc).map_err(ForgeError::Vk)?[0]
             };
 
             device.begin_command_buffer(
-                cb,
+                transfer_cb,
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             ).map_err(ForgeError::Vk)?;
 
             device.cmd_copy_buffer(
-                cb, vb_stage.handle, vertex_buffer.handle,
+                transfer_cb, vb_stage.handle, vertex_buffer.handle,
                 &[vk::BufferCopy::default().src_offset(0).dst_offset(0).size(vb_size)],
             );
             device.cmd_copy_buffer(
-                cb, ib_stage.handle, index_buffer.handle,
+                transfer_cb, ib_stage.handle, index_buffer.handle,
                 &[vk::BufferCopy::default().src_offset(0).dst_offset(0).size(ib_size)],
             );
 
-            device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
+            // Release ownership to graphics family if they differ.
+            // src_access=TRANSFER_WRITE, dst_access=0 on the release side.
+            if need_ownership_xfer {
+                let release = [
+                    vk::BufferMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::empty())
+                        .src_queue_family_index(ctx.transfer_queue_family)
+                        .dst_queue_family_index(ctx.graphics_queue_family)
+                        .buffer(vertex_buffer.handle)
+                        .offset(0).size(vb_size),
+                    vk::BufferMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::empty())
+                        .src_queue_family_index(ctx.transfer_queue_family)
+                        .dst_queue_family_index(ctx.graphics_queue_family)
+                        .buffer(index_buffer.handle)
+                        .offset(0).size(ib_size),
+                ];
+                device.cmd_pipeline_barrier(
+                    transfer_cb,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::DependencyFlags::empty(),
+                    &[], &release, &[],
+                );
+            }
 
-            let cbs = [cb];
-            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
-            device.queue_submit(queue, &[submit], vk::Fence::null())
+            device.end_command_buffer(transfer_cb).map_err(ForgeError::Vk)?;
+
+            // Submit transfer; signal a semaphore if we need an acquire.
+            let transfer_cbs = [transfer_cb];
+
+            // Fence so we can free staging deterministically.
+            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)
                 .map_err(ForgeError::Vk)?;
-            device.queue_wait_idle(queue).map_err(ForgeError::Vk)?;
-            device.free_command_buffers(command_pool, &cbs);
+
+            // Semaphore only needed when the graphics queue must wait on
+            // the transfer queue (i.e. different families OR different queues).
+            let (sem, gfx_cb) = if need_ownership_xfer {
+                let sem = device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                    .map_err(ForgeError::Vk)?;
+
+                // Build graphics-side acquire command buffer.
+                let alloc = vk::CommandBufferAllocateInfo::default()
+                    .command_pool(ctx.graphics_command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1);
+                let gfx_cb = device.allocate_command_buffers(&alloc).map_err(ForgeError::Vk)?[0];
+
+                device.begin_command_buffer(
+                    gfx_cb,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                ).map_err(ForgeError::Vk)?;
+
+                let acquire = [
+                    vk::BufferMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)
+                        .src_queue_family_index(ctx.transfer_queue_family)
+                        .dst_queue_family_index(ctx.graphics_queue_family)
+                        .buffer(vertex_buffer.handle)
+                        .offset(0).size(vb_size),
+                    vk::BufferMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::INDEX_READ)
+                        .src_queue_family_index(ctx.transfer_queue_family)
+                        .dst_queue_family_index(ctx.graphics_queue_family)
+                        .buffer(index_buffer.handle)
+                        .offset(0).size(ib_size),
+                ];
+                device.cmd_pipeline_barrier(
+                    gfx_cb,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::VERTEX_INPUT,
+                    vk::DependencyFlags::empty(),
+                    &[], &acquire, &[],
+                );
+
+                device.end_command_buffer(gfx_cb).map_err(ForgeError::Vk)?;
+
+                (Some(sem), Some(gfx_cb))
+            } else {
+                (None, None)
+            };
+
+            if let Some(sem) = sem {
+                let signal = [sem];
+                let submit = vk::SubmitInfo::default()
+                    .command_buffers(&transfer_cbs)
+                    .signal_semaphores(&signal);
+                device.queue_submit(ctx.transfer_queue, &[submit], vk::Fence::null())
+                    .map_err(ForgeError::Vk)?;
+
+                // Graphics-side acquire submit; signal the fence.
+                let gfx_cbs = [gfx_cb.unwrap()];
+                let wait_stages = [vk::PipelineStageFlags::VERTEX_INPUT];
+                let wait = [sem];
+                let submit_g = vk::SubmitInfo::default()
+                    .wait_semaphores(&wait)
+                    .wait_dst_stage_mask(&wait_stages)
+                    .command_buffers(&gfx_cbs);
+                device.queue_submit(ctx.graphics_queue, &[submit_g], fence)
+                    .map_err(ForgeError::Vk)?;
+            } else {
+                let submit = vk::SubmitInfo::default().command_buffers(&transfer_cbs);
+                device.queue_submit(ctx.transfer_queue, &[submit], fence)
+                    .map_err(ForgeError::Vk)?;
+            }
+
+            // Wait for completion before freeing staging.
+            device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+            device.destroy_fence(fence, None);
+            if let Some(sem) = sem { device.destroy_semaphore(sem, None); }
+
+            device.free_command_buffers(ctx.transfer_command_pool, &transfer_cbs);
+            if let Some(gfx_cb) = gfx_cb {
+                device.free_command_buffers(ctx.graphics_command_pool, &[gfx_cb]);
+            }
 
             vb_stage.destroy(device);
             ib_stage.destroy(device);

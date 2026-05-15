@@ -89,14 +89,8 @@ impl ApplicationHandler for App {
         );
 
         // ── Upload to GPU ────────────────────────────────────────────────────
-        let gpu_mesh = GpuMesh::upload(
-            &ctx.device,
-            ctx.queue,
-            ctx.command_pool,
-            &ctx.memory_properties,
-            &ore,
-        )
-        .expect("GpuMesh upload");
+        let gpu_mesh = GpuMesh::upload(&ctx.mesh_upload_ctx(), &ore)
+            .expect("GpuMesh upload");
         let mesh = Arc::new(gpu_mesh);
 
         // ── ForwardLit forge ─────────────────────────────────────────────────
@@ -132,6 +126,7 @@ impl ApplicationHandler for App {
             ctx.queue,
             ctx.queue_family_index,
             &ctx.memory_properties,
+            ctx.depth_format,
             &ctx.entry,
             graphics_forge,
         )
@@ -163,14 +158,18 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_)     => {}
+            WindowEvent::Resized(new_size) => {
+                if let Some(window) = live.renderer.window_mut(live.window_handle) {
+                    window.resize(new_size.width, new_size.height);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let window = live
                     .renderer
                     .window_mut(live.window_handle)
                     .expect("window live");
                 let result = unsafe {
-                    window.draw_frame(&live.ctx.device, live.ctx.queue)
+                    window.draw_frame(&live.ctx.instance, &live.ctx.device, live.ctx.queue)
                 };
                 if let Err(e) = result {
                     eprintln!("draw_frame error: {e:?}");

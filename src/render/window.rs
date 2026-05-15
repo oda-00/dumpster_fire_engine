@@ -3,7 +3,7 @@ use ash::vk;
 
 use thin_vec::ThinVec;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use crate::forge_master::{ForgeError, ForgeMaster, ForgeResult, GraphicsForge, GraphicsMold};
+use crate::forge_master::{ForgeError, ForgeMaster, ForgeResult, ForgeImage, GraphicsForge, GraphicsMold};
 use crate::resource_manager::manager::{Handle as ResourceHandle, Id};
 
 use super::factory_master::{ComputeTag, FactoryHandle, FactoryMaster, GraphicsTag, Proto};
@@ -17,11 +17,24 @@ pub type WindowHandle = ResourceHandle<WindowTag>;
 pub struct WindowMarker;
 pub type WindowId = Id<WindowMarker>;
 
+// ── Best-practice constants ────────────────────────────────────────────────
+
+/// Number of frames the CPU may keep "in flight" ahead of the GPU.
+/// 2 = double-buffer the command recording — CPU records frame N+1 while
+/// the GPU is still consuming frame N. Higher (3) reduces stutter on input
+/// spikes but adds a frame of latency; 2 is the standard tradeoff.
+pub const FRAMES_IN_FLIGHT: usize = 2;
+
 // ── Graphics plumbing ───────────────────────────────────────────────────────
 
 pub struct GraphicsState {
     // OS window (owned by caller's event loop)
     pub winit_window: Arc<winit::window::Window>,
+
+    // Recreation-time state (needed by recreate_swapchain).
+    pub physical_device: vk::PhysicalDevice,
+    pub memory_properties: vk::PhysicalDeviceMemoryProperties,
+    pub depth_format: vk::Format,
 
     // surface / swapchain
     pub surface: vk::SurfaceKHR,
@@ -33,18 +46,29 @@ pub struct GraphicsState {
     pub swapchain_format: vk::Format,
     pub swapchain_loader: ash::khr::swapchain::Device,
 
-    // pipeline (compiled from GraphicsForge by new_with_surface)
+    // One depth image per swapchain image. Per-image (not per-frame) so we
+    // never race a depth write against a draw still reading from the
+    // previous frame's same image-index.
+    pub depth_images: ThinVec<ForgeImage>,
+
+    // pipeline + framebuffers
     pub mold: GraphicsMold,
     pub framebuffers: ThinVec<vk::Framebuffer>,
 
-    // command recording
+    // command recording — FRAMES_IN_FLIGHT primary buffers
     pub command_pool: vk::CommandPool,
-    pub command_buffers: ThinVec<vk::CommandBuffer>,
+    pub command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT],
 
-    // synchronisation
-    pub image_available_semaphore: vk::Semaphore,
-    pub render_finished_semaphore: vk::Semaphore,
-    pub in_flight_fence: vk::Fence,
+    // Per-frame-in-flight sync: image_available + in_flight (CPU-GPU fence).
+    pub image_available_semaphores: [vk::Semaphore; FRAMES_IN_FLIGHT],
+    pub in_flight_fences: [vk::Fence; FRAMES_IN_FLIGHT],
+    // Per-swapchain-image sync: render_finished. Indexed by image_index
+    // because present uses it; reusing one render_finished per frame slot
+    // would race when the swapchain has more images than frames in flight.
+    pub render_finished_semaphores: ThinVec<vk::Semaphore>,
+
+    pub current_frame: usize,
+    pub needs_resize: bool,
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -74,10 +98,6 @@ impl Window {
     }
 
     /// Fully initialised graphics window (winit + Vulkan).
-    ///
-    /// `forge` supplies the SPIR-V bytecode. `compile()` is called here once
-    /// the swapchain format is known; the resulting `GraphicsMold` lives on
-    /// `GraphicsState` and is destroyed by `Window::destroy`.
     pub fn new_with_surface(
         id: WindowId,
         name: impl Into<Arc<str>>,
@@ -87,7 +107,8 @@ impl Window {
         device: &ash::Device,
         _graphics_queue: vk::Queue,
         graphics_queue_family: u32,
-        _memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        depth_format: vk::Format,
         entry: &ash::Entry,
         forge: &GraphicsForge,
     ) -> ForgeResult<Self> {
@@ -96,7 +117,6 @@ impl Window {
         let width = size.width;
         let height = size.height;
 
-        // Surface via ash-window + raw-window-handle (from winit).
         let display_handle = winit_window
             .display_handle()
             .map_err(|e| ForgeError::Io(std::io::Error::other(e)))?
@@ -110,110 +130,51 @@ impl Window {
                 .map_err(ForgeError::Vk)?
         };
 
-        // Swapchain
         let surface_loader = ash::khr::surface::Instance::new(entry, instance);
-        let caps = unsafe {
-            surface_loader
-                .get_physical_device_surface_capabilities(physical_device, surface)
-                .map_err(ForgeError::Vk)?
-        };
+        let swapchain_loader = ash::khr::swapchain::Device::new(instance, device);
+
+        // Pick the swapchain format up front; depth_format already chosen by VulkanContext.
         let formats = unsafe {
             surface_loader
                 .get_physical_device_surface_formats(physical_device, surface)
                 .map_err(ForgeError::Vk)?
-        };
-        let present_modes = unsafe {
-            surface_loader
-                .get_physical_device_surface_present_modes(physical_device, surface)
-                .map_err(ForgeError::Vk)?
-        };
-
-        let swapchain_extent = vk::Extent2D {
-            width: width.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
-            height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
         };
         let swapchain_format = formats
             .iter()
             .find(|f| f.format == vk::Format::B8G8R8A8_SRGB)
             .unwrap_or(&formats[0])
             .format;
-        let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
-            vk::PresentModeKHR::MAILBOX
-        } else {
-            vk::PresentModeKHR::FIFO
-        };
 
-        let swapchain_loader = ash::khr::swapchain::Device::new(instance, device);
-        let swapchain = unsafe {
-            swapchain_loader
-                .create_swapchain(
-                    &vk::SwapchainCreateInfoKHR::default()
-                        .surface(surface)
-                        .min_image_count(2)
-                        .image_format(swapchain_format)
-                        .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
-                        .image_extent(swapchain_extent)
-                        .image_array_layers(1)
-                        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-                        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .pre_transform(caps.current_transform)
-                        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                        .present_mode(present_mode)
-                        .clipped(true),
-                    None,
-                )
-                .map_err(ForgeError::Vk)?
-        };
+        // Compile the pipeline. Uses dynamic viewport/scissor so we don't
+        // need to recompile on resize.
+        let mold = forge.compile(device, swapchain_format, depth_format)?;
 
-        let swapchain_images: ThinVec<vk::Image> = unsafe {
-            swapchain_loader
-                .get_swapchain_images(swapchain)
-                .map_err(ForgeError::Vk)?
-                .into()
-        };
+        // Build the swapchain + per-image resources via the shared helper.
+        let (
+            swapchain,
+            swapchain_images,
+            swapchain_image_views,
+            swapchain_extent,
+            depth_images,
+            framebuffers,
+            render_finished_semaphores,
+        ) = create_swapchain_resources(
+            instance,
+            physical_device,
+            device,
+            &surface_loader,
+            &swapchain_loader,
+            surface,
+            memory_properties,
+            depth_format,
+            swapchain_format,
+            mold.render_pass,
+            width,
+            height,
+            vk::SwapchainKHR::null(),
+        )?;
 
-        let swapchain_image_views: ThinVec<vk::ImageView> = swapchain_images
-            .iter()
-            .map(|&img| unsafe {
-                device.create_image_view(
-                    &vk::ImageViewCreateInfo::default()
-                        .image(img)
-                        .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(swapchain_format)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        }),
-                    None,
-                )
-            })
-            .collect::<Result<ThinVec<_>, _>>()
-            .map_err(ForgeError::Vk)?;
-
-        // Compile the pipeline from the forge now that we know the format.
-        let mold = forge.compile(device, swapchain_format, swapchain_extent)?;
-
-        // Framebuffers — one per swapchain image, referencing mold.render_pass.
-        let framebuffers: ThinVec<vk::Framebuffer> = swapchain_image_views
-            .iter()
-            .map(|&view| unsafe {
-                device.create_framebuffer(
-                    &vk::FramebufferCreateInfo::default()
-                        .render_pass(mold.render_pass)
-                        .attachments(&[view])
-                        .width(swapchain_extent.width)
-                        .height(swapchain_extent.height)
-                        .layers(1),
-                    None,
-                )
-            })
-            .collect::<Result<ThinVec<_>, _>>()
-            .map_err(ForgeError::Vk)?;
-
-        // Command pool + one buffer per swapchain image.
+        // Command pool + FRAMES_IN_FLIGHT command buffers.
         let command_pool = unsafe {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
@@ -222,30 +183,34 @@ impl Window {
                 None,
             ).map_err(ForgeError::Vk)?
         };
-        let command_buffers: ThinVec<vk::CommandBuffer> = unsafe {
+        let cb_vec = unsafe {
             device.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
                     .command_pool(command_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(swapchain_images.len() as u32),
-            ).map_err(ForgeError::Vk)?.into()
-        };
-
-        // Synchronisation primitives.
-        let image_available_semaphore = unsafe {
-            device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                .map_err(ForgeError::Vk)?
-        };
-        let render_finished_semaphore = unsafe {
-            device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                .map_err(ForgeError::Vk)?
-        };
-        let in_flight_fence = unsafe {
-            device.create_fence(
-                &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
-                None,
+                    .command_buffer_count(FRAMES_IN_FLIGHT as u32),
             ).map_err(ForgeError::Vk)?
         };
+        let mut command_buffers = [vk::CommandBuffer::null(); FRAMES_IN_FLIGHT];
+        for (i, cb) in cb_vec.into_iter().enumerate() {
+            command_buffers[i] = cb;
+        }
+
+        // Per-frame sync primitives.
+        let mut image_available_semaphores = [vk::Semaphore::null(); FRAMES_IN_FLIGHT];
+        let mut in_flight_fences = [vk::Fence::null(); FRAMES_IN_FLIGHT];
+        for i in 0..FRAMES_IN_FLIGHT {
+            image_available_semaphores[i] = unsafe {
+                device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                    .map_err(ForgeError::Vk)?
+            };
+            in_flight_fences[i] = unsafe {
+                device.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                ).map_err(ForgeError::Vk)?
+            };
+        }
 
         Ok(Self {
             id,
@@ -256,6 +221,9 @@ impl Window {
             should_close: false,
             graphics: Some(GraphicsState {
                 winit_window,
+                physical_device,
+                memory_properties: *memory_properties,
+                depth_format,
                 surface,
                 surface_loader,
                 swapchain,
@@ -264,13 +232,16 @@ impl Window {
                 swapchain_extent,
                 swapchain_format,
                 swapchain_loader,
+                depth_images,
                 mold,
                 framebuffers,
                 command_pool,
                 command_buffers,
-                image_available_semaphore,
-                render_finished_semaphore,
-                in_flight_fence,
+                image_available_semaphores,
+                in_flight_fences,
+                render_finished_semaphores,
+                current_frame: 0,
+                needs_resize: false,
             }),
         })
     }
@@ -278,6 +249,9 @@ impl Window {
     pub fn resize(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+        if let Some(gfx) = &mut self.graphics {
+            gfx.needs_resize = true;
+        }
     }
 
     pub fn build_compute_factory(
@@ -299,17 +273,22 @@ impl Window {
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         if let Some(ref mut gfx) = self.graphics {
             unsafe {
-                if gfx.in_flight_fence != vk::Fence::null() {
-                    device.destroy_fence(gfx.in_flight_fence, None);
-                    gfx.in_flight_fence = vk::Fence::null();
+                for f in gfx.in_flight_fences.iter_mut() {
+                    if *f != vk::Fence::null() {
+                        device.destroy_fence(*f, None);
+                        *f = vk::Fence::null();
+                    }
                 }
-                if gfx.render_finished_semaphore != vk::Semaphore::null() {
-                    device.destroy_semaphore(gfx.render_finished_semaphore, None);
-                    gfx.render_finished_semaphore = vk::Semaphore::null();
+                for s in gfx.image_available_semaphores.iter_mut() {
+                    if *s != vk::Semaphore::null() {
+                        device.destroy_semaphore(*s, None);
+                        *s = vk::Semaphore::null();
+                    }
                 }
-                if gfx.image_available_semaphore != vk::Semaphore::null() {
-                    device.destroy_semaphore(gfx.image_available_semaphore, None);
-                    gfx.image_available_semaphore = vk::Semaphore::null();
+                for s in gfx.render_finished_semaphores.drain(..) {
+                    if s != vk::Semaphore::null() {
+                        device.destroy_semaphore(s, None);
+                    }
                 }
                 if gfx.command_pool != vk::CommandPool::null() {
                     device.destroy_command_pool(gfx.command_pool, None);
@@ -322,6 +301,10 @@ impl Window {
                 }
                 gfx.framebuffers.clear();
                 gfx.mold.destroy(device);
+                for img in gfx.depth_images.iter_mut() {
+                    img.destroy(device);
+                }
+                gfx.depth_images.clear();
                 for iv in gfx.swapchain_image_views.iter() {
                     if *iv != vk::ImageView::null() {
                         device.destroy_image_view(*iv, None);
@@ -341,39 +324,148 @@ impl Window {
         unsafe { self.factory_master.destroy(device) };
     }
 
+    /// Recreate the swapchain, framebuffers, depth images, and per-image
+    /// semaphores at the current window size. Caller must guarantee the GPU
+    /// is idle on this device — we call `device_wait_idle` ourselves.
+    pub fn recreate_swapchain(&mut self, instance: &ash::Instance, device: &ash::Device) -> ForgeResult<()> {
+        let Some(gfx) = self.graphics.as_mut() else { return Ok(()) };
+
+        // If the window is minimised, defer recreation until non-zero size.
+        let size = gfx.winit_window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
+
+        unsafe { device.device_wait_idle().map_err(ForgeError::Vk)? };
+
+        // Tear down the old per-image resources (keep mold + command pool).
+        unsafe {
+            for s in gfx.render_finished_semaphores.drain(..) {
+                if s != vk::Semaphore::null() {
+                    device.destroy_semaphore(s, None);
+                }
+            }
+            for fb in gfx.framebuffers.iter() {
+                if *fb != vk::Framebuffer::null() {
+                    device.destroy_framebuffer(*fb, None);
+                }
+            }
+            gfx.framebuffers.clear();
+            for img in gfx.depth_images.iter_mut() {
+                img.destroy(device);
+            }
+            gfx.depth_images.clear();
+            for iv in gfx.swapchain_image_views.iter() {
+                if *iv != vk::ImageView::null() {
+                    device.destroy_image_view(*iv, None);
+                }
+            }
+            gfx.swapchain_image_views.clear();
+        }
+
+        // Rebuild via the shared helper (oldSwapchain = current handle for
+        // graceful handoff). The helper destroys the old swapchain on success.
+        let old_swapchain = gfx.swapchain;
+        let (
+            swapchain,
+            swapchain_images,
+            swapchain_image_views,
+            swapchain_extent,
+            depth_images,
+            framebuffers,
+            render_finished_semaphores,
+        ) = create_swapchain_resources(
+            instance,
+            gfx.physical_device,
+            device,
+            &gfx.surface_loader,
+            &gfx.swapchain_loader,
+            gfx.surface,
+            &gfx.memory_properties,
+            gfx.depth_format,
+            gfx.swapchain_format,
+            gfx.mold.render_pass,
+            size.width,
+            size.height,
+            old_swapchain,
+        )?;
+
+        // Destroy the now-replaced swapchain.
+        unsafe {
+            if old_swapchain != vk::SwapchainKHR::null() {
+                gfx.swapchain_loader.destroy_swapchain(old_swapchain, None);
+            }
+        }
+
+        gfx.swapchain = swapchain;
+        gfx.swapchain_images = swapchain_images;
+        gfx.swapchain_image_views = swapchain_image_views;
+        gfx.swapchain_extent = swapchain_extent;
+        gfx.depth_images = depth_images;
+        gfx.framebuffers = framebuffers;
+        gfx.render_finished_semaphores = render_finished_semaphores;
+        gfx.needs_resize = false;
+
+        Ok(())
+    }
+
     /// Issue all graphics draw calls from every factory this window owns.
-    /// One render pass per frame; factories and their calls are iterated in
-    /// insertion order.
+    /// Handles in-flight frame pacing, swapchain out-of-date, and dynamic
+    /// viewport/scissor.
     pub unsafe fn draw_frame(
         &mut self,
+        instance: &ash::Instance,
         device: &ash::Device,
         queue: vk::Queue,
     ) -> ForgeResult<()> {
+        // Resize check up front — covers explicit resize() calls.
+        if self.graphics.as_ref().is_some_and(|g| g.needs_resize) {
+            self.recreate_swapchain(instance, device)?;
+        }
         let gfx = self
             .graphics
             .as_mut()
             .expect("draw_frame called on a headless window");
 
-        // Wait for the previous frame to finish.
+        // Skip if the window has zero area (minimised).
+        if gfx.swapchain_extent.width == 0 || gfx.swapchain_extent.height == 0 {
+            return Ok(());
+        }
+
+        let frame = gfx.current_frame;
+        let img_avail = gfx.image_available_semaphores[frame];
+        let in_flight = gfx.in_flight_fences[frame];
+
+        // Wait for this slot's previous submission to complete.
         unsafe {
-            device.wait_for_fences(&[gfx.in_flight_fence], true, u64::MAX)
-                .map_err(ForgeError::Vk)?;
-            device.reset_fences(&[gfx.in_flight_fence])
+            device.wait_for_fences(&[in_flight], true, u64::MAX)
                 .map_err(ForgeError::Vk)?;
         }
 
-        // Acquire swapchain image.
-        let (image_index, _) = unsafe {
-            gfx.swapchain_loader
-                .acquire_next_image(
-                    gfx.swapchain,
-                    u64::MAX,
-                    gfx.image_available_semaphore,
-                    vk::Fence::null(),
-                )
-                .map_err(ForgeError::Vk)?
+        // Acquire next image; handle OUT_OF_DATE / SUBOPTIMAL.
+        let acquire = unsafe {
+            gfx.swapchain_loader.acquire_next_image(
+                gfx.swapchain,
+                u64::MAX,
+                img_avail,
+                vk::Fence::null(),
+            )
         };
-        let command_buffer = gfx.command_buffers[image_index as usize];
+        let (image_index, _suboptimal) = match acquire {
+            Ok(t) => t,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                gfx.needs_resize = true;
+                return Ok(());
+            }
+            Err(e) => return Err(ForgeError::Vk(e)),
+        };
+
+        // Now safe to reset the fence — we will submit.
+        unsafe {
+            device.reset_fences(&[in_flight]).map_err(ForgeError::Vk)?;
+        }
+
+        let command_buffer = gfx.command_buffers[frame];
 
         // Collect draw calls from all factories.
         let calls: ThinVec<_> = self
@@ -383,11 +475,19 @@ impl Window {
             .collect();
 
         // Record.
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.05, 0.05, 0.1, 1.0],
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.05, 0.05, 0.1, 1.0],
+                },
             },
-        }];
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        ];
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         let rp_begin = vk::RenderPassBeginInfo::default()
@@ -400,6 +500,8 @@ impl Window {
             .clear_values(&clear_values);
 
         unsafe {
+            device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(ForgeError::Vk)?;
             device.begin_command_buffer(command_buffer, &begin_info)
                 .map_err(ForgeError::Vk)?;
             device.cmd_begin_render_pass(command_buffer, &rp_begin, vk::SubpassContents::INLINE);
@@ -409,10 +511,24 @@ impl Window {
                 gfx.mold.pipeline,
             );
 
+            // Dynamic viewport/scissor — pipeline is extent-agnostic, set here.
+            let viewports = [vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width:  gfx.swapchain_extent.width  as f32,
+                height: gfx.swapchain_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }];
+            let scissors = [vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: gfx.swapchain_extent,
+            }];
+            device.cmd_set_viewport(command_buffer, 0, &viewports);
+            device.cmd_set_scissor(command_buffer, 0, &scissors);
+
             for call in &calls {
                 if let Some(mesh) = &call.mesh {
-                    // Indexed draw: bind vertex + index buffers, push MVP,
-                    // then issue cmd_draw_indexed.
                     device.cmd_bind_vertex_buffers(
                         command_buffer, 0,
                         &[mesh.vertex_buffer.handle], &[0],
@@ -423,7 +539,6 @@ impl Window {
                         0,
                         vk::IndexType::UINT32,
                     );
-                    // Upload column-major MVP as a push constant.
                     let mvp_bytes: &[u8] =
                         std::slice::from_raw_parts(call.mvp.as_ptr().cast(), 64);
                     device.cmd_push_constants(
@@ -440,7 +555,6 @@ impl Window {
                         0, 0, 0,
                     );
                 } else {
-                    // Procedural draw (Ui / shader-generated vertices).
                     device.cmd_draw(
                         command_buffer,
                         call.vertex_count,
@@ -456,8 +570,9 @@ impl Window {
         }
 
         // Submit + present.
-        let wait_semaphores  = [gfx.image_available_semaphore];
-        let signal_semaphores = [gfx.render_finished_semaphore];
+        let render_done = gfx.render_finished_semaphores[image_index as usize];
+        let wait_semaphores  = [img_avail];
+        let signal_semaphores = [render_done];
         let cmd_buffers = [command_buffer];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let submit_info = vk::SubmitInfo::default()
@@ -470,18 +585,194 @@ impl Window {
         let present_image_indices = [image_index];
 
         unsafe {
-            device.queue_submit(queue, &[submit_info], gfx.in_flight_fence)
+            device.queue_submit(queue, &[submit_info], in_flight)
                 .map_err(ForgeError::Vk)?;
 
             let present_info = vk::PresentInfoKHR::default()
                 .wait_semaphores(&signal_semaphores)
                 .swapchains(&present_swapchains)
                 .image_indices(&present_image_indices);
-            gfx.swapchain_loader
-                .queue_present(queue, &present_info)
-                .map_err(ForgeError::Vk)?;
+            match gfx.swapchain_loader.queue_present(queue, &present_info) {
+                Ok(suboptimal) => {
+                    if suboptimal {
+                        gfx.needs_resize = true;
+                    }
+                }
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
+                    gfx.needs_resize = true;
+                }
+                Err(e) => return Err(ForgeError::Vk(e)),
+            }
         }
+
+        gfx.current_frame = (gfx.current_frame + 1) % FRAMES_IN_FLIGHT;
         Ok(())
     }
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Build a swapchain + all per-image resources (image views, depth images,
+/// framebuffers, render_finished semaphores). Shared by initial creation and
+/// `recreate_swapchain`. On failure, partial resources are cleaned up.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn create_swapchain_resources(
+    _instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    device: &ash::Device,
+    surface_loader: &ash::khr::surface::Instance,
+    swapchain_loader: &ash::khr::swapchain::Device,
+    surface: vk::SurfaceKHR,
+    memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    depth_format: vk::Format,
+    swapchain_format: vk::Format,
+    render_pass: vk::RenderPass,
+    width: u32,
+    height: u32,
+    old_swapchain: vk::SwapchainKHR,
+) -> ForgeResult<(
+    vk::SwapchainKHR,
+    ThinVec<vk::Image>,
+    ThinVec<vk::ImageView>,
+    vk::Extent2D,
+    ThinVec<ForgeImage>,
+    ThinVec<vk::Framebuffer>,
+    ThinVec<vk::Semaphore>,
+)> {
+    let caps = unsafe {
+        surface_loader
+            .get_physical_device_surface_capabilities(physical_device, surface)
+            .map_err(ForgeError::Vk)?
+    };
+    let present_modes = unsafe {
+        surface_loader
+            .get_physical_device_surface_present_modes(physical_device, surface)
+            .map_err(ForgeError::Vk)?
+    };
+
+    let swapchain_extent = vk::Extent2D {
+        width:  width.clamp(caps.min_image_extent.width,  caps.max_image_extent.width),
+        height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
+    };
+    let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
+        vk::PresentModeKHR::MAILBOX
+    } else {
+        vk::PresentModeKHR::FIFO
+    };
+
+    // Request triple-buffering when allowed; clamp to device max.
+    let min_image_count = {
+        let desired = caps.min_image_count + 1;
+        if caps.max_image_count > 0 {
+            desired.min(caps.max_image_count)
+        } else {
+            desired
+        }
+    };
+
+    let swapchain = unsafe {
+        swapchain_loader
+            .create_swapchain(
+                &vk::SwapchainCreateInfoKHR::default()
+                    .surface(surface)
+                    .min_image_count(min_image_count)
+                    .image_format(swapchain_format)
+                    .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+                    .image_extent(swapchain_extent)
+                    .image_array_layers(1)
+                    .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                    .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .pre_transform(caps.current_transform)
+                    .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                    .present_mode(present_mode)
+                    .clipped(true)
+                    .old_swapchain(old_swapchain),
+                None,
+            )
+            .map_err(ForgeError::Vk)?
+    };
+
+    let swapchain_images: ThinVec<vk::Image> = unsafe {
+        swapchain_loader
+            .get_swapchain_images(swapchain)
+            .map_err(ForgeError::Vk)?
+            .into()
+    };
+
+    let swapchain_image_views: ThinVec<vk::ImageView> = swapchain_images
+        .iter()
+        .map(|&img| unsafe {
+            device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(img)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(swapchain_format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+                None,
+            )
+        })
+        .collect::<Result<ThinVec<_>, _>>()
+        .map_err(ForgeError::Vk)?;
+
+    // One depth image per swapchain image.
+    let mut depth_images: ThinVec<ForgeImage> = ThinVec::with_capacity(swapchain_images.len());
+    for _ in 0..swapchain_images.len() {
+        let img = ForgeImage::create_2d(
+            device,
+            memory_properties,
+            swapchain_extent.width,
+            swapchain_extent.height,
+            depth_format,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
+        depth_images.push(img);
+    }
+
+    let framebuffers: ThinVec<vk::Framebuffer> = swapchain_image_views
+        .iter()
+        .zip(depth_images.iter())
+        .map(|(&color_view, depth)| {
+            let attachments = [color_view, depth.view];
+            unsafe {
+                device.create_framebuffer(
+                    &vk::FramebufferCreateInfo::default()
+                        .render_pass(render_pass)
+                        .attachments(&attachments)
+                        .width(swapchain_extent.width)
+                        .height(swapchain_extent.height)
+                        .layers(1),
+                    None,
+                )
+            }
+        })
+        .collect::<Result<ThinVec<_>, _>>()
+        .map_err(ForgeError::Vk)?;
+
+    // One render_finished semaphore per swapchain image.
+    let mut render_finished_semaphores: ThinVec<vk::Semaphore> =
+        ThinVec::with_capacity(swapchain_images.len());
+    for _ in 0..swapchain_images.len() {
+        let s = unsafe {
+            device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                .map_err(ForgeError::Vk)?
+        };
+        render_finished_semaphores.push(s);
+    }
+
+    Ok((
+        swapchain,
+        swapchain_images,
+        swapchain_image_views,
+        swapchain_extent,
+        depth_images,
+        framebuffers,
+        render_finished_semaphores,
+    ))
+}
