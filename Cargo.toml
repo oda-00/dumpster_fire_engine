@@ -20,7 +20,7 @@ ash        = "0.38.0"
 ash-window = "0.13"
 winit      = "0.30.13"
 gltf       = "1"
-libloading = "0.8"
+object     = { version = "0.36", default-features = false, features = ["read", "std"] }
 
 [target.'cfg(unix)'.dependencies]
 # Used for UnixStream ancillary-fd transport (SCM_RIGHTS) when the engine
@@ -34,6 +34,8 @@ slotmap       = "1"
 criterion     = "0.5"
 divan         = "0.1"
 iai-callgrind = "0.16.1"
+lang_frontend = { path = "crates/lang_frontend" }
+langc         = { path = "tools/langc" }
 
 [[bench]]
 name = "component_storage"
@@ -86,6 +88,18 @@ harness = false
 
 [[bench]]
 name = "mesh_pipeline"
+harness = false
+
+[[bench]]
+name = "script_pipeline"
+harness = false
+
+[[bench]]
+name = "script_runtime"
+harness = false
+
+[[bench]]
+name = "script_hot_reload"
 harness = false
 
 [[bin]]

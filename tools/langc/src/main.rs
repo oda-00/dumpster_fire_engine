@@ -5,9 +5,8 @@
 //! Pipeline: lex → parse → semantic analysis → LLVM IR (inkwell) → -O3 passes
 //! → object file → ld.lld → shared library.
 
-mod codegen;
-mod engine_api;
-mod link;
+use langc::codegen;
+use langc::link;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

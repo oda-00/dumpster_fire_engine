@@ -4,6 +4,7 @@ pub mod script_abi;
 pub mod script_ipc;
 pub mod script_client;
 pub mod play;
+pub mod object_loader;
 
 pub use scene::*;
 pub use script::*;

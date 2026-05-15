@@ -3,7 +3,10 @@
 //! Reads `EngineMsg`s on stdin, watches the `.lang` files the engine asks it
 //! to track via direct Linux inotify, recompiles them through the same
 //! frontend + LLVM backend as `langc`, and writes `DaemonMsg::CompileOk`s
-//! back to stdout whose `so_path` field points the engine at a fresh `.so`.
+//! back to stdout whose `o_path` field points the engine at a fresh `.o`.
+//!
+//! No linker step — the engine's custom object loader maps the `.o` directly.
+//! This eliminates the ~23 ms link latency on every hot-reload.
 //!
 //! Transport: stdin/stdout (length-prefixed frames, little-endian).  The
 //! `script_client::ScriptClient` on the engine side spawns this binary and
@@ -11,7 +14,7 @@
 //!
 //! Incremental cache: per file, keyed by the FNV hash of file contents.  When
 //! a file's hash matches what we've already compiled, we skip codegen and just
-//! re-emit the cached `so_path`.
+//! re-emit the cached `o_path`.
 //!
 //! All maps are sorted `ThinVec<(Arc<str>, _)>` with binary-search lookup —
 //! no `BTreeMap` / `HashMap`, no `std::Vec`, no `String` field stored.
@@ -24,7 +27,6 @@ mod ipc;
 mod watch;
 
 use std::io::{BufReader, BufWriter, Write};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -35,17 +37,18 @@ use thin_vec::ThinVec;
 use ipc::{DaemonMsg, EngineMsg};
 use watch::WatchEvent;
 
-// Re-use langc's codegen + link modules so there's exactly one LLVM pipeline.
+// Re-use langc's codegen module so there's exactly one LLVM pipeline.
 #[path = "../../langc/src/engine_api.rs"] mod engine_api;
 #[path = "../../langc/src/codegen.rs"]    mod codegen;
-#[path = "../../langc/src/link.rs"]       mod link;
 
 // ── Sorted-array map: path → WatchEntry ──────────────────────────────────────
 
 struct WatchEntry {
-    script_id: i64,
-    last_hash: u64,
-    last_so:   Option<Arc<str>>,
+    script_id:          i64,
+    last_hash:          u64,
+    last_o:             Option<Arc<str>>,
+    last_state_size:    u32,
+    last_state_version: u32,
 }
 
 /// Sorted ascending by path string; binary-search lookup.
@@ -134,7 +137,8 @@ fn main() {
                     }
                 }
                 map_insert(&mut watched, Arc::clone(&path), WatchEntry {
-                    script_id, last_hash: 0, last_so: None,
+                    script_id, last_hash: 0, last_o: None,
+                    last_state_size: 0, last_state_version: 0,
                 });
                 handle_compile(path, script_id, &mut watched, &writer);
             }
@@ -196,12 +200,11 @@ fn handle_compile(
     let hash = sema::fnv1a(src.as_bytes());
 
     // If the file content hasn't changed since the last compile, re-emit the
-    // existing .so path so the engine can decide whether to reload.
+    // cached .o path so the engine can decide whether to reload.
     if let Some(entry) = map_get_mut(watched, path.as_ref()) {
         if entry.last_hash == hash {
-            if let Some(so) = entry.last_so.clone() {
-                let (ss, sv) = probe_so(so.as_ref()).unwrap_or((0, 0));
-                send_ok(writer, script_id, so, ss, sv);
+            if let Some(o) = entry.last_o.clone() {
+                send_ok(writer, script_id, o, entry.last_state_size, entry.last_state_version);
                 return;
             }
         }
@@ -232,28 +235,24 @@ fn handle_compile(
         send_err(writer, script_id, &diags);
         return;
     }
+    // The .o IS the final artifact — no link step.
     let obj = dir.join(format!("{}.o", hir.name));
-    let so  = dir.join(format!("{}.so", hir.name));
 
     if let Err(e) = codegen::compile_to_object(&hir, OptimizationLevel::Less, &obj) {
         diags.push(Arc::<str>::from(format!("{e}").as_str()));
         send_err(writer, script_id, &diags);
         return;
     }
-    if let Err(e) = link::link_shared(&obj, &so) {
-        diags.push(Arc::<str>::from(format!("{e}").as_str()));
-        send_err(writer, script_id, &diags);
-        return;
-    }
-    let _ = std::fs::remove_file(&obj);
 
     let ss = hir.state_size;
     let sv = hir.state_version;
-    let so_arc: Arc<str> = Arc::<str>::from(so.to_string_lossy().as_ref());
+    let o_arc: Arc<str> = Arc::<str>::from(obj.to_string_lossy().as_ref());
     if let Some(entry) = map_get_mut(watched, path.as_ref()) {
-        entry.last_so = Some(Arc::clone(&so_arc));
+        entry.last_o             = Some(Arc::clone(&o_arc));
+        entry.last_state_size    = ss;
+        entry.last_state_version = sv;
     }
-    send_ok(writer, script_id, so_arc, ss, sv);
+    send_ok(writer, script_id, o_arc, ss, sv);
 }
 
 fn push_err<E: core::fmt::Display>(diags: &mut ThinVec<Arc<str>>, e: E) {
@@ -265,23 +264,14 @@ fn canon_str(p: &str) -> Option<Arc<str>> {
         .map(|cp| Arc::<str>::from(cp.to_string_lossy().as_ref()))
 }
 
-fn probe_so(path: &str) -> Option<(u32, u32)> {
-    let lib = unsafe { libloading::Library::new(Path::new(path)).ok()? };
-    let ss: libloading::Symbol<unsafe extern "C" fn() -> u32> =
-        unsafe { lib.get(b"df_state_size\0") }.ok()?;
-    let sv: libloading::Symbol<unsafe extern "C" fn() -> u32> =
-        unsafe { lib.get(b"df_state_version\0") }.ok()?;
-    Some(( unsafe { ss() }, unsafe { sv() } ))
-}
-
 fn send_ok(
     writer: &std::sync::Mutex<BufWriter<std::io::StdoutLock<'_>>>,
     script_id: i64,
-    so_path: Arc<str>,
+    o_path: Arc<str>,
     state_size: u32,
     state_version: u32,
 ) {
-    let msg = DaemonMsg::CompileOk { script_id, so_path, state_size, state_version };
+    let msg = DaemonMsg::CompileOk { script_id, o_path, state_size, state_version };
     let mut w = writer.lock().unwrap();
     let _ = ipc::write_daemon_msg(&mut *w, &msg);
     let _ = w.flush();

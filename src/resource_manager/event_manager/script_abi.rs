@@ -6,6 +6,10 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+/// ABI contract version exported by every compiled `.lang` script as
+/// `df_abi_version() -> u32`.  Must match `ENGINE_ABI_VERSION` in `langc`.
+pub const ENGINE_ABI_VERSION: u32 = 1;
+
 /// Wide-form ActorHandle packed for FFI: `(generation << 32) | idx`.
 pub type ActorHandlePacked = u64;
 

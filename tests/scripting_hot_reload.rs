@@ -3,13 +3,14 @@
 //! Spawns `langcd` as a subprocess via the engine's `ScriptClient`, asks it
 //! to watch a `.lang` file, then mutates the file on disk and verifies that
 //! the daemon sends a fresh `CompileOk` whose `state_version` reflects the
-//! new layout.  Loads the new `.so` and asserts the live behaviour changed.
+//! new layout.  Loads the new `.o` and asserts the live behaviour changed.
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dumpster_fire_engine::resource_manager::event_manager::object_loader::LoadedObject;
 use dumpster_fire_engine::resource_manager::event_manager::script::ScriptManager;
 use dumpster_fire_engine::resource_manager::event_manager::script_abi::{
     EffectSink, engine_api_for_sink, effect_kind,
@@ -70,15 +71,15 @@ fn daemon_hot_reload_round_trip() {
     client.watch(1, Arc::from(src.to_string_lossy().as_ref())).expect("watch");
 
     // ── First compile (v1) ──────────────────────────────────────────────────
-    let so1 = wait_compile_ok(&mut client, 1);
-    let state_v1 = state_version_of(&so1);
-    let size_v1  = state_size_of(&so1);
+    let o1 = wait_compile_ok(&mut client, 1);
+    let state_v1 = state_version_of(&o1);
+    let size_v1  = state_size_of(&o1);
     assert_eq!(size_v1, 4, "v1 state is just i32");
 
     // Load + run via ScriptManager: on_enter emits cue_troupe("v1").
     {
         let mut mgr = ScriptManager::new();
-        let id = mgr.load_from_file(so1.clone()).expect("load v1");
+        let id = mgr.load_from_file(o1.clone()).expect("load v1");
         let entry = mgr.get_entry_points(id).unwrap();
         let n = entry.state_size() as usize;
         let mut state: thin_vec::ThinVec<u8> = thin_vec::ThinVec::with_capacity(n);
@@ -98,16 +99,16 @@ fn daemon_hot_reload_round_trip() {
 
     // ── Mutate file → triggers hot reload ───────────────────────────────────
     std::fs::write(&src, SCRIPT_V2).unwrap();
-    let so2 = wait_compile_ok(&mut client, 1);
-    let state_v2 = state_version_of(&so2);
-    let size_v2  = state_size_of(&so2);
+    let o2 = wait_compile_ok(&mut client, 1);
+    let state_v2 = state_version_of(&o2);
+    let size_v2  = state_size_of(&o2);
     assert_ne!(state_v1, state_v2, "layout change → version change");
     assert_eq!(size_v2, 16, "v2 adds f64 → state grows to 16 bytes");
 
     // Load v2 and verify behaviour changed: now on_enter cues "v2" and tick
     // emits ATTACK instead of PATROL_PATH.
     let mut mgr = ScriptManager::new();
-    let id = mgr.load_from_file(so2).expect("load v2");
+    let id = mgr.load_from_file(o2).expect("load v2");
     let entry = mgr.get_entry_points(id).unwrap();
     let n2 = entry.state_size() as usize;
     let mut state: thin_vec::ThinVec<u8> = thin_vec::ThinVec::with_capacity(n2);
@@ -130,12 +131,11 @@ fn daemon_hot_reload_round_trip() {
 }
 
 fn wait_compile_ok(client: &mut ScriptClient, expected_id: i64) -> Arc<str> {
-    // The daemon may emit several events; spin until we see a CompileOk for us.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
         match client.wait_for_event(Duration::from_millis(500)) {
-            Some(DaemonMsg::CompileOk { script_id, so_path, .. }) if script_id == expected_id => {
-                return so_path;
+            Some(DaemonMsg::CompileOk { script_id, o_path, .. }) if script_id == expected_id => {
+                return o_path;
             }
             Some(DaemonMsg::CompileErr { diagnostics, .. }) => {
                 let joined: thin_vec::ThinVec<&str> =
@@ -148,16 +148,19 @@ fn wait_compile_ok(client: &mut ScriptClient, expected_id: i64) -> Arc<str> {
     panic!("timed out waiting for CompileOk")
 }
 
-fn state_version_of(so: &Arc<str>) -> u32 {
-    let lib = unsafe { libloading::Library::new(so.as_ref()) }.expect("load .so");
-    let f: libloading::Symbol<unsafe extern "C" fn() -> u32> =
-        unsafe { lib.get(b"df_state_version\0") }.unwrap();
+fn state_version_of(o: &Arc<str>) -> u32 {
+    let obj = LoadedObject::from_file(std::path::Path::new(o.as_ref())).expect("load .o");
+    let f: unsafe extern "C" fn() -> u32 = unsafe {
+        obj.fn_ptr("df_state_version").expect("df_state_version missing")
+    };
     unsafe { f() }
 }
-fn state_size_of(so: &Arc<str>) -> u32 {
-    let lib = unsafe { libloading::Library::new(so.as_ref()) }.expect("load .so");
-    let f: libloading::Symbol<unsafe extern "C" fn() -> u32> =
-        unsafe { lib.get(b"df_state_size\0") }.unwrap();
+
+fn state_size_of(o: &Arc<str>) -> u32 {
+    let obj = LoadedObject::from_file(std::path::Path::new(o.as_ref())).expect("load .o");
+    let f: unsafe extern "C" fn() -> u32 = unsafe {
+        obj.fn_ptr("df_state_size").expect("df_state_size missing")
+    };
     unsafe { f() }
 }
 

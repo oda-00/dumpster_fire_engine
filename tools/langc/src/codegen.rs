@@ -167,6 +167,7 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn compile(&mut self, hir: &HirScript) -> Result<(), CodegenError> {
+        self.emit_abi_version_fn();
         self.emit_state_size_fn(hir.state_size);
         self.emit_state_version_fn(hir.state_version);
         self.emit_init_state_fn(hir)?;
@@ -186,6 +187,17 @@ impl<'ctx> Codegen<'ctx> {
         self.emit_create_scene_defs_fn(entries.len() as u32);
 
         Ok(())
+    }
+
+    // ── df_abi_version ────────────────────────────────────────────────────────
+
+    fn emit_abi_version_fn(&self) {
+        let ty = self.i32_ty.fn_type(&[], false);
+        let f = self.module.add_function("df_abi_version", ty, Some(Linkage::External));
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        let v = self.i32_ty.const_int(ENGINE_ABI_VERSION as u64, false);
+        self.builder.build_return(Some(&v)).unwrap();
     }
 
     // ── df_state_size / df_state_version ─────────────────────────────────────

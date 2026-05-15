@@ -55,6 +55,10 @@
 #![allow(dead_code)] // a handful of layout constants documented for the ABI but
                      // not consumed by the codegen yet (caches[], padding offsets).
 
+/// ABI contract version.  Bump whenever the `EngineAPI` layout changes.
+/// The engine validates this at load time before calling any entry point.
+pub const ENGINE_ABI_VERSION: u32 = 1;
+
 pub const N_COMPONENT_TYPES: usize = 5;
 
 pub const COMPONENT_CACHE_SLICE_SIZE: u32 = 16;

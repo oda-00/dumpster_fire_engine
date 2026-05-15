@@ -2,7 +2,8 @@ use std::sync::Arc;
 use thin_vec::ThinVec;
 use crate::resource_manager::manager::{Arena, Handle, Id};
 use super::scene::{Handler, SceneDef, SceneId};
-use super::script_abi::{EngineAPI, SceneDefArray, SceneEntry};
+use super::script_abi::{EngineAPI, SceneDefArray, SceneEntry, ENGINE_ABI_VERSION};
+use super::object_loader::LoadedObject;
 
 // ── Tags / markers / Ids owned by script.rs ─────────────────────────────────
 
@@ -76,15 +77,15 @@ impl ScriptEntryPoints {
 
 // ── LoadedScript / ScriptManager ──────────────────────────────────────────────
 
-/// One compiled `.lang` shared library that has been loaded into the process.
+/// One compiled `.lang` object file loaded into executable memory.
 ///
-/// `lib` MUST outlive every function pointer in `entry`.  The arena enforces
-/// this by holding both together and dropping the library only via
+/// `obj` MUST outlive every function pointer in `entry`.  The arena enforces
+/// this by holding both together and dropping the object only via
 /// `ScriptManager::unload`.
 pub struct LoadedScript {
     pub id:          ScriptId,
     pub source_path: Arc<str>,
-    pub lib:         libloading::Library,
+    pub obj:         Arc<LoadedObject>,
     pub entry:       ScriptEntryPoints,
 }
 
@@ -92,6 +93,7 @@ pub struct LoadedScript {
 pub enum ScriptLoadError {
     Io(Arc<str>),
     MissingSymbol(&'static str),
+    AbiMismatch { expected: u32, got: u32 },
 }
 
 impl core::fmt::Display for ScriptLoadError {
@@ -99,6 +101,8 @@ impl core::fmt::Display for ScriptLoadError {
         match self {
             ScriptLoadError::Io(s)            => write!(f, "io: {s}"),
             ScriptLoadError::MissingSymbol(s) => write!(f, "missing symbol `{s}`"),
+            ScriptLoadError::AbiMismatch { expected, got } =>
+                write!(f, "ABI version mismatch: engine={expected}, script={got}"),
         }
     }
 }
@@ -122,28 +126,26 @@ impl ScriptManager {
     pub fn len(&self) -> usize { self.id_to_handle.len() }
     pub fn is_empty(&self) -> bool { self.id_to_handle.is_empty() }
 
-    /// Load a compiled `.lang` shared library from `path`.  Assigns a fresh
-    /// `ScriptId` and registers the library in the arena.
+    /// Load a compiled `.lang` object file from `path`.  Assigns a fresh
+    /// `ScriptId` and registers the object in the arena.
     pub fn load_from_file(&mut self, path: Arc<str>) -> Result<ScriptId, ScriptLoadError> {
-        // SAFETY: opening a shared library is fundamentally unsafe; we trust
-        // the caller that `path` references a `.so` produced by `langc`.
-        let lib = unsafe { libloading::Library::new(path.as_ref()) }
-            .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(e.to_string().as_str())))?;
-
-        let entry = unsafe { read_entry_points(&lib) }?;
-
+        let obj = Arc::new(
+            LoadedObject::from_file(std::path::Path::new(path.as_ref()))
+                .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(format!("{e}").as_str())))?
+        );
+        let entry = read_entry_points(&obj)?;
         let id = ScriptId::new(self.next_raw_id);
         self.next_raw_id += 1;
-        let loaded = LoadedScript { id, source_path: path, lib, entry };
+        let loaded = LoadedScript { id, source_path: path, obj, entry };
         let h = self.arena.insert(loaded);
         let pos = self.id_to_handle.partition_point(|(sid, _)| sid.raw() < id.raw());
         self.id_to_handle.insert(pos, (id, h));
         Ok(id)
     }
 
-    /// Hot-reload: replace the library for an existing `ScriptId` with a
+    /// Hot-reload: replace the object for an existing `ScriptId` with a
     /// fresh compilation from `new_path`.  All function pointers in `entry`
-    /// are rewritten in place; the previous library is dropped after the swap.
+    /// are rewritten in place; the previous object is dropped after the swap.
     pub fn hot_reload(
         &mut self,
         id: ScriptId,
@@ -152,13 +154,15 @@ impl ScriptManager {
         let h = self.handle_for(id).ok_or_else(|| ScriptLoadError::Io(
             Arc::<str>::from(format!("no script with id {}", id.raw()).as_str())
         ))?;
-        let lib = unsafe { libloading::Library::new(new_path.as_ref()) }
-            .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(e.to_string().as_str())))?;
-        let entry = unsafe { read_entry_points(&lib) }?;
+        let obj = Arc::new(
+            LoadedObject::from_file(std::path::Path::new(new_path.as_ref()))
+                .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(format!("{e}").as_str())))?
+        );
+        let entry = read_entry_points(&obj)?;
         if let Some(loaded) = self.arena.get_mut(h) {
-            // Drop the old library AFTER replacing the pointers, so no live
-            // function pointer references a freed code region.
-            loaded.lib         = lib;
+            // Drop the old object AFTER replacing the pointers, so no live
+            // function pointer references freed memory.
+            loaded.obj         = obj;
             loaded.entry       = entry;
             loaded.source_path = new_path;
         }
@@ -400,49 +404,57 @@ impl Default for ScriptManager {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-unsafe fn read_entry_points(lib: &libloading::Library) -> Result<ScriptEntryPoints, ScriptLoadError> {
-    unsafe {
-        let state_size: libloading::Symbol<unsafe extern "C" fn() -> u32> =
-            lib.get(b"df_state_size\0").map_err(|_| ScriptLoadError::MissingSymbol("df_state_size"))?;
-        let state_version: libloading::Symbol<unsafe extern "C" fn() -> u32> =
-            lib.get(b"df_state_version\0").map_err(|_| ScriptLoadError::MissingSymbol("df_state_version"))?;
-        let init_state: libloading::Symbol<unsafe extern "C" fn(*mut u8)> =
-            lib.get(b"df_init_state\0").map_err(|_| ScriptLoadError::MissingSymbol("df_init_state"))?;
-        let migrate_state: libloading::Symbol<unsafe extern "C" fn(u32, *const u8, *mut u8)> =
-            lib.get(b"df_migrate_state\0").map_err(|_| ScriptLoadError::MissingSymbol("df_migrate_state"))?;
-        let create_scene_defs: libloading::Symbol<unsafe extern "C" fn(*const EngineAPI, *mut SceneDefArray)> =
-            lib.get(b"df_create_scene_defs\0").map_err(|_| ScriptLoadError::MissingSymbol("df_create_scene_defs"))?;
-
-        // Materialise the scene table by calling create_scene_defs with a
-        // null `api` — the codegen only uses the api in script-side functions,
-        // not in the scene-defs constructor itself.
-        let mut arr = SceneDefArray {
-            scene_count: 0,
-            _pad: 0,
-            scenes: core::ptr::null(),
-        };
-        (create_scene_defs)(core::ptr::null(), &mut arr);
-
-        let mut scenes = ThinVec::with_capacity(arr.scene_count as usize);
-        if !arr.scenes.is_null() && arr.scene_count > 0 {
-            let raw = core::slice::from_raw_parts(arr.scenes, arr.scene_count as usize);
-            for e in raw {
-                scenes.push(SceneEntry {
-                    raw_id:   e.raw_id,
-                    on_enter: e.on_enter,
-                    on_exit:  e.on_exit,
-                    tick:     e.tick,
-                });
-            }
-        }
-
-        Ok(ScriptEntryPoints {
-            state_size:        *state_size.into_raw(),
-            state_version:     *state_version.into_raw(),
-            init_state:        *init_state.into_raw(),
-            migrate_state:     *migrate_state.into_raw(),
-            create_scene_defs: *create_scene_defs.into_raw(),
-            scenes,
-        })
+fn read_entry_points(obj: &LoadedObject) -> Result<ScriptEntryPoints, ScriptLoadError> {
+    // Check ABI version before touching any other entry point.
+    let abi_version_fn: unsafe extern "C" fn() -> u32 = unsafe {
+        obj.fn_ptr("df_abi_version")
+            .ok_or(ScriptLoadError::MissingSymbol("df_abi_version"))?
+    };
+    let got = unsafe { abi_version_fn() };
+    if got != ENGINE_ABI_VERSION {
+        return Err(ScriptLoadError::AbiMismatch { expected: ENGINE_ABI_VERSION, got });
     }
+
+    let state_size: unsafe extern "C" fn() -> u32 = unsafe {
+        obj.fn_ptr("df_state_size").ok_or(ScriptLoadError::MissingSymbol("df_state_size"))?
+    };
+    let state_version: unsafe extern "C" fn() -> u32 = unsafe {
+        obj.fn_ptr("df_state_version").ok_or(ScriptLoadError::MissingSymbol("df_state_version"))?
+    };
+    let init_state: unsafe extern "C" fn(*mut u8) = unsafe {
+        obj.fn_ptr("df_init_state").ok_or(ScriptLoadError::MissingSymbol("df_init_state"))?
+    };
+    let migrate_state: unsafe extern "C" fn(u32, *const u8, *mut u8) = unsafe {
+        obj.fn_ptr("df_migrate_state").ok_or(ScriptLoadError::MissingSymbol("df_migrate_state"))?
+    };
+    let create_scene_defs: unsafe extern "C" fn(*const EngineAPI, *mut SceneDefArray) = unsafe {
+        obj.fn_ptr("df_create_scene_defs").ok_or(ScriptLoadError::MissingSymbol("df_create_scene_defs"))?
+    };
+
+    // Materialise the scene table.  Null `api` is safe — codegen only reads
+    // the API pointer inside tick/on_enter/on_exit, not in create_scene_defs.
+    let mut arr = SceneDefArray { scene_count: 0, _pad: 0, scenes: core::ptr::null() };
+    unsafe { create_scene_defs(core::ptr::null(), &mut arr) };
+
+    let mut scenes = ThinVec::with_capacity(arr.scene_count as usize);
+    if !arr.scenes.is_null() && arr.scene_count > 0 {
+        let raw = unsafe { core::slice::from_raw_parts(arr.scenes, arr.scene_count as usize) };
+        for e in raw {
+            scenes.push(SceneEntry {
+                raw_id:   e.raw_id,
+                on_enter: e.on_enter,
+                on_exit:  e.on_exit,
+                tick:     e.tick,
+            });
+        }
+    }
+
+    Ok(ScriptEntryPoints {
+        state_size,
+        state_version,
+        init_state,
+        migrate_state,
+        create_scene_defs,
+        scenes,
+    })
 }
