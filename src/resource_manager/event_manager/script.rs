@@ -1,9 +1,22 @@
 use std::sync::Arc;
 use thin_vec::ThinVec;
+use rayon::prelude::*;
 use crate::resource_manager::manager::{Arena, Handle, Id};
 use super::scene::{Handler, SceneDef, SceneId};
 use super::script_abi::{EngineAPI, SceneDefArray, SceneEntry, ENGINE_ABI_VERSION};
 use super::object_loader::LoadedObject;
+
+/// Batch sizes at or above this fan out across rayon's pool; below it the
+/// sequential 4-way unrolled path wins because rayon's fork/join overhead
+/// (~1–5 µs) dominates short ticks (~50–100 ns of real work each).
+///
+/// Mirrors `world_manager::world::propagate_transforms`'s 1024-actor threshold
+/// — scaled down because per-script work is ~10× a transform copy.
+pub const PARALLEL_TICK_THRESHOLD: usize = 64;
+
+/// Same idea for object loading — each `LoadedObject::from_file` is ~10 µs of
+/// disk-read + parse + mmap + relocate, comfortably above rayon's fork cost.
+pub const PARALLEL_LOAD_THRESHOLD: usize = 4;
 
 // ── Tags / markers / Ids owned by script.rs ─────────────────────────────────
 
@@ -143,6 +156,70 @@ impl ScriptManager {
         Ok(id)
     }
 
+    /// Bulk-load `paths` in parallel.  Above `PARALLEL_LOAD_THRESHOLD` we
+    /// dispatch each `LoadedObject::from_file` + entry-point materialisation
+    /// onto rayon's pool — each load is independent (its own mmap region,
+    /// its own relocation pass), so this is embarrassingly parallel.  The
+    /// arena registration step at the end is single-threaded so `ScriptId`s
+    /// stay in deterministic order.
+    ///
+    /// Returns one `Result` per input path, in input order.  A failure on
+    /// path *i* does not abort the others — partial loads are preserved.
+    pub fn load_many(
+        &mut self,
+        paths: &[Arc<str>],
+    ) -> ThinVec<Result<ScriptId, ScriptLoadError>> {
+        if paths.is_empty() {
+            return ThinVec::new();
+        }
+
+        // Phase 1: parallel parse + relocate + entry-point probe.
+        // `LoadedObject::from_file` does its own IO + mmap + relocations and
+        // produces a fully-constructed `Arc<LoadedObject>` that we hand to
+        // `read_entry_points` (which itself calls `df_create_scene_defs`).
+        type Loaded = Result<(Arc<LoadedObject>, ScriptEntryPoints), ScriptLoadError>;
+        let load_one = |p: &Arc<str>| -> Loaded {
+            let obj = LoadedObject::from_file(std::path::Path::new(p.as_ref()))
+                .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(format!("{e}").as_str())))?;
+            let obj = Arc::new(obj);
+            let entry = read_entry_points(&obj)?;
+            Ok((obj, entry))
+        };
+
+        let mut loaded: ThinVec<Loaded> = ThinVec::with_capacity(paths.len());
+        if paths.len() >= PARALLEL_LOAD_THRESHOLD {
+            // rayon doesn't directly collect into ThinVec; use std::Vec as the
+            // intermediate then move element-by-element.  The Vec is dropped
+            // immediately so this allocation never escapes the function.
+            let v: Vec<Loaded> = paths.par_iter().map(load_one).collect();
+            for r in v { loaded.push(r); }
+        } else {
+            for p in paths { loaded.push(load_one(p)); }
+        }
+
+        // Phase 2: single-threaded arena registration so IDs stay in order.
+        let mut out: ThinVec<Result<ScriptId, ScriptLoadError>> =
+            ThinVec::with_capacity(paths.len());
+        for (path, res) in paths.iter().zip(loaded.into_iter()) {
+            match res {
+                Ok((obj, entry)) => {
+                    let id = ScriptId::new(self.next_raw_id);
+                    self.next_raw_id += 1;
+                    let loaded = LoadedScript {
+                        id, source_path: Arc::clone(path), obj, entry,
+                    };
+                    let h = self.arena.insert(loaded);
+                    let pos = self.id_to_handle
+                        .partition_point(|(sid, _)| sid.raw() < id.raw());
+                    self.id_to_handle.insert(pos, (id, h));
+                    out.push(Ok(id));
+                }
+                Err(e) => out.push(Err(e)),
+            }
+        }
+        out
+    }
+
     /// Hot-reload: replace the object for an existing `ScriptId` with a
     /// fresh compilation from `new_path`.  All function pointers in `entry`
     /// are rewritten in place; the previous object is dropped after the swap.
@@ -207,6 +284,10 @@ pub struct ActiveScript {
     /// Raw_id of the currently-active scene.  Zero means "uninitialised";
     /// `from_entry` defaults this to the first scene in the table.
     pub active_scene:  i64,
+    /// Cached index of `active_scene` inside `entry.scenes` — avoids the
+    /// linear search in the per-tick hot path.  `u32::MAX` means "stale",
+    /// triggering a one-time re-resolve on the next `tick`.
+    pub active_scene_idx: u32,
     pub tick_count:    u64,
     pub elapsed:       f32,
 }
@@ -222,9 +303,10 @@ impl ActiveScript {
         buf.resize(state_size, 0);
         unsafe { (entry.init_state)(buf.as_mut_ptr()); }
         let active_scene = entry.scenes.first().map(|s| s.raw_id).unwrap_or(0);
+        let active_scene_idx = if entry.scenes.is_empty() { u32::MAX } else { 0 };
         ActiveScript {
             script_id, state_buffer: buf, state_version,
-            active_scene, tick_count: 0, elapsed: 0.0,
+            active_scene, active_scene_idx, tick_count: 0, elapsed: 0.0,
         }
     }
 
@@ -237,6 +319,8 @@ impl ActiveScript {
         let new_size    = new_entry.state_size() as usize;
         let new_version = new_entry.state_version();
         if new_version == self.state_version && new_size == self.state_buffer.len() {
+            // Layout matches but scene table may have been reordered/replaced.
+            self.active_scene_idx = u32::MAX;
             return;
         }
         let mut new_buf: ThinVec<u8> = ThinVec::with_capacity(new_size);
@@ -254,6 +338,9 @@ impl ActiveScript {
         if !new_entry.scenes.iter().any(|s| s.raw_id == self.active_scene) {
             self.active_scene = new_entry.scenes.first().map(|s| s.raw_id).unwrap_or(0);
         }
+        // Hot-reload always invalidates the cached scene index — entry.scenes
+        // may have been reordered between compiles even when layout matches.
+        self.active_scene_idx = u32::MAX;
     }
 
     /// Tick the active scene against `entry`'s scene table.  Returns the
@@ -263,6 +350,7 @@ impl ActiveScript {
     ///
     /// `api.elapsed` and `api.tick_count` are overwritten with this
     /// `ActiveScript`'s tracked values before each call.
+    #[inline]
     pub fn tick(
         &mut self,
         entry: &ScriptEntryPoints,
@@ -274,14 +362,28 @@ impl ActiveScript {
         api.elapsed       = self.elapsed;
         api.tick_count    = self.tick_count;
 
-        let Some(scene) = entry.scene(self.active_scene) else { return 0; };
+        // Cached-index fast path: avoids the per-tick linear search through
+        // `entry.scenes`.  `u32::MAX` means "stale" (post-construction, post-
+        // migrate, or post-transition); fall back to a one-shot resolve.
+        let scene = match entry.scenes.get(self.active_scene_idx as usize) {
+            Some(s) if s.raw_id == self.active_scene => s,
+            _ => {
+                let Some((idx, s)) = entry.scenes.iter().enumerate()
+                    .find(|(_, s)| s.raw_id == self.active_scene) else { return 0; };
+                self.active_scene_idx = idx as u32;
+                s
+            }
+        };
         let next = unsafe { (scene.tick)(api, self.state_buffer.as_mut_ptr()) };
         if next != 0 && next != self.active_scene {
             unsafe { (scene.on_exit)(api, self.state_buffer.as_mut_ptr()); }
-            if let Some(target) = entry.scene(next) {
+            if let Some((idx, target)) = entry.scenes.iter().enumerate()
+                .find(|(_, s)| s.raw_id == next)
+            {
                 unsafe { (target.on_enter)(api, self.state_buffer.as_mut_ptr()); }
-                self.active_scene = next;
-                self.elapsed = 0.0;  // reset per-scene elapsed
+                self.active_scene     = next;
+                self.active_scene_idx = idx as u32;
+                self.elapsed          = 0.0;  // reset per-scene elapsed
             }
         }
         next
@@ -297,6 +399,79 @@ impl ActiveScript {
     ) {
         let Some(scene) = entry.scene(self.active_scene) else { return; };
         unsafe { (scene.on_enter)(api, self.state_buffer.as_mut_ptr()); }
+    }
+}
+
+// ── Batch tick ────────────────────────────────────────────────────────────────
+//
+// Mirror of `world_manager::stage::propagate_transforms`: every script's tick
+// is independent of every other (each owns its own state buffer + EngineAPI +
+// EffectSink), so above `PARALLEL_TICK_THRESHOLD` we fan out across rayon's
+// pool; below it we run a 4-way unrolled sequential loop so the OOO core can
+// keep four indirect JIT calls (and the dependent `push_effect` callbacks) in
+// flight at once.
+//
+// SAFETY: callers must ensure the three slices are equal length and that no
+// two `EngineAPI`s alias the same `EffectSink` — rayon will tick them on
+// different worker threads.
+
+/// Tick `scripts[i]` against `entries[i]` with `apis[i]` for every `i`.
+///
+/// Returns `()`; per-script transition targets are reflected in
+/// `scripts[i].active_scene`.  Callers who need the transition vector should
+/// fall back to ticking individually.
+pub fn tick_batch(
+    scripts: &mut [ActiveScript],
+    entries: &[&ScriptEntryPoints],
+    apis:    &mut [EngineAPI],
+    dt:      f32,
+) {
+    assert_eq!(scripts.len(), entries.len(), "tick_batch: scripts/entries length mismatch");
+    assert_eq!(scripts.len(), apis.len(),    "tick_batch: scripts/apis length mismatch");
+    let n = scripts.len();
+    if n == 0 { return; }
+
+    if n >= PARALLEL_TICK_THRESHOLD {
+        // Parallel: zip three disjoint mutable/immutable slices via rayon.
+        // `entries` is `&[&ScriptEntryPoints]` — Copy of `&_`, so cloning the
+        // outer slice into thread-locals is just pointer-sized.
+        scripts.par_iter_mut()
+            .zip(apis.par_iter_mut())
+            .zip(entries.par_iter())
+            .for_each(|((s, api), entry)| {
+                let _ = s.tick(*entry, api, dt);
+            });
+        return;
+    }
+
+    // Sequential 4-way unroll.  Four independent script ticks per loop iter
+    // — LLVM keeps the indirect calls and dependent EffectSink writes in
+    // flight on the OOO core.  Tail loop handles `n % 4`.
+    let mut i = 0;
+    while i + 4 <= n {
+        // SAFETY: indices are disjoint and within bounds; the assertions
+        // above prove the three slices match in length.  `split_at_mut` is
+        // the safe analog but adds bounds-check IR that LLVM struggles to
+        // hoist out of the hot loop.
+        let (s0, s1, s2, s3) = unsafe {
+            let p = scripts.as_mut_ptr();
+            (&mut *p.add(i), &mut *p.add(i + 1), &mut *p.add(i + 2), &mut *p.add(i + 3))
+        };
+        let (a0, a1, a2, a3) = unsafe {
+            let p = apis.as_mut_ptr();
+            (&mut *p.add(i), &mut *p.add(i + 1), &mut *p.add(i + 2), &mut *p.add(i + 3))
+        };
+        let e0 = entries[i];     let e1 = entries[i + 1];
+        let e2 = entries[i + 2]; let e3 = entries[i + 3];
+        let _ = s0.tick(e0, a0, dt);
+        let _ = s1.tick(e1, a1, dt);
+        let _ = s2.tick(e2, a2, dt);
+        let _ = s3.tick(e3, a3, dt);
+        i += 4;
+    }
+    while i < n {
+        let _ = scripts[i].tick(entries[i], &mut apis[i], dt);
+        i += 1;
     }
 }
 

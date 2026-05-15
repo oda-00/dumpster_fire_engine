@@ -18,7 +18,9 @@ use divan::{black_box, Bencher};
 use langc::{codegen, OptimizationLevel};
 use lang_frontend::{hir::HirScript, lexer::Lexer, parser::Parser, sema};
 
-use dumpster_fire_engine::resource_manager::event_manager::script::{ActiveScript, ScriptManager};
+use dumpster_fire_engine::resource_manager::event_manager::script::{
+    ActiveScript, ScriptEntryPoints, ScriptManager, tick_batch,
+};
 use dumpster_fire_engine::resource_manager::event_manager::script_abi::{
     EffectSink, EngineAPI, engine_api_for_sink, effect_kind,
 };
@@ -154,4 +156,80 @@ fn native_tick_1k(bencher: Bencher) {
     bencher.with_inputs(|| EffectSink::new()).bench_local_refs(|sink| {
         for _ in 0..1000 { native_bt_tick(0, sink); }
     });
+}
+
+// ── Batch ticks: 4-way unrolled sequential vs rayon-parallel ─────────────────
+//
+// Mirror of `world_manager::stage::propagate_transforms`: each script's tick
+// is independent, so we group them.  The 16- and 32-script benches exercise
+// the sequential 4-way unrolled path; 128 and 1024 exercise the rayon path.
+
+struct BatchFixture {
+    _mgr:    ScriptManager,
+    scripts: Vec<ActiveScript>,
+    entry:   *const ScriptEntryPoints,
+    _sinks:  Vec<Box<EffectSink>>,
+    apis:    Vec<EngineAPI>,
+    _entry_refs: Vec<*const ScriptEntryPoints>,
+}
+
+unsafe impl Send for BatchFixture {}
+
+fn build_batch(n: usize) -> BatchFixture {
+    let o = compile_to_o(SRC);
+    let mut mgr = ScriptManager::new();
+    let id = mgr.load_from_file(o).unwrap();
+    let entry_ref: &ScriptEntryPoints = mgr.get_entry_points(id).unwrap();
+    let entry_ptr: *const ScriptEntryPoints = entry_ref;
+
+    let mut scripts = Vec::with_capacity(n);
+    let mut sinks: Vec<Box<EffectSink>> = Vec::with_capacity(n);
+    let mut apis = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut sink = Box::new(EffectSink::new());
+        sink.entries.reserve(2048);
+        sink.cues.reserve(2048);
+        let api = engine_api_for_sink(&mut sink);
+        scripts.push(ActiveScript::from_entry(id, entry_ref));
+        sinks.push(sink);
+        apis.push(api);
+    }
+    let entry_refs: Vec<*const ScriptEntryPoints> = (0..n).map(|_| entry_ptr).collect();
+    BatchFixture {
+        _mgr: mgr, scripts, entry: entry_ptr, _sinks: sinks, apis,
+        _entry_refs: entry_refs,
+    }
+}
+
+fn run_batch(fx: &mut BatchFixture) {
+    // Rebuild the entries slice each iteration — cheap, just `*const` copies.
+    // Doing it inside the closure keeps the bench reflecting realistic usage
+    // (callers materialise this slice on the way into tick_batch).
+    let entry_ref: &ScriptEntryPoints = unsafe { &*fx.entry };
+    let entries: Vec<&ScriptEntryPoints> = (0..fx.scripts.len()).map(|_| entry_ref).collect();
+    tick_batch(&mut fx.scripts, &entries, &mut fx.apis, 0.016);
+}
+
+#[divan::bench]
+fn tick_batch_16(bencher: Bencher) {
+    bencher.with_inputs(|| build_batch(16))
+        .bench_local_refs(|fx| run_batch(fx));
+}
+
+#[divan::bench]
+fn tick_batch_32(bencher: Bencher) {
+    bencher.with_inputs(|| build_batch(32))
+        .bench_local_refs(|fx| run_batch(fx));
+}
+
+#[divan::bench]
+fn tick_batch_128(bencher: Bencher) {
+    bencher.with_inputs(|| build_batch(128))
+        .bench_local_refs(|fx| run_batch(fx));
+}
+
+#[divan::bench]
+fn tick_batch_1024(bencher: Bencher) {
+    bencher.with_inputs(|| build_batch(1024))
+        .bench_local_refs(|fx| run_batch(fx));
 }

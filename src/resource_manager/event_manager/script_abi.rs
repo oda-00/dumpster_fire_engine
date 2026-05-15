@@ -24,6 +24,13 @@ pub struct ComponentCacheSlice {
 ///
 /// Field order, sizes, and offsets are part of the public ABI (see the
 /// `static_assertions` below).  Adding fields means bumping the SO ABI version.
+/// SAFETY: `EngineAPI` carries raw pointers into engine-owned arrays and
+/// effect sinks.  `Send`/`Sync` are sound because the engine constructs one
+/// `EngineAPI` per active script and never shares pointers across them
+/// (`script::tick_batch` requires non-aliasing sinks; see its docs).
+unsafe impl Send for EngineAPI {}
+unsafe impl Sync for EngineAPI {}
+
 #[repr(C)]
 pub struct EngineAPI {
     /// Stage SoA: actor-local transforms (`Affine3A` = `[f32;12]`).
