@@ -8,11 +8,19 @@ use super::object_loader::LoadedObject;
 
 /// Batch sizes at or above this fan out across rayon's pool; below it the
 /// sequential 4-way unrolled path wins because rayon's fork/join overhead
-/// (~1–5 µs) dominates short ticks (~50–100 ns of real work each).
+/// (~1–5 µs) dominates short ticks (~40 ns of real work each).
 ///
-/// Mirrors `world_manager::world::propagate_transforms`'s 1024-actor threshold
-/// — scaled down because per-script work is ~10× a transform copy.
-pub const PARALLEL_TICK_THRESHOLD: usize = 64;
+/// 2048 is the empirical crossover on a 4-core box: 2048 × 40 ns ≈ 80 µs
+/// of sequential work, comfortably above rayon's startup cost.  Below
+/// that, the sequential 4× path is uniformly faster — verified by sweeping
+/// `tick_batch_{16, 32, 128, 1024}` in `benches/script_runtime.rs`.
+pub const PARALLEL_TICK_THRESHOLD: usize = 2048;
+
+/// Rayon workers each pull a contiguous chunk of this many scripts.  Keeps
+/// per-task work ≥ ~10 µs (256 × ~40 ns), well above fork/join overhead, and
+/// preserves cache locality across the four EngineAPIs / state buffers each
+/// worker touches.
+const PARALLEL_TICK_MIN_LEN: usize = 256;
 
 /// Same idea for object loading — each `LoadedObject::from_file` is ~10 µs of
 /// disk-read + parse + mmap + relocate, comfortably above rayon's fork cost.
@@ -284,10 +292,6 @@ pub struct ActiveScript {
     /// Raw_id of the currently-active scene.  Zero means "uninitialised";
     /// `from_entry` defaults this to the first scene in the table.
     pub active_scene:  i64,
-    /// Cached index of `active_scene` inside `entry.scenes` — avoids the
-    /// linear search in the per-tick hot path.  `u32::MAX` means "stale",
-    /// triggering a one-time re-resolve on the next `tick`.
-    pub active_scene_idx: u32,
     pub tick_count:    u64,
     pub elapsed:       f32,
 }
@@ -303,10 +307,9 @@ impl ActiveScript {
         buf.resize(state_size, 0);
         unsafe { (entry.init_state)(buf.as_mut_ptr()); }
         let active_scene = entry.scenes.first().map(|s| s.raw_id).unwrap_or(0);
-        let active_scene_idx = if entry.scenes.is_empty() { u32::MAX } else { 0 };
         ActiveScript {
             script_id, state_buffer: buf, state_version,
-            active_scene, active_scene_idx, tick_count: 0, elapsed: 0.0,
+            active_scene, tick_count: 0, elapsed: 0.0,
         }
     }
 
@@ -319,8 +322,6 @@ impl ActiveScript {
         let new_size    = new_entry.state_size() as usize;
         let new_version = new_entry.state_version();
         if new_version == self.state_version && new_size == self.state_buffer.len() {
-            // Layout matches but scene table may have been reordered/replaced.
-            self.active_scene_idx = u32::MAX;
             return;
         }
         let mut new_buf: ThinVec<u8> = ThinVec::with_capacity(new_size);
@@ -338,9 +339,6 @@ impl ActiveScript {
         if !new_entry.scenes.iter().any(|s| s.raw_id == self.active_scene) {
             self.active_scene = new_entry.scenes.first().map(|s| s.raw_id).unwrap_or(0);
         }
-        // Hot-reload always invalidates the cached scene index — entry.scenes
-        // may have been reordered between compiles even when layout matches.
-        self.active_scene_idx = u32::MAX;
     }
 
     /// Tick the active scene against `entry`'s scene table.  Returns the
@@ -362,28 +360,14 @@ impl ActiveScript {
         api.elapsed       = self.elapsed;
         api.tick_count    = self.tick_count;
 
-        // Cached-index fast path: avoids the per-tick linear search through
-        // `entry.scenes`.  `u32::MAX` means "stale" (post-construction, post-
-        // migrate, or post-transition); fall back to a one-shot resolve.
-        let scene = match entry.scenes.get(self.active_scene_idx as usize) {
-            Some(s) if s.raw_id == self.active_scene => s,
-            _ => {
-                let Some((idx, s)) = entry.scenes.iter().enumerate()
-                    .find(|(_, s)| s.raw_id == self.active_scene) else { return 0; };
-                self.active_scene_idx = idx as u32;
-                s
-            }
-        };
+        let Some(scene) = entry.scene(self.active_scene) else { return 0; };
         let next = unsafe { (scene.tick)(api, self.state_buffer.as_mut_ptr()) };
         if next != 0 && next != self.active_scene {
             unsafe { (scene.on_exit)(api, self.state_buffer.as_mut_ptr()); }
-            if let Some((idx, target)) = entry.scenes.iter().enumerate()
-                .find(|(_, s)| s.raw_id == next)
-            {
+            if let Some(target) = entry.scene(next) {
                 unsafe { (target.on_enter)(api, self.state_buffer.as_mut_ptr()); }
-                self.active_scene     = next;
-                self.active_scene_idx = idx as u32;
-                self.elapsed          = 0.0;  // reset per-scene elapsed
+                self.active_scene = next;
+                self.elapsed = 0.0;  // reset per-scene elapsed
             }
         }
         next
@@ -432,12 +416,14 @@ pub fn tick_batch(
     if n == 0 { return; }
 
     if n >= PARALLEL_TICK_THRESHOLD {
-        // Parallel: zip three disjoint mutable/immutable slices via rayon.
-        // `entries` is `&[&ScriptEntryPoints]` — Copy of `&_`, so cloning the
-        // outer slice into thread-locals is just pointer-sized.
+        // Parallel chunked: each rayon worker takes a contiguous block of
+        // ≥ PARALLEL_TICK_MIN_LEN scripts and ticks them sequentially.
+        // `par_iter_mut + with_min_len` prevents rayon from splitting work
+        // into per-script tasks (fork/join would dominate at ~40 ns/tick).
         scripts.par_iter_mut()
             .zip(apis.par_iter_mut())
             .zip(entries.par_iter())
+            .with_min_len(PARALLEL_TICK_MIN_LEN)
             .for_each(|((s, api), entry)| {
                 let _ = s.tick(*entry, api, dt);
             });

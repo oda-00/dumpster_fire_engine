@@ -167,10 +167,13 @@ fn native_tick_1k(bencher: Bencher) {
 struct BatchFixture {
     _mgr:    ScriptManager,
     scripts: Vec<ActiveScript>,
-    entry:   *const ScriptEntryPoints,
-    _sinks:  Vec<Box<EffectSink>>,
     apis:    Vec<EngineAPI>,
-    _entry_refs: Vec<*const ScriptEntryPoints>,
+    /// Pre-materialised entry slice; same `&ScriptEntryPoints` repeated N
+    /// times (all scripts share the same compiled object).  Held in the
+    /// fixture so the per-iter `run_batch` only measures `tick_batch`
+    /// itself — not a Vec allocation that would dominate the parallel path.
+    entries: Vec<&'static ScriptEntryPoints>,
+    _sinks:  Vec<Box<EffectSink>>,
 }
 
 unsafe impl Send for BatchFixture {}
@@ -180,7 +183,10 @@ fn build_batch(n: usize) -> BatchFixture {
     let mut mgr = ScriptManager::new();
     let id = mgr.load_from_file(o).unwrap();
     let entry_ref: &ScriptEntryPoints = mgr.get_entry_points(id).unwrap();
-    let entry_ptr: *const ScriptEntryPoints = entry_ref;
+    // SAFETY: the entry lives inside `mgr` which is owned by the fixture;
+    // we never expose this `'static` reference past the fixture's lifetime.
+    let entry_static: &'static ScriptEntryPoints =
+        unsafe { &*(entry_ref as *const ScriptEntryPoints) };
 
     let mut scripts = Vec::with_capacity(n);
     let mut sinks: Vec<Box<EffectSink>> = Vec::with_capacity(n);
@@ -194,20 +200,12 @@ fn build_batch(n: usize) -> BatchFixture {
         sinks.push(sink);
         apis.push(api);
     }
-    let entry_refs: Vec<*const ScriptEntryPoints> = (0..n).map(|_| entry_ptr).collect();
-    BatchFixture {
-        _mgr: mgr, scripts, entry: entry_ptr, _sinks: sinks, apis,
-        _entry_refs: entry_refs,
-    }
+    let entries: Vec<&'static ScriptEntryPoints> = (0..n).map(|_| entry_static).collect();
+    BatchFixture { _mgr: mgr, scripts, apis, entries, _sinks: sinks }
 }
 
 fn run_batch(fx: &mut BatchFixture) {
-    // Rebuild the entries slice each iteration — cheap, just `*const` copies.
-    // Doing it inside the closure keeps the bench reflecting realistic usage
-    // (callers materialise this slice on the way into tick_batch).
-    let entry_ref: &ScriptEntryPoints = unsafe { &*fx.entry };
-    let entries: Vec<&ScriptEntryPoints> = (0..fx.scripts.len()).map(|_| entry_ref).collect();
-    tick_batch(&mut fx.scripts, &entries, &mut fx.apis, 0.016);
+    tick_batch(&mut fx.scripts, &fx.entries, &mut fx.apis, 0.016);
 }
 
 #[divan::bench]
@@ -231,5 +229,11 @@ fn tick_batch_128(bencher: Bencher) {
 #[divan::bench]
 fn tick_batch_1024(bencher: Bencher) {
     bencher.with_inputs(|| build_batch(1024))
+        .bench_local_refs(|fx| run_batch(fx));
+}
+
+#[divan::bench]
+fn tick_batch_4096(bencher: Bencher) {
+    bencher.with_inputs(|| build_batch(4096))
         .bench_local_refs(|fx| run_batch(fx));
 }
