@@ -377,8 +377,10 @@ fn apply_reloc(
             unsafe { (patch as *mut u32).write_unaligned(value as u32) };
         }
         (RelocationKind::Relative | RelocationKind::PltRelative, 32) => {
-            // PC-relative: encoded value = target - (patch_address + 4)
-            let rel = value.wrapping_sub(patch as i64).wrapping_sub(4);
+            // ELF R_X86_64_PC32 formula: S + A - P.  `value` is already S + A
+            // (caller folded in the addend); the assembler set A to absorb the
+            // displacement-field offset (typically -4 for RIP-relative).
+            let rel = value.wrapping_sub(patch as i64);
             if !(i32::MIN as i64..=i32::MAX as i64).contains(&rel) {
                 return Err(LoadError::Relocation(Arc::<str>::from(
                     "PC-relative offset out of i32 range",
