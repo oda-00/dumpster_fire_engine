@@ -8,4 +8,4 @@ lang_frontend = { path = "../../crates/lang_frontend" }
 thin-vec      = "0.2"
 inkwell       = { version = "0.5", features = ["llvm18-0"] }
 libloading    = "0.8"
-rustix        = { version = "0.38", features = ["fs", "net", "process"] }
+rustix        = { version = "0.38", features = ["fs", "net", "process", "event"] }

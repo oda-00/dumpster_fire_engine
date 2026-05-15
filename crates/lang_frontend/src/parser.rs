@@ -86,11 +86,12 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut body = ThinVec::new();
         while !self.check_kind(&TokenKind::RBrace) {
-            // <field> = <expr>;
+            // <field> = <expr>[;] — trailing semicolon is optional, matching
+            // the scene-body grammar.
             let field = self.expect_ident()?;
             self.expect(TokenKind::Eq)?;
             let value = self.parse_expr()?;
-            self.expect(TokenKind::Semi)?;
+            self.consume(&TokenKind::Semi);
             body.push(MigrateStmt::Assign { field, value });
         }
         self.expect(TokenKind::RBrace)?;

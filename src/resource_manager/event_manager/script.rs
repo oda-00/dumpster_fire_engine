@@ -191,6 +191,209 @@ impl ScriptManager {
     }
 }
 
+// ── ActiveScript: one running instance of a compiled .lang script ────────────
+//
+// Plan §6.3 — held inside `Play::active_scripts`.  State is preserved across
+// ticks (and across hot-reloads when layout matches via `state_version`).
+
+pub struct ActiveScript {
+    pub script_id:     ScriptId,
+    pub state_buffer:  ThinVec<u8>,
+    pub state_version: u32,
+    /// Raw_id of the currently-active scene.  Zero means "uninitialised";
+    /// `from_entry` defaults this to the first scene in the table.
+    pub active_scene:  i64,
+    pub tick_count:    u64,
+    pub elapsed:       f32,
+}
+
+impl ActiveScript {
+    /// Initialise from a freshly-loaded entry table.  Allocates the state
+    /// buffer, calls `init_state` for defaults, and sets `active_scene` to
+    /// the first scene in the table.
+    pub fn from_entry(script_id: ScriptId, entry: &ScriptEntryPoints) -> Self {
+        let state_size    = entry.state_size() as usize;
+        let state_version = entry.state_version();
+        let mut buf: ThinVec<u8> = ThinVec::with_capacity(state_size);
+        buf.resize(state_size, 0);
+        unsafe { (entry.init_state)(buf.as_mut_ptr()); }
+        let active_scene = entry.scenes.first().map(|s| s.raw_id).unwrap_or(0);
+        ActiveScript {
+            script_id, state_buffer: buf, state_version,
+            active_scene, tick_count: 0, elapsed: 0.0,
+        }
+    }
+
+    /// Migrate the state buffer into the layout described by `new_entry`.
+    /// When the version matches, the buffer is reused (zero-copy).  Otherwise
+    /// a fresh buffer is allocated and `migrate_state(old_version, old, new)`
+    /// from the new library is invoked.  `active_scene` falls back to the
+    /// first scene when its raw_id is no longer present in the new table.
+    pub fn migrate_into(&mut self, new_entry: &ScriptEntryPoints) {
+        let new_size    = new_entry.state_size() as usize;
+        let new_version = new_entry.state_version();
+        if new_version == self.state_version && new_size == self.state_buffer.len() {
+            return;
+        }
+        let mut new_buf: ThinVec<u8> = ThinVec::with_capacity(new_size);
+        new_buf.resize(new_size, 0);
+        unsafe {
+            (new_entry.migrate_state)(
+                self.state_version,
+                self.state_buffer.as_ptr(),
+                new_buf.as_mut_ptr(),
+            );
+        }
+        self.state_buffer  = new_buf;
+        self.state_version = new_version;
+
+        if !new_entry.scenes.iter().any(|s| s.raw_id == self.active_scene) {
+            self.active_scene = new_entry.scenes.first().map(|s| s.raw_id).unwrap_or(0);
+        }
+    }
+
+    /// Tick the active scene against `entry`'s scene table.  Returns the
+    /// transition target (zero ⇒ no transition).  When a transition fires the
+    /// previous scene's `on_exit` and the new scene's `on_enter` are invoked
+    /// in order so state-buffer side effects from those handlers land.
+    ///
+    /// `api.elapsed` and `api.tick_count` are overwritten with this
+    /// `ActiveScript`'s tracked values before each call.
+    pub fn tick(
+        &mut self,
+        entry: &ScriptEntryPoints,
+        api: &mut super::script_abi::EngineAPI,
+        dt: f32,
+    ) -> i64 {
+        self.elapsed     += dt;
+        self.tick_count  += 1;
+        api.elapsed       = self.elapsed;
+        api.tick_count    = self.tick_count;
+
+        let Some(scene) = entry.scene(self.active_scene) else { return 0; };
+        let next = unsafe { (scene.tick)(api, self.state_buffer.as_mut_ptr()) };
+        if next != 0 && next != self.active_scene {
+            unsafe { (scene.on_exit)(api, self.state_buffer.as_mut_ptr()); }
+            if let Some(target) = entry.scene(next) {
+                unsafe { (target.on_enter)(api, self.state_buffer.as_mut_ptr()); }
+                self.active_scene = next;
+                self.elapsed = 0.0;  // reset per-scene elapsed
+            }
+        }
+        next
+    }
+
+    /// Drive the active scene's `on_enter` once — call this immediately after
+    /// `from_entry` to seed initial effects (the entry-scene's on_enter never
+    /// fires automatically).
+    pub fn run_initial_on_enter(
+        &mut self,
+        entry: &ScriptEntryPoints,
+        api: &mut super::script_abi::EngineAPI,
+    ) {
+        let Some(scene) = entry.scene(self.active_scene) else { return; };
+        unsafe { (scene.on_enter)(api, self.state_buffer.as_mut_ptr()); }
+    }
+}
+
+#[cfg(test)]
+mod active_script_tests {
+    use super::*;
+    use super::super::script_abi::EngineAPI;
+
+    extern "C" fn ss_v1()           -> u32 { 4 }
+    extern "C" fn ss_v2()           -> u32 { 8 }
+    extern "C" fn ver_v1()          -> u32 { 0x1111_1111 }
+    extern "C" fn ver_v2()          -> u32 { 0x2222_2222 }
+    extern "C" fn init_v1(p: *mut u8) {
+        unsafe { *(p as *mut i32) = 7; }
+    }
+    extern "C" fn init_v2(p: *mut u8) {
+        unsafe {
+            *(p as *mut i32) = 0;
+            *(p.add(4) as *mut i32) = 0;
+        }
+    }
+    extern "C" fn migrate_v2(old_ver: u32, old: *const u8, new: *mut u8) {
+        // From v1 (4 B i32) into v2 (4 B i32 + 4 B i32): copy first word, set second to old_ver.
+        unsafe {
+            let x = *(old as *const i32);
+            *(new as *mut i32) = x;
+            *(new.add(4) as *mut i32) = old_ver as i32;
+        }
+    }
+    extern "C" fn create_defs_noop(_api: *const EngineAPI, out: *mut super::super::script_abi::SceneDefArray) {
+        unsafe {
+            (*out).scene_count = 0;
+            (*out).scenes      = core::ptr::null();
+        }
+    }
+
+    extern "C" fn migrate_v1_unused(_old_ver: u32, _old: *const u8, _new: *mut u8) {
+        panic!("v1 migrate unused in test");
+    }
+
+    fn v1_entry() -> ScriptEntryPoints {
+        ScriptEntryPoints {
+            state_size:        ss_v1,
+            state_version:     ver_v1,
+            init_state:        init_v1,
+            migrate_state:     migrate_v1_unused,
+            create_scene_defs: create_defs_noop,
+            scenes:            ThinVec::new(),
+        }
+    }
+
+    fn v2_entry() -> ScriptEntryPoints {
+        ScriptEntryPoints {
+            state_size:        ss_v2,
+            state_version:     ver_v2,
+            init_state:        init_v2,
+            migrate_state:     migrate_v2,
+            create_scene_defs: create_defs_noop,
+            scenes:            ThinVec::new(),
+        }
+    }
+
+    #[test]
+    fn from_entry_runs_init_state() {
+        let v1 = v1_entry();
+        let s = ActiveScript::from_entry(ScriptId::new(1), &v1);
+        assert_eq!(s.state_buffer.len(), 4);
+        assert_eq!(s.state_version, 0x1111_1111);
+        assert_eq!(i32::from_ne_bytes(s.state_buffer[..].try_into().unwrap()), 7);
+    }
+
+    #[test]
+    fn migrate_into_runs_migrate_state_when_layout_changes() {
+        let v1 = v1_entry();
+        let v2 = v2_entry();
+        let mut s = ActiveScript::from_entry(ScriptId::new(1), &v1);
+
+        s.migrate_into(&v2);
+        assert_eq!(s.state_buffer.len(), 8);
+        assert_eq!(s.state_version, 0x2222_2222);
+        // First word: x = 7 (carried over from old).
+        let x = i32::from_ne_bytes(s.state_buffer[0..4].try_into().unwrap());
+        assert_eq!(x, 7);
+        // Second word: old_version that migrate_v2 stamped in.
+        let y = i32::from_ne_bytes(s.state_buffer[4..8].try_into().unwrap());
+        assert_eq!(y as u32, 0x1111_1111);
+    }
+
+    #[test]
+    fn migrate_into_is_noop_when_layout_matches() {
+        let v1a = v1_entry();
+        let v1b = v1_entry(); // same layout, same version
+        let mut s = ActiveScript::from_entry(ScriptId::new(1), &v1a);
+        let original_ptr = s.state_buffer.as_ptr();
+        s.migrate_into(&v1b);
+        // Buffer must not be re-allocated.
+        assert_eq!(s.state_buffer.as_ptr(), original_ptr);
+        assert_eq!(s.state_version, 0x1111_1111);
+    }
+}
+
 impl Default for ScriptManager {
     fn default() -> Self { Self::new() }
 }

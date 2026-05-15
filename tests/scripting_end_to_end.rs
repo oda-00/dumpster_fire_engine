@@ -15,7 +15,9 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use dumpster_fire_engine::resource_manager::event_manager::script::ScriptManager;
+use dumpster_fire_engine::resource_manager::event_manager::script::{
+    ActiveScript, ScriptManager,
+};
 use dumpster_fire_engine::resource_manager::event_manager::script_abi::{
     EffectSink, engine_api_for_sink, effect_kind,
 };
@@ -168,4 +170,91 @@ fn compile_load_and_tick_guard_script() {
 
     let _ = sink.tick.fetch_add(1, Ordering::Relaxed);
     mgr.unload(id);
+}
+
+const MIGRATE_V1: &str = r#"
+script "migrate" {
+    state {
+        x: i32 = 5
+    }
+    scene only {
+        behavior { action attack() }
+    }
+}
+"#;
+
+/// Template — `{V1_VERSION}` is replaced with v1's runtime state_version so the
+/// migration block matches the exact `old_version` the engine will pass.
+const MIGRATE_V2: &str = r#"
+script "migrate" {
+    state {
+        x:  i32 = 99
+        y:  f64 = 0.0
+    }
+    migrate from {V1_VERSION} {
+        // Carry x over from the old layout, then add y = 1.5 for the new field.
+        x = old.x
+        y = 1.5
+    }
+    scene only {
+        behavior { action attack() }
+    }
+}
+"#;
+
+#[test]
+fn active_script_ticks_through_transitions_and_migrates_state() {
+    let langc = locate_langc();
+
+    // ── v1: state is just `x: i32 = 5` ──────────────────────────────────────
+    let v1_src = write_temp("migrate_v1.lang", MIGRATE_V1);
+    let v1_so  = v1_src.with_extension("so");
+    let status = Command::new(&langc).arg(&v1_src).arg("-o").arg(&v1_so).status().unwrap();
+    assert!(status.success());
+
+    let mut mgr = ScriptManager::new();
+    let v1_id = mgr.load_from_file(Arc::from(v1_so.to_string_lossy().as_ref())).unwrap();
+    let v1_entry = mgr.get_entry_points(v1_id).unwrap();
+    assert_eq!(v1_entry.state_size(), 4); // i32 only
+
+    // Build an ActiveScript and tick it twice via the helper.
+    let mut script = ActiveScript::from_entry(v1_id, v1_entry);
+    // Default value `x = 5` lives at offset 0:
+    assert_eq!(i32::from_ne_bytes(script.state_buffer[0..4].try_into().unwrap()), 5);
+
+    let mut sink = EffectSink::new();
+    let mut api  = engine_api_for_sink(&mut sink);
+    let _ = script.tick(v1_entry, &mut api, 0.016);
+    assert_eq!(sink.entries.len(), 1);
+    assert_eq!(sink.entries[0].kind, effect_kind::ATTACK);
+    let _ = script.tick(v1_entry, &mut api, 0.016);
+    assert_eq!(sink.entries.len(), 2);
+
+    // ── v2: layout grows by 8 bytes, `migrate from {v1_version} { ... }` runs ──
+    let v1_version = v1_entry.state_version();
+    let v2_body = MIGRATE_V2.replace("{V1_VERSION}", &v1_version.to_string());
+    let v2_src = write_temp("migrate_v2.lang", &v2_body);
+    let v2_so  = v2_src.with_extension("so");
+    let status = Command::new(&langc).arg(&v2_src).arg("-o").arg(&v2_so).status().unwrap();
+    assert!(status.success());
+
+    let v2_id = mgr.load_from_file(Arc::from(v2_so.to_string_lossy().as_ref())).unwrap();
+    let v2_entry = mgr.get_entry_points(v2_id).unwrap();
+    assert_eq!(v2_entry.state_size(), 16);
+
+    // Migrate the running script in place.  init_state runs first (defaults:
+    // x=99, y=0.0), then the migrate body fires: `x = old.x` (5) and
+    // `y = 1.5`.  Result: x=5 carried over from the previous layout, y=1.5
+    // from the explicit assignment.
+    script.migrate_into(v2_entry);
+    assert_eq!(script.state_buffer.len(), 16);
+    assert_eq!(script.state_version, v2_entry.state_version());
+
+    let x = i32::from_ne_bytes(script.state_buffer[0..4].try_into().unwrap());
+    let y = f64::from_ne_bytes(script.state_buffer[8..16].try_into().unwrap());
+    assert_eq!(x, 5, "x must be carried over from old layout via `old.x`");
+    assert!((y - 1.5).abs() < 1e-12, "y must come from the explicit migration assignment");
+
+    mgr.unload(v1_id);
+    mgr.unload(v2_id);
 }

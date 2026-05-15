@@ -31,7 +31,7 @@ use lang_frontend::{lexer::Lexer, parser::Parser, sema};
 use thin_vec::ThinVec;
 
 use ipc::{DaemonMsg, EngineMsg};
-use watch::{Watcher, WatchEvent};
+use watch::WatchEvent;
 
 // Re-use langc's codegen + link modules so there's exactly one LLVM pipeline.
 #[path = "../../langc/src/engine_api.rs"] mod engine_api;
@@ -45,36 +45,23 @@ fn main() {
     // path → (script_id, last_content_hash, last_so_path)
     let mut watched: BTreeMap<PathBuf, WatchEntry> = BTreeMap::new();
 
-    let watcher = std::sync::Arc::new(std::sync::Mutex::new(
-        match Watcher::new() {
-            Ok(w) => w,
-            Err(e) => { eprintln!("langcd: inotify init: {e}"); return; }
-        }
-    ));
+    let (watch_handle, fs_rx) = match watch::spawn() {
+        Ok(p) => p,
+        Err(e) => { eprintln!("langcd: inotify init: {e}"); return; }
+    };
 
     eprintln!("langcd: ready (pid {})", std::process::id());
 
-    // Multiplexed event channel: stdin IPC + inotify events.
+    // Multiplexed event channel.  The watcher thread already runs and pushes
+    // WatchEvents into `fs_rx`; we forward those into the unified channel.
     let (tx, rx): (Sender<DaemonEvent>, Receiver<DaemonEvent>) = channel();
 
-    // FS reader thread: blocking read() on inotify FD, decode, forward.
+    // FS forwarder thread — converts fs_rx into the unified `tx` stream.
     {
-        let watcher = std::sync::Arc::clone(&watcher);
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let mut buf: ThinVec<WatchEvent> = ThinVec::new();
-            loop {
-                buf.clear();
-                let r = { watcher.lock().unwrap().read_events(&mut buf) };
-                match r {
-                    Ok(_) => for ev in buf.drain(..) {
-                        if tx.send(DaemonEvent::Fs(ev)).is_err() { return; }
-                    }
-                    Err(e) => {
-                        eprintln!("langcd: inotify read: {e}");
-                        return;
-                    }
-                }
+            while let Ok(ev) = fs_rx.recv() {
+                if tx.send(DaemonEvent::Fs(ev)).is_err() { break; }
             }
         });
     }
@@ -105,7 +92,7 @@ fn main() {
                 let pp = PathBuf::from(path.as_ref());
                 let was_watched = watched.contains_key(&pp);
                 if !was_watched {
-                    if let Err(e) = watcher.lock().unwrap().watch(&pp) {
+                    if let Err(e) = watch_handle.watch(pp.clone()) {
                         eprintln!("langcd: watch({}) failed: {e}", pp.display());
                         continue;
                     }
@@ -121,7 +108,7 @@ fn main() {
                     .map(|(p, _)| p.clone())
                     .collect();
                 for p in &to_drop {
-                    watcher.lock().unwrap().unwatch(p);
+                    let _ = watch_handle.unwatch(p.clone());
                     watched.remove(p);
                 }
             }
@@ -139,6 +126,7 @@ fn main() {
         }
     }
 
+    drop(watch_handle);
     eprintln!("langcd: exiting");
 }
 
