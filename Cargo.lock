@@ -999,6 +999,7 @@ version = "0.1.0"
 dependencies = [
  "inkwell",
  "lang_frontend",
+ "rayon",
  "rustix 0.38.44",
  "thin-vec",
 ]

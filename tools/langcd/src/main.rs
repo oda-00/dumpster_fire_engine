@@ -125,6 +125,13 @@ fn main() {
     });
 
     // Main loop.
+    //
+    // Compile work is dispatched onto rayon's thread pool so multiple file
+    // changes (e.g. a save-all in the editor, or a git-branch switch) compile
+    // concurrently instead of serializing on a single thread.  The main loop
+    // here owns `watched` and `writer` exclusively — worker threads only
+    // touch local data and post their results back through the event channel
+    // as `DaemonEvent::CompileDone`.
     while let Ok(ev) = rx.recv() {
         match ev {
             DaemonEvent::Engine(EngineMsg::Shutdown) => break,
@@ -140,7 +147,8 @@ fn main() {
                     script_id, last_hash: 0, last_o: None,
                     last_state_size: 0, last_state_version: 0,
                 });
-                handle_compile(path, script_id, &mut watched, &writer);
+                let (lh, lo, lss, lsv) = (0u64, None, 0u32, 0u32);
+                dispatch_compile(path, script_id, lh, lo, lss, lsv, tx.clone());
             }
             DaemonEvent::Engine(EngineMsg::Unwatch { script_id }) => {
                 let mut to_drop: ThinVec<Arc<str>> = ThinVec::new();
@@ -164,11 +172,18 @@ fn main() {
                         break;
                     }
                 }
-                if let Some(k) = matched {
-                    if let Some(id) = map_get(&watched, k.as_ref()).map(|v| v.script_id) {
-                        handle_compile(k, id, &mut watched, &writer);
-                    }
+                if let Some(k) = matched
+                    && let Some(entry) = map_get(&watched, k.as_ref())
+                {
+                    let (id, lh, lo, lss, lsv) = (
+                        entry.script_id, entry.last_hash, entry.last_o.clone(),
+                        entry.last_state_size, entry.last_state_version,
+                    );
+                    dispatch_compile(k, id, lh, lo, lss, lsv, tx.clone());
                 }
+            }
+            DaemonEvent::CompileDone { path, script_id, result } => {
+                apply_compile_outcome(path, script_id, result, &mut watched, &writer);
             }
         }
     }
@@ -180,79 +195,143 @@ fn main() {
 enum DaemonEvent {
     Engine(EngineMsg),
     Fs(WatchEvent),
+    /// A worker thread finished a compile job.  The main thread folds the
+    /// result back into the watched-cache and writes the IPC reply.
+    CompileDone {
+        path:      Arc<str>,
+        script_id: i64,
+        result:    CompileOutcome,
+    },
 }
 
-fn handle_compile(
-    path:    Arc<str>,
-    script_id: i64,
-    watched: &mut WatchedMap,
-    writer:  &std::sync::Mutex<BufWriter<std::io::StdoutLock<'_>>>,
+enum CompileOutcome {
+    /// File content hash matched the cache — reuse the prior `.o`.
+    Cached {
+        o_path:        Arc<str>,
+        state_size:    u32,
+        state_version: u32,
+    },
+    /// Fresh compile succeeded.  `hash` is the new content hash to cache.
+    Compiled {
+        hash:          u64,
+        o_path:        Arc<str>,
+        state_size:    u32,
+        state_version: u32,
+    },
+    /// Frontend, IO, or codegen failure.  `diagnostics` is the wire-form list.
+    Failed { diagnostics: ThinVec<Arc<str>> },
+}
+
+/// Dispatch a compile to rayon's pool.  The worker thread does all of the
+/// blocking work (file read, hash, lex/parse/sema, LLVM codegen, .o emit)
+/// and posts the outcome back through the main event channel so cache
+/// updates and stdout writes stay single-threaded.
+fn dispatch_compile(
+    path:        Arc<str>,
+    script_id:   i64,
+    last_hash:   u64,
+    last_o:      Option<Arc<str>>,
+    last_ss:     u32,
+    last_sv:     u32,
+    result_tx:   Sender<DaemonEvent>,
 ) {
+    rayon::spawn(move || {
+        let outcome = compile_worker(&path, script_id, last_hash, last_o, last_ss, last_sv);
+        let _ = result_tx.send(DaemonEvent::CompileDone { path, script_id, result: outcome });
+    });
+}
+
+/// CPU-bound worker function — runs on a rayon thread, no `&mut` engine
+/// state, no IO except the file read and `.o` write that the user already
+/// paid for in the synchronous version.
+fn compile_worker(
+    path:      &Arc<str>,
+    script_id: i64,
+    last_hash: u64,
+    last_o:    Option<Arc<str>>,
+    last_ss:   u32,
+    last_sv:   u32,
+) -> CompileOutcome {
     let src = match std::fs::read_to_string(path.as_ref()) {
         Ok(s) => s,
         Err(e) => {
-            let mut diags: ThinVec<Arc<str>> = ThinVec::new();
-            diags.push(Arc::<str>::from(format!("{path}: read: {e}").as_str()));
-            send_err(writer, script_id, &diags);
-            return;
+            let mut d: ThinVec<Arc<str>> = ThinVec::new();
+            d.push(Arc::<str>::from(format!("{path}: read: {e}").as_str()));
+            return CompileOutcome::Failed { diagnostics: d };
         }
     };
     let hash = sema::fnv1a(src.as_bytes());
-
-    // If the file content hasn't changed since the last compile, re-emit the
-    // cached .o path so the engine can decide whether to reload.
-    if let Some(entry) = map_get_mut(watched, path.as_ref()) {
-        if entry.last_hash == hash {
-            if let Some(o) = entry.last_o.clone() {
-                send_ok(writer, script_id, o, entry.last_state_size, entry.last_state_version);
-                return;
-            }
+    if hash == last_hash && last_hash != 0 {
+        if let Some(o) = last_o {
+            return CompileOutcome::Cached {
+                o_path: o, state_size: last_ss, state_version: last_sv,
+            };
         }
-        entry.last_hash = hash;
     }
 
     let mut diags: ThinVec<Arc<str>> = ThinVec::new();
     let toks = match Lexer::new(&src).tokenise() {
         Ok(t) => t,
-        Err(e) => { push_err(&mut diags, e); send_err(writer, script_id, &diags); return; }
+        Err(e) => { push_err(&mut diags, e); return CompileOutcome::Failed { diagnostics: diags }; }
     };
     let ast = match Parser::new(toks).parse_script() {
         Ok(a) => a,
-        Err(e) => { push_err(&mut diags, e); send_err(writer, script_id, &diags); return; }
+        Err(e) => { push_err(&mut diags, e); return CompileOutcome::Failed { diagnostics: diags }; }
     };
     let hir = match sema::lower(ast) {
         Ok(h) => h,
-        Err(e) => { push_err(&mut diags, e); send_err(writer, script_id, &diags); return; }
+        Err(e) => { push_err(&mut diags, e); return CompileOutcome::Failed { diagnostics: diags }; }
     };
 
-    // Per-script temp directory.  PathBuf used as a local convenience for
-    // the std::fs API surface — never stored.
     let dir = std::env::temp_dir()
         .join("dfe_langcd_cache")
         .join(format!("script_{script_id}"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         diags.push(Arc::<str>::from(format!("mkdir {}: {e}", dir.display()).as_str()));
-        send_err(writer, script_id, &diags);
-        return;
+        return CompileOutcome::Failed { diagnostics: diags };
     }
-    // The .o IS the final artifact — no link step.
     let obj = dir.join(format!("{}.o", hir.name));
 
     if let Err(e) = codegen::compile_to_object(&hir, OptimizationLevel::Less, &obj) {
         diags.push(Arc::<str>::from(format!("{e}").as_str()));
-        send_err(writer, script_id, &diags);
-        return;
+        return CompileOutcome::Failed { diagnostics: diags };
     }
 
-    let ss = hir.state_size;
-    let sv = hir.state_version;
-    let o_arc: Arc<str> = Arc::<str>::from(obj.to_string_lossy().as_ref());
-    if let Some(entry) = map_get_mut(watched, path.as_ref()) {
-        entry.last_o             = Some(Arc::clone(&o_arc));
-        entry.last_state_size    = ss;
-        entry.last_state_version = sv;
+    CompileOutcome::Compiled {
+        hash,
+        o_path:        Arc::<str>::from(obj.to_string_lossy().as_ref()),
+        state_size:    hir.state_size,
+        state_version: hir.state_version,
     }
-    send_ok(writer, script_id, o_arc, ss, sv);
+}
+
+/// Apply a worker's outcome to the watched-cache and ship the IPC reply.
+/// Stays on the main thread — `watched` is single-owner, `writer` is the
+/// shared stdout mutex.
+fn apply_compile_outcome(
+    path:      Arc<str>,
+    script_id: i64,
+    outcome:   CompileOutcome,
+    watched:   &mut WatchedMap,
+    writer:    &std::sync::Mutex<BufWriter<std::io::StdoutLock<'_>>>,
+) {
+    match outcome {
+        CompileOutcome::Cached { o_path, state_size, state_version } => {
+            send_ok(writer, script_id, o_path, state_size, state_version);
+        }
+        CompileOutcome::Compiled { hash, o_path, state_size, state_version } => {
+            if let Some(entry) = map_get_mut(watched, path.as_ref()) {
+                entry.last_hash          = hash;
+                entry.last_o             = Some(Arc::clone(&o_path));
+                entry.last_state_size    = state_size;
+                entry.last_state_version = state_version;
+            }
+            send_ok(writer, script_id, o_path, state_size, state_version);
+        }
+        CompileOutcome::Failed { diagnostics } => {
+            send_err(writer, script_id, &diagnostics);
+        }
+    }
 }
 
 fn push_err<E: core::fmt::Display>(diags: &mut ThinVec<Arc<str>>, e: E) {

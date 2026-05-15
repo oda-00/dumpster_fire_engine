@@ -102,3 +102,85 @@ fn round_trip(bencher: Bencher) {
         let _ = &fx.src_path;
     });
 }
+
+// ── Concurrent multi-file reload ─────────────────────────────────────────────
+//
+// Exercises the rayon-dispatched compile path in langcd: N files are watched,
+// then all N are written in immediate succession.  Measures the wall-clock
+// from "writes start" to "all N CompileOks received".  Pre-rayon main loop
+// this was strictly serial — N × ~6 ms.  With the worker pool it lands closer
+// to max(per-file-time) for N ≤ num_cpus.
+
+struct MultiFixture {
+    client:    ScriptClient,
+    paths:     Vec<PathBuf>,
+    next_is_a: bool,
+}
+
+fn build_multi(n: usize) -> MultiFixture {
+    let langcd = locate_langcd();
+    let dir = std::env::temp_dir().join(format!("dfe_hr_multi_{}_{}",
+        n, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut paths = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = dir.join(format!("bench_{i}.lang"));
+        std::fs::write(&p, V_A).unwrap();
+        paths.push(p);
+    }
+    let mut client = ScriptClient::spawn(&langcd).expect("spawn langcd");
+    for (i, p) in paths.iter().enumerate() {
+        let arc: Arc<str> = Arc::from(p.to_string_lossy().as_ref());
+        client.watch((i + 1) as i64, arc).expect("watch");
+    }
+    // Drain the initial-on-watch compiles — order is non-deterministic now
+    // that langcd dispatches across rayon, so accept any script_id from 1..=n.
+    drain_compile_oks(&mut client, n);
+    MultiFixture { client, paths, next_is_a: false }
+}
+
+fn drain_compile_oks(client: &mut ScriptClient, n: usize) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut got = vec![false; n];
+    let mut remaining = n;
+    while remaining > 0 && Instant::now() < deadline {
+        if let Some(DaemonMsg::CompileOk { script_id, .. }) =
+            client.wait_for_event(Duration::from_millis(500))
+        {
+            let i = script_id as usize - 1;
+            if i < n && !got[i] { got[i] = true; remaining -= 1; }
+        }
+    }
+    assert_eq!(remaining, 0, "drain timed out: {}/{} compiled", n - remaining, n);
+}
+
+fn run_multi(fx: &mut MultiFixture) {
+    let body = if fx.next_is_a { V_A } else { V_B };
+    fx.next_is_a = !fx.next_is_a;
+    for p in fx.paths.iter() {
+        std::fs::write(p, body).unwrap();
+    }
+    let n = fx.paths.len();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut got = vec![false; n];
+    let mut remaining = n;
+    while remaining > 0 && Instant::now() < deadline {
+        if let Some(DaemonMsg::CompileOk { script_id, .. }) =
+            fx.client.wait_for_event(Duration::from_millis(500))
+        {
+            let i = script_id as usize - 1;
+            if i < n && !got[i] { got[i] = true; remaining -= 1; }
+        }
+    }
+    assert_eq!(remaining, 0, "timed out: only {}/{} compiled", n - remaining, n);
+}
+
+#[divan::bench(sample_count = 8, sample_size = 1)]
+fn concurrent_round_trip_4(bencher: Bencher) {
+    bencher.with_inputs(|| build_multi(4)).bench_local_refs(run_multi);
+}
+
+#[divan::bench(sample_count = 8, sample_size = 1)]
+fn concurrent_round_trip_8(bencher: Bencher) {
+    bencher.with_inputs(|| build_multi(8)).bench_local_refs(run_multi);
+}
