@@ -1,0 +1,32 @@
+script "guard" {
+    state {
+        patrol_index:    i32 = 0
+        last_alert_time: f64 = 0.0
+    }
+
+    scene patrol {
+        on_enter => cue_troupe("walk");
+
+        behavior {
+            selector {
+                sequence {
+                    condition enemy_in_range(10.0),
+                    action attack()
+                },
+                action patrol_path()
+            }
+        }
+
+        transition alert when see_player(100.0);
+    }
+
+    scene alert {
+        on_enter => cue_troupe("alarm");
+
+        behavior {
+            action attack()
+        }
+
+        transition patrol when after_seconds(2.0);
+    }
+}

@@ -3,15 +3,24 @@ use std::process::Command;
 
 fn main() {
     let glslc = find_glslc();
-    compile_shader(&glslc, "assets/shaders/triangle.vert");
-    compile_shader(&glslc, "assets/shaders/triangle.frag");
-    compile_shader(&glslc, "assets/shaders/forward_lit.vert");
-    compile_shader(&glslc, "assets/shaders/forward_lit.frag");
+    let have_glslc = Command::new(&glslc).arg("--version").output().is_ok();
+    compile_shader(&glslc, have_glslc, "assets/shaders/triangle.vert");
+    compile_shader(&glslc, have_glslc, "assets/shaders/triangle.frag");
+    compile_shader(&glslc, have_glslc, "assets/shaders/forward_lit.vert");
+    compile_shader(&glslc, have_glslc, "assets/shaders/forward_lit.frag");
 }
 
-fn compile_shader(glslc: &str, src: &str) {
+fn compile_shader(glslc: &str, have_glslc: bool, src: &str) {
     let out = format!("{src}.spv");
     println!("cargo::rerun-if-changed={src}");
+
+    if !have_glslc {
+        if Path::new(&out).exists() {
+            println!("cargo::warning=glslc not found; reusing existing {out}");
+            return;
+        }
+        panic!("glslc not found and no pre-built {out}");
+    }
 
     let status = Command::new(glslc)
         .args([src, "-o", &out])
