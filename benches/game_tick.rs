@@ -175,11 +175,7 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
     let bt_actor = stage.actors[0].1;
 
     let make_per_tick_bt = || -> BtNode {
-<<<<<<< HEAD
-        let mut nodes = ThinVec::with_capacity(scale.bt_leaves);
-=======
         let mut nodes: ThinVec<BtNode> = ThinVec::with_capacity(scale.bt_leaves);
->>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
         for k in 0..scale.bt_leaves {
             let dx = (k as f32) * 0.01;
             nodes.push(BtNode::leaf(
@@ -228,16 +224,12 @@ fn build_script(scale: Scale, stage: &StageHandles, stage_id: StageId) -> Script
     let action = SceneDef {
         id: s_action, stage: stage_id, parent: Some(s_root),
         kind: SceneKind::Atomic,
-        troupes: thin_ThinThinVec![troupe_lhs, troupe_rhs],
-        initial_actors: thin_ThinVec![
+        troupes: thin_vec![troupe_lhs, troupe_rhs],
+        initial_actors: thin_vec![
             lhs_actors.iter().cloned().collect(),
             rhs_actors.iter().cloned().collect(),
         ],
-<<<<<<< HEAD
-        root: BtNode::Sequence(ThinVec![
-=======
         root: BtNode::Sequence(thin_vec![
->>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
             BtNode::leaf(
                 Condition::Always,
                 Effect::CueTroupe {
@@ -529,7 +521,7 @@ fn build_world_storm(scale: Scale) -> (World, Vec<StageHandles>) {
                 .unwrap();
             sid_counter += 1;
 
-            let mut actors = Vec::with_capacity(scale.actors_per_stage);
+            let mut actors: ThinVec<(ActorId, ActorHandle)> = ThinVec::with_capacity(scale.actors_per_stage);
             for ai in 0..scale.actors_per_stage {
                 let aid = ActorId::new(actor_id_counter);
                 actor_id_counter += 1;
@@ -646,7 +638,7 @@ fn build_script_deep(depth: usize, stage: &StageHandles, stage_id: StageId) -> S
     script
 }
 
-fn build_world_deep(scale: Scale, depth: usize) -> (World, Vec<StageHandles>) {
+fn build_world_deep(scale: Scale, depth: usize) -> (World, ThinVec<StageHandles>) {
     let (mut world, handles) = build_world(scale);
     // Replace each Stage's Play with a deep-HSM one.
     for (idx, stage) in handles.iter().enumerate() {

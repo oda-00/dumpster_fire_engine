@@ -4,9 +4,12 @@ use std::fmt;
 
 use crate::resource_manager::manager::Arena;
 
-use super::forge::{Forge, ForgeHandle, ForgeId, ForgeTag, write_forge_descriptors};
+use super::forge::{
+    Forge, ForgeHandle, ForgeId, ForgeTag, GraphicsForge, GraphicsForgeHandle, GraphicsForgeId,
+    GraphicsForgeTag, write_forge_descriptors,
+};
 use super::ingot::Ingot;
-use super::ore::{IngotSpec, Ore, OreKind};
+use super::ore::{GraphicsOreKind, IngotSpec, Ore, OreKind};
 
 pub type ForgeResult<T> = Result<T, ForgeError>;
 
@@ -79,11 +82,22 @@ impl From<std::io::Error> for ForgeError {
 // OreKind is the dispatch key during refine; ForgeId is the stable identity.
 // Slotted directly by OreKind::index() so the cache is one indexed load —
 // matches AssetArena::cache and Stage::cache. ForgeId lookup is a linear
-// scan across <= OreKind::COUNT entries.
+// scan across <= OreKind::COMPUTE_COUNT entries. Graphics sub-kinds
+// (`OreKind::Graphics(_)`) live in their own arena/cache and are rejected
+// here.
 #[derive(Clone, Copy)]
 pub struct ForgeCacheEntry {
     pub id: ForgeId,
     pub handle: ForgeHandle,
+}
+
+/// Graphics analog of `ForgeCacheEntry`. Slotted by `GraphicsOreKind::index()`
+/// — separate from the compute cache because graphics forges have their own
+/// arena and don't share dispatch machinery.
+#[derive(Clone, Copy)]
+pub struct GraphicsForgeCacheEntry {
+    pub id: GraphicsForgeId,
+    pub handle: GraphicsForgeHandle,
 }
 
 pub struct ForgeMaster {
@@ -94,7 +108,9 @@ pub struct ForgeMaster {
     descriptor_pool: vk::DescriptorPool,
     fence: vk::Fence,
     forges: Arena<ForgeTag, Forge>,
-    cache: [Option<ForgeCacheEntry>; OreKind::COUNT],
+    cache: [Option<ForgeCacheEntry>; OreKind::COMPUTE_COUNT],
+    graphics_forges: Arena<GraphicsForgeTag, GraphicsForge>,
+    graphics_cache: [Option<GraphicsForgeCacheEntry>; GraphicsOreKind::COUNT],
 }
 
 impl ForgeMaster {
@@ -125,8 +141,10 @@ impl ForgeMaster {
             memory_properties,
             descriptor_pool,
             fence,
-            forges: Arena::with_capacity(OreKind::COUNT),
-            cache: [None; OreKind::COUNT],
+            forges: Arena::with_capacity(OreKind::COMPUTE_COUNT),
+            cache: [None; OreKind::COMPUTE_COUNT],
+            graphics_forges: Arena::with_capacity(GraphicsOreKind::COUNT),
+            graphics_cache: [None; GraphicsOreKind::COUNT],
         })
     }
 
@@ -179,6 +197,60 @@ impl ForgeMaster {
 
     pub fn handle_of(&self, id: ForgeId) -> Option<ForgeHandle> {
         self.cache
+            .iter()
+            .flatten()
+            .find(|e| e.id == id)
+            .map(|e| e.handle)
+    }
+
+    // ── Graphics forge registration ────────────────────────────────────────
+    //
+    // GraphicsForge is bytecode-only — no Vulkan handles to destroy here. The
+    // pipeline (GraphicsMold) is built on demand by Window via
+    // `GraphicsForge::compile()` and the window owns/destroys it. So
+    // re-inserting the same kind just evicts the old bytecode entry.
+
+    pub fn add_graphics_forge(&mut self, forge: GraphicsForge) -> GraphicsForgeHandle {
+        let kind_idx = forge.kind.index();
+        if let Some(stale) = self.graphics_cache[kind_idx].take() {
+            self.graphics_forges.remove(stale.handle);
+        }
+        let id = forge.id;
+        let handle = self.graphics_forges.insert(forge);
+        self.graphics_cache[kind_idx] = Some(GraphicsForgeCacheEntry { id, handle });
+        handle
+    }
+
+    pub fn add_graphics_forge_from_spirv_bytes(
+        &mut self,
+        id: GraphicsForgeId,
+        kind: GraphicsOreKind,
+        vert_spv: &[u8],
+        frag_spv: &[u8],
+    ) -> ForgeResult<GraphicsForgeHandle> {
+        let forge = GraphicsForge::from_spirv_bytes(id, kind, vert_spv, frag_spv)?;
+        Ok(self.add_graphics_forge(forge))
+    }
+
+    pub fn graphics_forge(&self, kind: GraphicsOreKind) -> Option<&GraphicsForge> {
+        self.graphics_handle_for_kind(kind)
+            .and_then(|h| self.graphics_forges.get(h))
+    }
+
+    pub fn graphics_forge_by_id(&self, id: GraphicsForgeId) -> Option<&GraphicsForge> {
+        self.graphics_handle_of(id)
+            .and_then(|h| self.graphics_forges.get(h))
+    }
+
+    pub fn graphics_handle_for_kind(
+        &self,
+        kind: GraphicsOreKind,
+    ) -> Option<GraphicsForgeHandle> {
+        self.graphics_cache[kind.index()].map(|e| e.handle)
+    }
+
+    pub fn graphics_handle_of(&self, id: GraphicsForgeId) -> Option<GraphicsForgeHandle> {
+        self.graphics_cache
             .iter()
             .flatten()
             .find(|e| e.id == id)
@@ -276,7 +348,7 @@ impl ForgeMaster {
         for forge in self.forges.values_mut() {
             unsafe { forge.destroy(&self.device); }
         }
-        self.cache = [None; OreKind::COUNT];
+        self.cache = [None; OreKind::COMPUTE_COUNT];
         unsafe {
             if self.fence != vk::Fence::null() {
                 self.device.destroy_fence(self.fence, None);

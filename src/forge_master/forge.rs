@@ -1,12 +1,15 @@
 use ash::vk;
 use std::ffi::CStr;
 use std::io::Cursor;
+use std::mem::size_of;
 
 use crate::resource_manager::manager::{Handle, Id};
 
 use super::ingot::{Ingot, IngotArtifact};
 use super::master::{ForgeError, ForgeResult};
-use super::ore::{OreKind, StagedOre};
+use thin_vec::ThinVec;
+
+use super::ore::{ForgeVertex, GraphicsOreKind, OreKind, StagedOre};
 
 pub const ORE_PRIMARY_BINDING: u32 = 0;
 pub const ORE_SECONDARY_BINDING: u32 = 1;
@@ -230,4 +233,347 @@ fn layout_binding(binding: u32, ty: vk::DescriptorType) -> vk::DescriptorSetLayo
         .descriptor_type(ty)
         .descriptor_count(1)
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
+}
+
+// ── Graphics forge ─────────────────────────────────────────────────────────
+//
+// GraphicsForge is the rasterization analog of Forge: a `kind` (drives the
+// descriptor-binding shape) plus owned vert/frag SPIR-V words. It does NOT
+// own device-side pipeline objects — those live in `GraphicsMold`, produced
+// by `compile()` once the target surface format + extent are known. Decoupling
+// the bytecode from the mold lets one forge be re-compiled across resized or
+// re-created swapchains without re-uploading the SPIR-V.
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GraphicsForgeTag;
+pub type GraphicsForgeHandle = Handle<GraphicsForgeTag>;
+
+pub struct GraphicsForgeMarker;
+pub type GraphicsForgeId = Id<GraphicsForgeMarker>;
+
+#[derive(Debug)]
+pub struct GraphicsForge {
+    pub id: GraphicsForgeId,
+    pub kind: GraphicsOreKind,
+    vert_spirv: ThinVec<u32>,
+    frag_spirv: ThinVec<u32>,
+}
+
+#[derive(Debug)]
+pub struct GraphicsMold {
+    pub render_pass: vk::RenderPass,
+    pub descriptor_set_layout: vk::DescriptorSetLayout,
+    pub pipeline_layout: vk::PipelineLayout,
+    pub pipeline: vk::Pipeline,
+}
+
+impl GraphicsForge {
+    pub fn from_spirv_bytes(
+        id: GraphicsForgeId,
+        kind: GraphicsOreKind,
+        vert_spv: &[u8],
+        frag_spv: &[u8],
+    ) -> ForgeResult<Self> {
+        let vert_words = ash::util::read_spv(&mut Cursor::new(vert_spv))?;
+        let frag_words = ash::util::read_spv(&mut Cursor::new(frag_spv))?;
+        Self::from_spirv_words(id, kind, &vert_words, &frag_words)
+    }
+
+    pub fn from_spirv_words(
+        id: GraphicsForgeId,
+        kind: GraphicsOreKind,
+        vert: &[u32],
+        frag: &[u32],
+    ) -> ForgeResult<Self> {
+        if vert.is_empty() || frag.is_empty() {
+            return Err(ForgeError::EmptyShader {
+                kind: OreKind::Graphics(kind),
+            });
+        }
+        Ok(Self {
+            id,
+            kind,
+            vert_spirv: vert.iter().copied().collect(),
+            frag_spirv: frag.iter().copied().collect(),
+        })
+    }
+
+    /// Descriptor bindings for this forge's kind. The compute path uses
+    /// `STORAGE_BUFFER` everywhere; here `ForwardLit` exposes a camera UBO at
+    /// binding 0 (vertex stage) and an actor-transform SSBO at binding 1
+    /// (vertex stage). `Ui` has no descriptors — the shader generates
+    /// vertices from `gl_VertexIndex` alone (perfect for the hello-triangle
+    /// path, which baked positions into the shader).
+    pub fn descriptor_bindings(&self) -> ThinVec<vk::DescriptorSetLayoutBinding<'static>> {
+        match self.kind {
+            GraphicsOreKind::ForwardLit => {
+                let mut v = ThinVec::with_capacity(2);
+                v.push(
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(0)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::VERTEX),
+                );
+                v.push(
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::VERTEX),
+                );
+                v
+            }
+            GraphicsOreKind::Ui => ThinVec::new(),
+        }
+    }
+
+    /// Build the device-side mold (render pass + pipeline) against a concrete
+    /// surface format and viewport extent. Caller takes ownership of the
+    /// returned `GraphicsMold` and must call `mold.destroy(device)` before
+    /// device destruction. Re-callable: produce a fresh mold every swapchain
+    /// re-create.
+    pub fn compile(
+        &self,
+        device: &ash::Device,
+        color_format: vk::Format,
+        extent: vk::Extent2D,
+    ) -> ForgeResult<GraphicsMold> {
+        // Render pass — single color attachment, clear → present.
+        let attachments = [vk::AttachmentDescription::default()
+            .format(color_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)];
+        let color_refs = [vk::AttachmentReference::default()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+        let subpasses = [vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_refs)];
+        let dependencies = [vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)];
+        let render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        let render_pass = unsafe { device.create_render_pass(&render_pass_info, None)? };
+
+        // Descriptor set layout (may be empty).
+        let bindings = self.descriptor_bindings();
+        let descriptor_set_layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let descriptor_set_layout = match unsafe {
+            device.create_descriptor_set_layout(&descriptor_set_layout_info, None)
+        } {
+            Ok(l) => l,
+            Err(e) => {
+                unsafe { device.destroy_render_pass(render_pass, None) };
+                return Err(ForgeError::Vk(e));
+            }
+        };
+
+        // Pipeline layout — ForwardLit exposes a mat4 push constant (MVP).
+        let set_layouts = [descriptor_set_layout];
+        let push_ranges: &[vk::PushConstantRange] = match self.kind {
+            GraphicsOreKind::ForwardLit => &[vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .offset(0)
+                .size(64)], // sizeof(mat4)
+            GraphicsOreKind::Ui => &[],
+        };
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(push_ranges);
+        let pipeline_layout = match unsafe {
+            device.create_pipeline_layout(&pipeline_layout_info, None)
+        } {
+            Ok(l) => l,
+            Err(e) => {
+                unsafe {
+                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    device.destroy_render_pass(render_pass, None);
+                }
+                return Err(ForgeError::Vk(e));
+            }
+        };
+
+        // Shader modules — destroyed before returning regardless of outcome.
+        let vert_info = vk::ShaderModuleCreateInfo::default().code(&self.vert_spirv);
+        let vert_module = match unsafe { device.create_shader_module(&vert_info, None) } {
+            Ok(m) => m,
+            Err(e) => {
+                unsafe {
+                    device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    device.destroy_render_pass(render_pass, None);
+                }
+                return Err(ForgeError::Vk(e));
+            }
+        };
+        let frag_info = vk::ShaderModuleCreateInfo::default().code(&self.frag_spirv);
+        let frag_module = match unsafe { device.create_shader_module(&frag_info, None) } {
+            Ok(m) => m,
+            Err(e) => {
+                unsafe {
+                    device.destroy_shader_module(vert_module, None);
+                    device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    device.destroy_render_pass(render_pass, None);
+                }
+                return Err(ForgeError::Vk(e));
+            }
+        };
+
+        let entry = CStr::from_bytes_with_nul(b"main\0").expect("static entry is nul-terminated");
+        let stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(entry),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(frag_module)
+                .name(entry),
+        ];
+
+        // Vertex input — ForwardLit reads ForgeVertex from binding 0;
+        // Ui generates verts from gl_VertexIndex (no buffer needed).
+        let binding_descs: &[vk::VertexInputBindingDescription] = match self.kind {
+            GraphicsOreKind::ForwardLit => &[vk::VertexInputBindingDescription::default()
+                .binding(0)
+                .stride(size_of::<ForgeVertex>() as u32) // 48 bytes
+                .input_rate(vk::VertexInputRate::VERTEX)],
+            GraphicsOreKind::Ui => &[],
+        };
+        // ForgeVertex layout: position[0..12], normal[12..24], tangent[24..40], uv[40..48]
+        let attr_descs: &[vk::VertexInputAttributeDescription] = match self.kind {
+            GraphicsOreKind::ForwardLit => &[
+                vk::VertexInputAttributeDescription::default()
+                    .location(0).binding(0)
+                    .format(vk::Format::R32G32B32_SFLOAT).offset(0),
+                vk::VertexInputAttributeDescription::default()
+                    .location(1).binding(0)
+                    .format(vk::Format::R32G32B32_SFLOAT).offset(12),
+                vk::VertexInputAttributeDescription::default()
+                    .location(2).binding(0)
+                    .format(vk::Format::R32G32B32A32_SFLOAT).offset(24),
+                vk::VertexInputAttributeDescription::default()
+                    .location(3).binding(0)
+                    .format(vk::Format::R32G32_SFLOAT).offset(40),
+            ],
+            GraphicsOreKind::Ui => &[],
+        };
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(binding_descs)
+            .vertex_attribute_descriptions(attr_descs);
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let viewports = [vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let scissors = [vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        }];
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(&viewports)
+            .scissors(&scissors);
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::CLOCKWISE);
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(false)];
+        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(&color_blend_attachments);
+
+        let pipeline_create = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blend_state)
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        let pipeline = unsafe {
+            match device.create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                &[pipeline_create],
+                None,
+            ) {
+                Ok(mut created) => created.remove(0),
+                Err((mut created, err)) => {
+                    for p in created.drain(..) {
+                        if p != vk::Pipeline::null() {
+                            device.destroy_pipeline(p, None);
+                        }
+                    }
+                    device.destroy_shader_module(frag_module, None);
+                    device.destroy_shader_module(vert_module, None);
+                    device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    device.destroy_render_pass(render_pass, None);
+                    return Err(ForgeError::Vk(err));
+                }
+            }
+        };
+
+        unsafe {
+            device.destroy_shader_module(frag_module, None);
+            device.destroy_shader_module(vert_module, None);
+        }
+
+        Ok(GraphicsMold {
+            render_pass,
+            descriptor_set_layout,
+            pipeline_layout,
+            pipeline,
+        })
+    }
+}
+
+impl GraphicsMold {
+    pub unsafe fn destroy(&mut self, device: &ash::Device) {
+        unsafe {
+            if self.pipeline != vk::Pipeline::null() {
+                device.destroy_pipeline(self.pipeline, None);
+                self.pipeline = vk::Pipeline::null();
+            }
+            if self.pipeline_layout != vk::PipelineLayout::null() {
+                device.destroy_pipeline_layout(self.pipeline_layout, None);
+                self.pipeline_layout = vk::PipelineLayout::null();
+            }
+            if self.descriptor_set_layout != vk::DescriptorSetLayout::null() {
+                device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+                self.descriptor_set_layout = vk::DescriptorSetLayout::null();
+            }
+            if self.render_pass != vk::RenderPass::null() {
+                device.destroy_render_pass(self.render_pass, None);
+                self.render_pass = vk::RenderPass::null();
+            }
+        }
+    }
 }

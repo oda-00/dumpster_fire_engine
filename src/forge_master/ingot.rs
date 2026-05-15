@@ -264,7 +264,7 @@ impl Ingot {
         let mut file = File::create(path)?;
         file.write_all(INGOT_MAGIC)?;
         file.write_all(&INGOT_VERSION.to_le_bytes())?;
-        file.write_all(&(self.kind as u32).to_le_bytes())?;
+        file.write_all(&(self.kind.index() as u32).to_le_bytes())?;
 
         match &self.artifact {
             IngotArtifact::Buffer { result, bytes, .. } => {

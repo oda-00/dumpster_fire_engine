@@ -5,8 +5,41 @@ use thin_vec::ThinVec;
 
 use super::master::{ForgeError, ForgeResult};
 
+// ── Graphics pipeline sub-kind ─────────────────────────────────────────────
+//
+// Lives inside `OreKind::Graphics(...)`. Each variant maps 1-to-1 with a
+// registered GraphicsForge and drives the rasterization pipeline (dispatched
+// during the render pass, not before it). Kept as its own enum so graphics
+// forges can index a tight `[_; GraphicsOreKind::COUNT]` cache without
+// scanning past compute slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+pub enum GraphicsOreKind {
+    /// Opaque geometry rendered with the forward-lit pipeline.
+    ForwardLit,
+    /// Immediate-mode UI overlay rendered on top of the scene.
+    Ui,
+}
+
+impl GraphicsOreKind {
+    pub const ALL: [GraphicsOreKind; 2] = [
+        GraphicsOreKind::ForwardLit,
+        GraphicsOreKind::Ui,
+    ];
+
+    pub const COUNT: usize = Self::ALL.len();
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+// `OreKind` carries every dispatchable kind — compute variants are flat;
+// rasterization is namespaced under `Graphics(GraphicsOreKind)` so the type
+// system makes the compute/graphics split impossible to mix up. The compute
+// forge cache only needs `COMPUTE_COUNT` slots; the full `ALL` / `COUNT`
+// include the graphics variants so callers can enumerate everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OreKind {
     // Ray tracing.
     RayTrace,
@@ -18,14 +51,19 @@ pub enum OreKind {
     LightClustering,
     OcclusionCulling,
 
-    // Graphics baking.
+    // Graphics baking (still compute — produces data the rasterizer reads).
     MaterialFlattening,
     AmbientOcclusion,
     VisibilityPass,
+
+    // Rasterization — sub-kind selects the draw pipeline.
+    Graphics(GraphicsOreKind),
 }
 
 impl OreKind {
-    pub const ALL: [OreKind; 9] = [
+    /// Compute-only kinds, in `index()` order. Use this to size the compute
+    /// forge cache — graphics variants live in their own arena.
+    pub const COMPUTE_ALL: [OreKind; 9] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -37,10 +75,52 @@ impl OreKind {
         OreKind::VisibilityPass,
     ];
 
+    pub const COMPUTE_COUNT: usize = Self::COMPUTE_ALL.len();
+
+    /// Every kind, compute + every graphics sub-kind, in `index()` order.
+    pub const ALL: [OreKind; 11] = [
+        OreKind::RayTrace,
+        OreKind::Denoise,
+        OreKind::SignedDistanceField,
+        OreKind::SdfVoxelization,
+        OreKind::LightClustering,
+        OreKind::OcclusionCulling,
+        OreKind::MaterialFlattening,
+        OreKind::AmbientOcclusion,
+        OreKind::VisibilityPass,
+        OreKind::Graphics(GraphicsOreKind::ForwardLit),
+        OreKind::Graphics(GraphicsOreKind::Ui),
+    ];
+
     pub const COUNT: usize = Self::ALL.len();
 
+    /// Stable dense index across all variants. Compute variants occupy
+    /// `0..COMPUTE_COUNT`; graphics sub-kinds extend the range past that.
     pub const fn index(self) -> usize {
-        self as usize
+        match self {
+            OreKind::RayTrace => 0,
+            OreKind::Denoise => 1,
+            OreKind::SignedDistanceField => 2,
+            OreKind::SdfVoxelization => 3,
+            OreKind::LightClustering => 4,
+            OreKind::OcclusionCulling => 5,
+            OreKind::MaterialFlattening => 6,
+            OreKind::AmbientOcclusion => 7,
+            OreKind::VisibilityPass => 8,
+            OreKind::Graphics(g) => Self::COMPUTE_COUNT + g.index(),
+        }
+    }
+
+    pub const fn is_graphics(self) -> bool {
+        matches!(self, OreKind::Graphics(_))
+    }
+
+    pub const fn as_graphics(self) -> Option<GraphicsOreKind> {
+        if let OreKind::Graphics(g) = self {
+            Some(g)
+        } else {
+            None
+        }
     }
 }
 
@@ -450,6 +530,122 @@ impl ForgeImage {
                 device.free_memory(self.memory, None);
                 self.memory = vk::DeviceMemory::null();
             }
+        }
+    }
+}
+
+// ── GpuMesh ────────────────────────────────────────────────────────────────
+//
+// A mesh uploaded to GPU-local memory as a vertex buffer + index buffer pair.
+// GPU resources require explicit destruction via `destroy(device)`.
+// Wrap in `Arc<GpuMesh>` when shared across draw calls; use `Arc::try_unwrap`
+// in the owning arena's cleanup path to reclaim the allocation.
+
+/// Column-major identity mat4 (64 bytes) for use as a push-constant default.
+pub const MAT4_IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+];
+
+#[derive(Debug)]
+pub struct GpuMesh {
+    pub vertex_buffer: ForgeBuffer,
+    pub index_buffer:  ForgeBuffer,
+    pub index_count:   u32,
+}
+
+impl GpuMesh {
+    /// Upload `ore` to GPU-local vertex and index buffers.
+    ///
+    /// Uses a one-shot command buffer on `command_pool`; blocks until the
+    /// transfer queue is idle. Both staging buffers are freed before returning.
+    pub fn upload(
+        device:            &ash::Device,
+        queue:             vk::Queue,
+        command_pool:      vk::CommandPool,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        ore:               &MeshOre,
+    ) -> ForgeResult<Self> {
+        let vb_bytes = vertices_as_bytes(&ore.vertices);
+        let ib_bytes = indices_as_bytes(&ore.indices);
+
+        let vb_size = non_zero_size(vb_bytes.len() as vk::DeviceSize);
+        let ib_size = non_zero_size(ib_bytes.len() as vk::DeviceSize);
+
+        // Staging buffers (host-visible).
+        let mut vb_stage = ForgeBuffer::create(
+            device, memory_properties, vb_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        vb_stage.write_bytes(device, vb_bytes)?;
+
+        let mut ib_stage = ForgeBuffer::create(
+            device, memory_properties, ib_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        ib_stage.write_bytes(device, ib_bytes)?;
+
+        // Device-local targets.
+        let vertex_buffer = ForgeBuffer::create(
+            device, memory_properties, vb_size,
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
+        let index_buffer = ForgeBuffer::create(
+            device, memory_properties, ib_size,
+            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
+
+        // One-shot copy command buffer.
+        unsafe {
+            let cb = {
+                let alloc = vk::CommandBufferAllocateInfo::default()
+                    .command_pool(command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1);
+                device.allocate_command_buffers(&alloc).map_err(ForgeError::Vk)?[0]
+            };
+
+            device.begin_command_buffer(
+                cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            ).map_err(ForgeError::Vk)?;
+
+            device.cmd_copy_buffer(
+                cb, vb_stage.handle, vertex_buffer.handle,
+                &[vk::BufferCopy::default().src_offset(0).dst_offset(0).size(vb_size)],
+            );
+            device.cmd_copy_buffer(
+                cb, ib_stage.handle, index_buffer.handle,
+                &[vk::BufferCopy::default().src_offset(0).dst_offset(0).size(ib_size)],
+            );
+
+            device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
+
+            let cbs = [cb];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            device.queue_submit(queue, &[submit], vk::Fence::null())
+                .map_err(ForgeError::Vk)?;
+            device.queue_wait_idle(queue).map_err(ForgeError::Vk)?;
+            device.free_command_buffers(command_pool, &cbs);
+
+            vb_stage.destroy(device);
+            ib_stage.destroy(device);
+        }
+
+        Ok(Self { vertex_buffer, index_buffer, index_count: ore.indices.len() as u32 })
+    }
+
+    pub unsafe fn destroy(&mut self, device: &ash::Device) {
+        unsafe {
+            self.vertex_buffer.destroy(device);
+            self.index_buffer.destroy(device);
         }
     }
 }

@@ -3,7 +3,7 @@ use thin_vec::ThinVec;
 use crate::forge_master::{ForgeMaster, ForgeResult};
 use crate::resource_manager::manager::Arena;
 
-use super::factory_master::{FactoryHandle, Proto};
+use super::factory_master::{ComputeTag, FactoryHandle, GraphicsTag, Proto};
 use super::window::{Window, WindowHandle, WindowId, WindowTag};
 
 // Stable WindowId → live WindowHandle. Mirrors ForgeMaster::cache for forges
@@ -79,18 +79,28 @@ impl Renderer {
         Some(window)
     }
 
-    // Refine `proto` against the shared ForgeMaster and install the resulting
-    // Factory on the given window. Returns the handle the window assigned.
-    pub fn build_factory(
+    pub fn build_compute_factory(
         &mut self,
         window_h: WindowHandle,
-        proto: Proto,
+        proto: Proto<ComputeTag>,
     ) -> ForgeResult<FactoryHandle> {
         let window = self
             .windows
             .get_mut(window_h)
             .expect("window handle is stale or was never valid");
-        window.build_factory(proto, &mut self.forge)
+        window.build_compute_factory(proto, &mut self.forge)
+    }
+
+    pub fn build_graphics_factory(
+        &mut self,
+        window_h: WindowHandle,
+        proto: Proto<GraphicsTag>,
+    ) -> FactoryHandle {
+        let window = self
+            .windows
+            .get_mut(window_h)
+            .expect("window handle is stale or was never valid");
+        window.build_graphics_factory(proto)
     }
 }
 

@@ -15,7 +15,7 @@ use dumpster_fire_engine::forge_master::{
     ForgeId, ForgeMaster, FrameId, FramePlan, IngotSpec, Ore, OreInput, OreKind,
 };
 use dumpster_fire_engine::render::{
-    Proto, ProtoId, Renderer, VulkanContext, Window, WindowId,
+    ComputeTag, Proto, ProtoId, Renderer, VulkanContext, Window, WindowId,
 };
 
 const DEMO_DOUBLER_SPV: &[u8] = include_bytes!(concat!(
@@ -101,15 +101,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         [1, 1, 1], // local_size_x=64 → 64 invocations cover the buffer
     ));
 
-    let mut proto = Proto::new(ProtoId::new(10), "demo.proto");
-    proto.push(plan);
+    let mut proto = Proto::<ComputeTag>::new(ProtoId::new(10), "demo.proto");
+    proto.push_plan(plan);
 
     // 6. Drive the proto through the renderer. This is the actual GPU
     //    dispatch: ForgeMaster::refine stages the input, dispatches the
     //    compute pipeline, copies the result to a host-visible buffer,
     //    and reads it back.
     println!("Refining proto -> factory (dispatching compute shader)...");
-    let factory_h = renderer.build_factory(main_h, proto)?;
+    let factory_h = renderer.build_compute_factory(main_h, proto)?;
     println!("  factory handle: {:?}", factory_h);
 
     // 7. Walk the hierarchy to fetch the readback.

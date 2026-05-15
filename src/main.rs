@@ -197,10 +197,6 @@ fn main() {
     // ── Act1: Atomic with a 2-leaf BT Sequence ────────────────────────────
 
     let act1_bt = BtNode::Sequence(thin_vec![
-<<<<<<< HEAD
-
-=======
->>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
         BtNode::leaf(
             Condition::OnTick(0),
             Effect::SetActorLocal {

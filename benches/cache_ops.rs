@@ -8,6 +8,7 @@
 
 use divan::{black_box, Bencher};
 use glam::Affine3A;
+use thin_vec::ThinVec;
 use dumpster_fire_engine::resource_manager::*;
 use std::sync::Arc;
 

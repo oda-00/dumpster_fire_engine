@@ -1,10 +1,12 @@
 pub mod asset;
+pub mod gltf_loader;
 pub mod send;
 pub mod fetch;
 pub mod pipe;
 pub mod pipeline;
 
 pub use asset::*;
+pub use gltf_loader::*;
 pub use send::*;
 pub use fetch::*;
 pub use pipe::*;

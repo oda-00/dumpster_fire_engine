@@ -6,7 +6,7 @@ use crate::resource_manager::manager::{Handle, Id};
 
 use super::ingot::Ingot;
 use super::master::{ForgeMaster, ForgeResult};
-use super::ore::{IngotSpec, Ore, OreKind};
+use super::ore::{GpuMesh, GraphicsOreKind, IngotSpec, MAT4_IDENTITY, Ore, OreKind};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct FrameTag;
@@ -115,4 +115,129 @@ pub fn ore_for_buffer(
         },
         workgroups,
     )
+}
+
+// ── Graphics frames ────────────────────────────────────────────────────────
+//
+// The rasterization analog of FramePlan/Frame. A `GraphicsFramePlan` is just
+// a draw-call description (vertex/instance counts, plus the graphics kind
+// that picks which GraphicsForge/pipeline to bind). It carries no GPU
+// resources, so "refining" it is a trivial conversion to a `GraphicsFrame`
+// — the same shape, but stored on the Factory as the live draw list the
+// window iterates each redraw.
+//
+// FrameId is shared with compute frames so factories can index by id across
+// both kinds; the queue type on the parent Proto disambiguates.
+
+#[derive(Debug, Clone)]
+pub struct GraphicsFramePlan {
+    pub id:             FrameId,
+    pub name:           Arc<str>,
+    pub kind:           GraphicsOreKind,
+    /// Procedural vertex count (used when `mesh` is `None`).
+    pub vertex_count:   u32,
+    pub instance_count: u32,
+    pub first_vertex:   u32,
+    pub first_instance: u32,
+    /// Uploaded mesh (ForwardLit draws). `None` = procedural / shader-generated.
+    pub mesh: Option<Arc<GpuMesh>>,
+    /// Column-major model-view-projection matrix sent as a push constant.
+    /// Defaults to identity; only consumed by the ForwardLit pipeline.
+    pub mvp: [f32; 16],
+}
+
+impl GraphicsFramePlan {
+    /// Procedural draw (no vertex buffer — shader generates verts).
+    pub fn new(
+        id:           FrameId,
+        name:         impl Into<Arc<str>>,
+        kind:         GraphicsOreKind,
+        vertex_count: u32,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            kind,
+            vertex_count,
+            instance_count: 1,
+            first_vertex:   0,
+            first_instance: 0,
+            mesh: None,
+            mvp:  MAT4_IDENTITY,
+        }
+    }
+
+    /// Indexed mesh draw (ForwardLit).
+    pub fn new_mesh(
+        id:   FrameId,
+        name: impl Into<Arc<str>>,
+        mesh: Arc<GpuMesh>,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            kind:           GraphicsOreKind::ForwardLit,
+            vertex_count:   0, // unused; index count comes from GpuMesh
+            instance_count: 1,
+            first_vertex:   0,
+            first_instance: 0,
+            mesh: Some(mesh),
+            mvp:  MAT4_IDENTITY,
+        }
+    }
+
+    pub fn with_instances(mut self, instance_count: u32) -> Self {
+        self.instance_count = instance_count;
+        self
+    }
+
+    pub fn with_offsets(mut self, first_vertex: u32, first_instance: u32) -> Self {
+        self.first_vertex   = first_vertex;
+        self.first_instance = first_instance;
+        self
+    }
+
+    /// Override the MVP push constant (column-major mat4).
+    pub fn with_mvp(mut self, mvp: [f32; 16]) -> Self {
+        self.mvp = mvp;
+        self
+    }
+
+    /// "Refining" a graphics plan is a no-op other than the type flip — no
+    /// compute dispatch, no GPU buffers — so this is infallible and doesn't
+    /// touch the ForgeMaster.
+    pub fn refine(self) -> GraphicsFrame {
+        GraphicsFrame {
+            id:             self.id,
+            name:           self.name,
+            kind:           self.kind,
+            vertex_count:   self.vertex_count,
+            instance_count: self.instance_count,
+            first_vertex:   self.first_vertex,
+            first_instance: self.first_instance,
+            mesh:           self.mesh,
+            mvp:            self.mvp,
+        }
+    }
+}
+
+/// A live draw call stored on a [`Factory`].
+///
+/// `mesh = None`  → procedural (`cmd_draw`, vertex shader generates geometry).
+/// `mesh = Some`  → indexed mesh (`cmd_bind_vertex_buffers` + `cmd_draw_indexed`).
+///
+/// The `Arc<GpuMesh>` keeps the GPU buffers alive for as long as the factory
+/// lives. `Factory::destroy(device)` calls `Arc::try_unwrap` and then
+/// `GpuMesh::destroy(device)` to properly free the Vulkan allocations.
+#[derive(Debug, Clone)]
+pub struct GraphicsFrame {
+    pub id:             FrameId,
+    pub name:           Arc<str>,
+    pub kind:           GraphicsOreKind,
+    pub vertex_count:   u32,
+    pub instance_count: u32,
+    pub first_vertex:   u32,
+    pub first_instance: u32,
+    pub mesh: Option<Arc<GpuMesh>>,
+    pub mvp:  [f32; 16],
 }

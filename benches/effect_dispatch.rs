@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use glam::{Affine3A, Vec3};
-use thin_vec::thin_vec;
+use thin_vec::{ThinVec, thin_vec};
 use dumpster_fire_engine::resource_manager::*;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -217,7 +217,7 @@ fn bench_apply_effect(c: &mut Criterion) {
 
     g.bench_function("schedule_transition", |b| {
         let (mut w, lh, sh, _, _) = build_world_with_play();
-        let mealy: Arc<[Effect]> = Arc::from(ThinVec::<Effect>::new());
+        let mealy: Arc<[Effect]> = Arc::from(Vec::<Effect>::new());
         b.iter(|| {
             w.apply_effect(Effect::ScheduleTransition {
                 level_h: lh, stage_h: sh,
@@ -255,7 +255,7 @@ fn bench_effect_clone(c: &mut Criterion) {
     });
 
     g.bench_function("schedule_transition_arc_slice_bump", |b| {
-        let mealy: Arc<[Effect]> = Arc::from(ThinVec::<Effect>::new());
+        let mealy: Arc<[Effect]> = Arc::from(Vec::<Effect>::new());
         let e = Effect::ScheduleTransition {
             level_h: lh, stage_h: sh,
             source: SceneId::new(1), target: SceneId::new(2),

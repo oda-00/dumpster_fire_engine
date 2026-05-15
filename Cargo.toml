@@ -7,13 +7,10 @@ edition = "2024"
 thin-vec = "0.2"
 glam     = "0.29"
 rayon    = "1"
-ash = { version = "0.38", features = ["loaded"] }
-sdl2 = "0.38"
-bytemuck = "1.25.0"
-=======
 ash = "0.38.0"
+ash-window = "0.13"
 winit = "0.30.13"
->>>>>>> 76b59223ea8f67890b57fab9a68963c98741f1ec
+gltf = "1"
 
 [dev-dependencies]
 slotmap = "1"
@@ -69,6 +66,14 @@ harness = false
 [[bench]]
 name = "iai_critical"
 harness = false
+
+[[bin]]
+name = "hello_triangle"
+path = "src/bin/hello_triangle.rs"
+
+[[bin]]
+name = "hello_gltf"
+path = "src/bin/hello_gltf.rs"
 
 [profile.release]
 lto           = "fat"

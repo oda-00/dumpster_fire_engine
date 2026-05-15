@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use divan::{black_box, Bencher};
 use glam::{Affine3A, Vec3};
+use thin_vec::{ThinVec, thin_vec};
 use dumpster_fire_engine::resource_manager::*;
 
 fn main() { divan::main(); }
@@ -96,8 +97,8 @@ fn handler_dispatch(b: Bencher, args: (usize, usize)) {
     let _ = ah;
     world.propagate_transforms();
 
-    let troupe_ids: ThinVec<TroupeId> = ThinVec![];
-    let actors = Troupe(thin_ThinVec::ThinVec::new());
+    let troupe_ids: ThinVec<TroupeId> = thin_vec![];
+    let actors = Troupe(thin_vec![]);
     let ctx = EvalCtx {
         world: &world, level_h: lh, stage_h: sh,
         scene_id: SceneId::new(1),

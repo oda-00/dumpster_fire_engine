@@ -4,7 +4,7 @@ use crate::forge_master::{ForgeMaster, ForgeResult};
 use crate::resource_manager::manager::Arena;
 
 use super::factory::{Factory, FactoryHandle, FactoryId, FactoryTag};
-use super::proto::Proto;
+use super::proto::{ComputeTag, GraphicsTag, Proto};
 
 // Stable Id → live Handle. Kept as a small ThinVec because factory counts
 // stay in the dozens per window; linear scan beats a HashMap for those sizes.
@@ -40,16 +40,23 @@ impl FactoryMaster {
         }
     }
 
-    // Refine `proto` through `forge` and insert the result. Returns the
-    // generational handle for downstream lookup.
-    pub fn build_from_proto(
+    pub fn build_compute_proto(
         &mut self,
-        proto: Proto,
+        proto: Proto<ComputeTag>,
         forge: &mut ForgeMaster,
     ) -> ForgeResult<FactoryHandle> {
         let id = FactoryId::new(proto.id.raw());
-        let factory = Factory::from_proto(id, proto, forge)?;
+        let factory = Factory::from_compute_proto(id, proto, forge)?;
         Ok(self.insert(factory))
+    }
+
+    pub fn build_graphics_proto(
+        &mut self,
+        proto: Proto<GraphicsTag>,
+    ) -> FactoryHandle {
+        let id = FactoryId::new(proto.id.raw());
+        let factory = Factory::from_graphics_proto(id, proto);
+        self.insert(factory)
     }
 
     pub fn insert(&mut self, factory: Factory) -> FactoryHandle {

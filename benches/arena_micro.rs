@@ -4,19 +4,20 @@
 //   cargo bench --bench arena_micro
 
 use divan::{black_box, Bencher};
+use thin_vec::ThinVec;
 use dumpster_fire_engine::resource_manager::*;
 
 fn main() { divan::main(); }
 
 const N: usize = 10_000;
 
-fn build_full() -> (Arena<ActorTag, u64>, Vec<Handle<ActorTag>>) {
+fn build_full() -> (Arena<ActorTag, u64>, ThinVec<Handle<ActorTag>>) {
     let mut a: Arena<ActorTag, u64> = Arena::with_capacity(N);
     let h: ThinVec<_> = (0..N).map(|i| a.insert(i as u64)).collect();
     (a, h)
 }
 
-fn build_with_freelist() -> (Arena<ActorTag, u64>, Vec<Handle<ActorTag>>) {
+fn build_with_freelist() -> (Arena<ActorTag, u64>, ThinVec<Handle<ActorTag>>) {
     let (mut a, handles) = build_full();
     for (i, h) in handles.iter().enumerate() {
         if i % 2 == 0 { a.remove(*h); }

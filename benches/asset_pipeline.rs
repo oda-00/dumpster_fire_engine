@@ -4,6 +4,7 @@
 //   cargo bench --bench asset_pipeline
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use thin_vec::ThinVec;
 use dumpster_fire_engine::resource_manager::asset_manager::{
     AssetArena, AssetHandle, AssetId, AssetKind, AssetSource, AssetType, Audio, Fetcher, Mesh, Pipeline,
     QueueEntry, Texture, TitleText, Visual,
@@ -196,9 +197,9 @@ fn bench_baseline_sorted_vec(c: &mut Criterion) {
         });
 
         // Sorted-ThinVec — push then sort, drain in order.
-        g.bench_with_input(BenchmarkId::new("sorted_ThinVec_drain", n), &n, |b, &n| {
+        g.bench_with_input(BenchmarkId::new("sorted_thin_vec_drain", n), &n, |b, &n| {
             b.iter(|| {
-                let mut v: ThinThinVec<u32> = Vec::with_capacity(n);
+                let mut v: ThinVec<u32> = ThinVec::with_capacity(n);
                 for i in 0..n {
                     v.push(((i * 2654435761usize) & 0xFFFF_FFFF) as u32);
                 }
