@@ -1,0 +1,11 @@
+[package]
+name    = "langcd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lang_frontend = { path = "../../crates/lang_frontend" }
+thin-vec      = "0.2"
+inkwell       = { version = "0.5", features = ["llvm18-0"] }
+libloading    = "0.8"
+rustix        = { version = "0.38", features = ["fs", "net", "process"] }

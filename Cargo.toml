@@ -1,21 +1,38 @@
+[workspace]
+members = [
+    ".",
+    "crates/lang_frontend",
+    "tools/langc",
+    "tools/langcd",
+]
+resolver = "2"
+
 [package]
 name = "dumpster_fire_engine"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-thin-vec = "0.2"
-glam     = "0.29"
-rayon    = "1"
-ash = "0.38.0"
+thin-vec   = "0.2"
+glam       = "0.29"
+rayon      = "1"
+ash        = "0.38.0"
 ash-window = "0.13"
-winit = "0.30.13"
-gltf = "1"
+winit      = "0.30.13"
+gltf       = "1"
+libloading = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+# Used for UnixStream ancillary-fd transport (SCM_RIGHTS) when the engine
+# connects to langcd.  Std's UnixStream alone cannot pass fds; rustix is the
+# minimum-viable path that doesn't require reimplementing sendmsg/recvmsg
+# ancillary data parsing by hand.
+rustix = { version = "0.38", features = ["net", "fs"] }
 
 [dev-dependencies]
-slotmap = "1"
-criterion = "0.5"
-divan = "0.1"
+slotmap       = "1"
+criterion     = "0.5"
+divan         = "0.1"
 iai-callgrind = "0.16.1"
 
 [[bench]]
@@ -78,6 +95,14 @@ path = "src/bin/hello_triangle.rs"
 [[bin]]
 name = "hello_gltf"
 path = "src/bin/hello_gltf.rs"
+
+[[bin]]
+name = "game"
+path = "src/bin/game.rs"
+
+[[bin]]
+name = "render_demo"
+path = "src/bin/render_demo.rs"
 
 [profile.release]
 lto           = "fat"

@@ -1,5 +1,8 @@
 pub mod scene;
 pub mod script;
+pub mod script_abi;
+pub mod script_ipc;
+pub mod script_client;
 pub mod play;
 
 pub use scene::*;

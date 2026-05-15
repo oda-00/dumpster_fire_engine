@@ -25,6 +25,9 @@ pub struct World {
     pub id:     WorldId,
     pub levels: Arena<LevelTag, Level>,
     pub roots:  ThinVec<LevelHandle>,
+    /// Compiled-script registry. Owned here so a `.so` outlives every callable
+    /// pointer the engine has cached in `Play::active_scripts` (plan §6.3).
+    pub scripts: crate::resource_manager::event_manager::script::ScriptManager,
     /// Reusable per-tick effect buffer — capacity is preserved across ticks via
     /// `mem::take` + `clear` so steady-state operation is allocation-free.
     tick_effects: crate::resource_manager::event_manager::EffectArena,
@@ -41,6 +44,7 @@ impl World {
             id,
             levels: Arena::new(),
             roots: ThinVec::new(),
+            scripts: crate::resource_manager::event_manager::script::ScriptManager::new(),
             tick_effects: crate::resource_manager::event_manager::EffectArena::with_capacity(4096),
             tick_chain:   ThinVec::with_capacity(16),
         }
