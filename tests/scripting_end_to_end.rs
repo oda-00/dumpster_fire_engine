@@ -118,7 +118,8 @@ fn compile_load_and_tick_guard_script() {
     assert_ne!(v, 0, "state_version is hashed, non-zero for non-empty layout");
 
     // df_init_state should zero+default-init.  Patrol_index = 0, alert_time = 0.0.
-    let mut state = vec![0xAAu8; 16];
+    let mut state: thin_vec::ThinVec<u8> = thin_vec::ThinVec::with_capacity(16);
+    state.resize(16, 0xAAu8);
     unsafe { (entry.init_state)(state.as_mut_ptr()); }
     // patrol_index at offset 0 → i32 zero
     assert_eq!(i32::from_ne_bytes(state[0..4].try_into().unwrap()), 0);

@@ -80,7 +80,9 @@ fn daemon_hot_reload_round_trip() {
         let mut mgr = ScriptManager::new();
         let id = mgr.load_from_file(so1.clone()).expect("load v1");
         let entry = mgr.get_entry_points(id).unwrap();
-        let mut state = vec![0u8; entry.state_size() as usize];
+        let n = entry.state_size() as usize;
+        let mut state: thin_vec::ThinVec<u8> = thin_vec::ThinVec::with_capacity(n);
+        state.resize(n, 0);
         unsafe { (entry.init_state)(state.as_mut_ptr()); }
         let mut sink = EffectSink::new();
         let api = engine_api_for_sink(&mut sink);
@@ -107,7 +109,9 @@ fn daemon_hot_reload_round_trip() {
     let mut mgr = ScriptManager::new();
     let id = mgr.load_from_file(so2).expect("load v2");
     let entry = mgr.get_entry_points(id).unwrap();
-    let mut state = vec![0u8; entry.state_size() as usize];
+    let n2 = entry.state_size() as usize;
+    let mut state: thin_vec::ThinVec<u8> = thin_vec::ThinVec::with_capacity(n2);
+    state.resize(n2, 0);
     unsafe { (entry.init_state)(state.as_mut_ptr()); }
     // Default for `new_field` is 3.14 — verify it landed.
     let f = f64::from_ne_bytes(state[8..16].try_into().unwrap());
@@ -134,8 +138,9 @@ fn wait_compile_ok(client: &mut ScriptClient, expected_id: i64) -> Arc<str> {
                 return so_path;
             }
             Some(DaemonMsg::CompileErr { diagnostics, .. }) => {
-                panic!("CompileErr from langcd: {:?}",
-                       diagnostics.iter().map(|s| s.as_ref()).collect::<Vec<_>>());
+                let joined: thin_vec::ThinVec<&str> =
+                    diagnostics.iter().map(|s| s.as_ref()).collect();
+                panic!("CompileErr from langcd: {:?}", joined);
             }
             _ => continue,
         }

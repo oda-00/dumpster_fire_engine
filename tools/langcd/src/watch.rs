@@ -8,11 +8,14 @@
 //! alongside the inotify FD).  This eliminates the Mutex<Watcher> deadlock
 //! we'd otherwise hit when the worker is parked in `read_events` and the
 //! main thread tries to `watch()` a new path.
+//!
+//! Path bookkeeping uses sorted `ThinVec<(Arc<str>, _)>` with binary-search
+//! lookup — no `BTreeMap`, no `HashMap`, matching the engine-wide invariant.
 
-use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver, channel};
 
 use rustix::event::{eventfd, EventfdFlags, PollFd, PollFlags};
@@ -23,12 +26,12 @@ use thin_vec::ThinVec;
 // ── Public types ──────────────────────────────────────────────────────────────
 
 pub enum WatchEvent {
-    Modified(PathBuf),
+    Modified(Arc<str>),
 }
 
 pub enum WatchCmd {
-    Watch(PathBuf),
-    Unwatch(PathBuf),
+    Watch(Arc<str>),
+    Unwatch(Arc<str>),
     Shutdown,
 }
 
@@ -39,10 +42,10 @@ pub struct WatchHandle {
 }
 
 impl WatchHandle {
-    pub fn watch(&self, p: PathBuf)   -> Result<(), std::io::Error> {
+    pub fn watch(&self, p: Arc<str>)   -> Result<(), std::io::Error> {
         self.send(WatchCmd::Watch(p))
     }
-    pub fn unwatch(&self, p: PathBuf) -> Result<(), std::io::Error> {
+    pub fn unwatch(&self, p: Arc<str>) -> Result<(), std::io::Error> {
         self.send(WatchCmd::Unwatch(p))
     }
 
@@ -95,8 +98,8 @@ fn worker(
         let mut shutdown = false;
         loop {
             match cmd_rx.try_recv() {
-                Ok(WatchCmd::Watch(p))   => { let _ = watcher.watch(&p); }
-                Ok(WatchCmd::Unwatch(p)) => { watcher.unwatch(&p); }
+                Ok(WatchCmd::Watch(p))   => { let _ = watcher.watch(p); }
+                Ok(WatchCmd::Unwatch(p)) => { watcher.unwatch(p.as_ref()); }
                 Ok(WatchCmd::Shutdown)   => { shutdown = true; break; }
                 Err(_) => break,
             }
@@ -150,8 +153,10 @@ fn dup_fd(fd: BorrowedFd<'_>) -> std::io::Result<OwnedFd> {
 
 struct Watcher {
     fd:      OwnedFd,
-    wds:     BTreeMap<i32, PathBuf>,
-    by_path: BTreeMap<PathBuf, i32>,
+    /// Sorted ascending by `wd`; binary-search lookup on inotify-event decode.
+    wds:     ThinVec<(i32, Arc<str>)>,
+    /// Sorted ascending by path; binary-search lookup on watch / unwatch.
+    by_path: ThinVec<(Arc<str>, i32)>,
     buf:     Box<[MaybeUninit<u8>; 8192]>,
 }
 
@@ -160,47 +165,77 @@ impl Watcher {
         let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)?;
         Ok(Watcher {
             fd,
-            wds:     BTreeMap::new(),
-            by_path: BTreeMap::new(),
+            wds:     ThinVec::new(),
+            by_path: ThinVec::new(),
             buf:     Box::new([MaybeUninit::uninit(); 8192]),
         })
     }
 
-    fn watch(&mut self, path: &Path) -> std::io::Result<()> {
-        if self.by_path.contains_key(path) { return Ok(()); }
+    fn lookup_by_path(&self, p: &str) -> Option<i32> {
+        let i = self.by_path.partition_point(|(k, _)| k.as_ref() < p);
+        self.by_path.get(i)
+            .filter(|(k, _)| k.as_ref() == p)
+            .map(|(_, wd)| *wd)
+    }
+
+    fn lookup_by_wd(&self, wd: i32) -> Option<&Arc<str>> {
+        let i = self.wds.partition_point(|(k, _)| *k < wd);
+        self.wds.get(i)
+            .filter(|(k, _)| *k == wd)
+            .map(|(_, p)| p)
+    }
+
+    fn watch(&mut self, path: Arc<str>) -> std::io::Result<()> {
+        if self.lookup_by_path(path.as_ref()).is_some() { return Ok(()); }
         let flags = inotify::WatchFlags::CLOSE_WRITE
                   | inotify::WatchFlags::MOVED_TO
                   | inotify::WatchFlags::MODIFY;
-        let wd = inotify::add_watch(self.fd.as_fd(), path, flags)? as i32;
-        self.wds.insert(wd, path.to_path_buf());
-        self.by_path.insert(path.to_path_buf(), wd);
+        let wd = inotify::add_watch(self.fd.as_fd(), Path::new(path.as_ref()), flags)? as i32;
+
+        let pp = self.wds.partition_point(|(k, _)| *k < wd);
+        self.wds.insert(pp, (wd, path.clone()));
+        let qp = self.by_path.partition_point(|(k, _)| k.as_ref() < path.as_ref());
+        self.by_path.insert(qp, (path, wd));
         Ok(())
     }
 
-    fn unwatch(&mut self, path: &Path) {
-        if let Some(wd) = self.by_path.remove(path) {
-            let _ = inotify::remove_watch(self.fd.as_fd(), wd);
-            self.wds.remove(&wd);
+    fn unwatch(&mut self, path: &str) {
+        let qp = self.by_path.partition_point(|(k, _)| k.as_ref() < path);
+        let Some(entry) = self.by_path.get(qp) else { return };
+        if entry.0.as_ref() != path { return; }
+        let wd = entry.1;
+        self.by_path.remove(qp);
+        let _ = inotify::remove_watch(self.fd.as_fd(), wd);
+        let pp = self.wds.partition_point(|(k, _)| *k < wd);
+        if self.wds.get(pp).is_some_and(|(k, _)| *k == wd) {
+            self.wds.remove(pp);
         }
     }
 
     fn read_events(&mut self, out: &mut ThinVec<WatchEvent>) -> std::io::Result<usize> {
-        let mut decoded = 0;
-        let mut reader = inotify::Reader::new(self.fd.as_fd(), &mut self.buf[..]);
-        loop {
-            match reader.next() {
-                Ok(ev) => {
-                    if let Some(path) = self.wds.get(&ev.wd()) {
-                        out.push(WatchEvent::Modified(path.clone()));
-                        decoded += 1;
+        // Two passes: pass 1 collects wds (Reader holds &mut self.buf, so we
+        // can't touch the watcher's tables during it).  Pass 2 resolves wds
+        // to paths via binary search once the Reader is dropped.
+        let mut wd_buf: ThinVec<i32> = ThinVec::new();
+        {
+            let mut reader = inotify::Reader::new(self.fd.as_fd(), &mut self.buf[..]);
+            loop {
+                match reader.next() {
+                    Ok(ev) => wd_buf.push(ev.wd()),
+                    Err(io::Errno::AGAIN) => break,
+                    Err(io::Errno::INTR)  => continue,
+                    Err(_) => {
+                        if !wd_buf.is_empty() { break; }
+                        return Ok(0);
                     }
                 }
-                Err(io::Errno::AGAIN) => break,
-                Err(io::Errno::INTR)  => continue,
-                Err(_) => {
-                    if decoded > 0 { return Ok(decoded); }
-                    return Ok(0);
-                }
+            }
+        }
+        let mut decoded = 0;
+        for wd in wd_buf.iter() {
+            if let Some(path) = self.lookup_by_wd(*wd) {
+                out.push(WatchEvent::Modified(Arc::clone(path)));
+                decoded += 1;
             }
         }
         Ok(decoded)

@@ -90,7 +90,7 @@ pub struct LoadedScript {
 
 #[derive(Debug)]
 pub enum ScriptLoadError {
-    Io(String),
+    Io(Arc<str>),
     MissingSymbol(&'static str),
 }
 
@@ -128,7 +128,7 @@ impl ScriptManager {
         // SAFETY: opening a shared library is fundamentally unsafe; we trust
         // the caller that `path` references a `.so` produced by `langc`.
         let lib = unsafe { libloading::Library::new(path.as_ref()) }
-            .map_err(|e| ScriptLoadError::Io(e.to_string()))?;
+            .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(e.to_string().as_str())))?;
 
         let entry = unsafe { read_entry_points(&lib) }?;
 
@@ -150,10 +150,10 @@ impl ScriptManager {
         new_path: Arc<str>,
     ) -> Result<(), ScriptLoadError> {
         let h = self.handle_for(id).ok_or_else(|| ScriptLoadError::Io(
-            format!("no script with id {}", id.raw())
+            Arc::<str>::from(format!("no script with id {}", id.raw()).as_str())
         ))?;
         let lib = unsafe { libloading::Library::new(new_path.as_ref()) }
-            .map_err(|e| ScriptLoadError::Io(e.to_string()))?;
+            .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(e.to_string().as_str())))?;
         let entry = unsafe { read_entry_points(&lib) }?;
         if let Some(loaded) = self.arena.get_mut(h) {
             // Drop the old library AFTER replacing the pointers, so no live
