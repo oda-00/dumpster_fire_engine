@@ -56,6 +56,12 @@ pub enum OreKind {
     AmbientOcclusion,
     VisibilityPass,
 
+    // Skinning / morph-blend (compute; run before graphics draws each frame).
+    /// Builds a per-joint `[world × IBM]` palette from per-frame world matrices.
+    SkinPalette,
+    /// Applies weighted morph-target deltas to a rest-pose vertex buffer.
+    MorphBlend,
+
     // Rasterization — sub-kind selects the draw pipeline.
     Graphics(GraphicsOreKind),
 }
@@ -63,7 +69,7 @@ pub enum OreKind {
 impl OreKind {
     /// Compute-only kinds, in `index()` order. Use this to size the compute
     /// forge cache — graphics variants live in their own arena.
-    pub const COMPUTE_ALL: [OreKind; 9] = [
+    pub const COMPUTE_ALL: [OreKind; 11] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -73,12 +79,14 @@ impl OreKind {
         OreKind::MaterialFlattening,
         OreKind::AmbientOcclusion,
         OreKind::VisibilityPass,
+        OreKind::SkinPalette,
+        OreKind::MorphBlend,
     ];
 
     pub const COMPUTE_COUNT: usize = Self::COMPUTE_ALL.len();
 
     /// Every kind, compute + every graphics sub-kind, in `index()` order.
-    pub const ALL: [OreKind; 11] = [
+    pub const ALL: [OreKind; 13] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -88,6 +96,8 @@ impl OreKind {
         OreKind::MaterialFlattening,
         OreKind::AmbientOcclusion,
         OreKind::VisibilityPass,
+        OreKind::SkinPalette,
+        OreKind::MorphBlend,
         OreKind::Graphics(GraphicsOreKind::ForwardLit),
         OreKind::Graphics(GraphicsOreKind::Ui),
     ];
@@ -98,16 +108,18 @@ impl OreKind {
     /// `0..COMPUTE_COUNT`; graphics sub-kinds extend the range past that.
     pub const fn index(self) -> usize {
         match self {
-            OreKind::RayTrace => 0,
-            OreKind::Denoise => 1,
+            OreKind::RayTrace            => 0,
+            OreKind::Denoise             => 1,
             OreKind::SignedDistanceField => 2,
-            OreKind::SdfVoxelization => 3,
-            OreKind::LightClustering => 4,
-            OreKind::OcclusionCulling => 5,
-            OreKind::MaterialFlattening => 6,
-            OreKind::AmbientOcclusion => 7,
-            OreKind::VisibilityPass => 8,
-            OreKind::Graphics(g) => Self::COMPUTE_COUNT + g.index(),
+            OreKind::SdfVoxelization     => 3,
+            OreKind::LightClustering     => 4,
+            OreKind::OcclusionCulling    => 5,
+            OreKind::MaterialFlattening  => 6,
+            OreKind::AmbientOcclusion    => 7,
+            OreKind::VisibilityPass      => 8,
+            OreKind::SkinPalette         => 9,
+            OreKind::MorphBlend          => 10,
+            OreKind::Graphics(g)         => Self::COMPUTE_COUNT + g.index(),
         }
     }
 

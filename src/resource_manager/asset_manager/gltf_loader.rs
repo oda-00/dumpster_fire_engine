@@ -19,6 +19,7 @@ use forge_gltf::{
     build_ui_draws,
 };
 
+use crate::forge_master::forge::ForgeId;
 use crate::forge_master::frame::GraphicsFramePlan;
 use crate::forge_master::ingot::Ingot;
 use crate::forge_master::master::{ForgeMaster, ForgeResult};
@@ -26,6 +27,16 @@ use crate::forge_master::ore::{
     ForgeVertex, GpuMesh, GraphicsOreKind, IngotSpec, MeshOre, MeshUploadCtx, Ore, OreInput,
     OreKind, TextureOre,
 };
+
+// Pre-compiled SPIR-V for the two skinning/morph compute shaders.
+const SKIN_PALETTE_SPV: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/shaders/skin_palette.comp.glsl.spv"
+));
+const MORPH_BLEND_SPV: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/shaders/morph_blend.comp.glsl.spv"
+));
 
 // Re-export the test helper for benches that already pull it from here.
 pub use forge_gltf::build_test_glb;
@@ -67,11 +78,15 @@ impl From<gltf::Error> for GltfError {
 impl From<forge_gltf::GltfError> for GltfError {
     fn from(e: forge_gltf::GltfError) -> Self {
         match e {
-            forge_gltf::GltfError::Io(inner)         => GltfError::Io(inner),
-            forge_gltf::GltfError::NoPrimitives      => GltfError::NoPrimitives,
-            forge_gltf::GltfError::NoPositions       => GltfError::NoPositions,
-            forge_gltf::GltfError::InvalidAccessor(s) => GltfError::Other(format!("invalid accessor: {s}")),
+            forge_gltf::GltfError::Io(inner)              => GltfError::Io(inner),
+            forge_gltf::GltfError::NoPrimitives           => GltfError::NoPrimitives,
+            forge_gltf::GltfError::NoPositions            => GltfError::NoPositions,
+            forge_gltf::GltfError::InvalidAccessor(s)     => GltfError::Other(format!("invalid accessor: {s}")),
             forge_gltf::GltfError::UnsupportedComponent(s) => GltfError::Other(format!("unsupported component: {s}")),
+            forge_gltf::GltfError::UnsupportedVersion(s)  => GltfError::Other(format!("unsupported version: {s}")),
+            forge_gltf::GltfError::UnsupportedExtension(s) => GltfError::Other(format!("unsupported extension: {s}")),
+            forge_gltf::GltfError::SpecViolation(s)       => GltfError::Other(format!("spec violation: {s}")),
+            forge_gltf::GltfError::UnsupportedFeature(s)  => GltfError::Other(format!("unsupported feature: {s}")),
         }
     }
 }
@@ -264,6 +279,8 @@ fn pipeline_kind_to_ore(kind: forge_gltf::GltfPipelineKind) -> OreKind {
         K::MaterialFlattening  => OreKind::MaterialFlattening,
         K::AmbientOcclusion    => OreKind::AmbientOcclusion,
         K::VisibilityPass      => OreKind::VisibilityPass,
+        K::SkinPalette         => OreKind::SkinPalette,
+        K::MorphBlend          => OreKind::MorphBlend,
         K::Graphics(G::ForwardLit) => OreKind::Graphics(GraphicsOreKind::ForwardLit),
         K::Graphics(G::Ui)         => OreKind::Graphics(GraphicsOreKind::Ui),
     }
@@ -305,6 +322,22 @@ pub fn refine_all_compute(
     let mut out = ThinVec::with_capacity(ores.len());
     for ore in ores { out.push(master.refine(ore)?); }
     Ok(out)
+}
+
+/// Register the SkinPalette and MorphBlend compute forges with a live
+/// `ForgeMaster`. Call once at startup before the first per-frame dispatch.
+pub fn register_skin_morph_forges(master: &mut ForgeMaster) -> ForgeResult<()> {
+    master.add_forge_from_spirv_bytes(
+        ForgeId::new(OreKind::SkinPalette.index() as i64),
+        OreKind::SkinPalette,
+        SKIN_PALETTE_SPV,
+    )?;
+    master.add_forge_from_spirv_bytes(
+        ForgeId::new(OreKind::MorphBlend.index() as i64),
+        OreKind::MorphBlend,
+        MORPH_BLEND_SPV,
+    )?;
+    Ok(())
 }
 
 /// Upload every glTF primitive as a `GpuMesh` and emit one

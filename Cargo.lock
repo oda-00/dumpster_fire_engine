@@ -684,6 +684,9 @@ name = "forge_gltf"
 version = "0.1.0"
 dependencies = [
  "gltf",
+ "image",
+ "mikktspace",
+ "rayon",
  "serde_json",
  "thin-vec",
 ]

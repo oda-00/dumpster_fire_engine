@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use thin_vec::ThinVec;
 
+use ash::vk;
 use crate::resource_manager::manager::{Handle, Id};
 
 use super::ingot::Ingot;
@@ -144,6 +145,9 @@ pub struct GraphicsFramePlan {
     /// Column-major model-view-projection matrix sent as a push constant.
     /// Defaults to identity; only consumed by the ForwardLit pipeline.
     pub mvp: [f32; 16],
+    /// Optional pre-resolved material descriptor set (set 1). `None` uses
+    /// whatever was last bound (typically the dummy white material).
+    pub material_set: Option<vk::DescriptorSet>,
 }
 
 impl GraphicsFramePlan {
@@ -164,6 +168,7 @@ impl GraphicsFramePlan {
             first_instance: 0,
             mesh: None,
             mvp:  MAT4_IDENTITY,
+            material_set: None,
         }
     }
 
@@ -183,7 +188,14 @@ impl GraphicsFramePlan {
             first_instance: 0,
             mesh: Some(mesh),
             mvp:  MAT4_IDENTITY,
+            material_set: None,
         }
+    }
+
+    /// Set the pre-resolved Vulkan descriptor set for the material (set 1).
+    pub fn with_material_set(mut self, set: vk::DescriptorSet) -> Self {
+        self.material_set = Some(set);
+        self
     }
 
     pub fn with_instances(mut self, instance_count: u32) -> Self {
@@ -217,6 +229,7 @@ impl GraphicsFramePlan {
             first_instance: self.first_instance,
             mesh:           self.mesh,
             mvp:            self.mvp,
+            material_set:   self.material_set,
         }
     }
 }
@@ -240,4 +253,5 @@ pub struct GraphicsFrame {
     pub first_instance: u32,
     pub mesh: Option<Arc<GpuMesh>>,
     pub mvp:  [f32; 16],
+    pub material_set: Option<vk::DescriptorSet>,
 }

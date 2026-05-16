@@ -528,6 +528,17 @@ impl Window {
             device.cmd_set_scissor(command_buffer, 0, &scissors);
 
             for call in &calls {
+                // Bind material descriptor set (set 1) when present.
+                if let Some(mat_set) = call.material_set {
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        gfx.mold.pipeline_layout,
+                        1,
+                        &[mat_set],
+                        &[],
+                    );
+                }
                 if let Some(mesh) = &call.mesh {
                     device.cmd_bind_vertex_buffers(
                         command_buffer, 0,

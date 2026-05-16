@@ -14,6 +14,7 @@ use crate::asset::GltfAsset;
 use crate::light::LightBlock;
 use crate::material::{MaterialBlock, MaterialExtBlock};
 use crate::mesh::{Mesh, Primitive, PrimitiveTopology};
+use crate::pose::Pose;
 
 pub const IDENTITY_M4: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0,
@@ -42,6 +43,8 @@ pub enum GltfPipelineKind {
     MaterialFlattening,
     AmbientOcclusion,
     VisibilityPass,
+    SkinPalette,
+    MorphBlend,
     Graphics(GltfGraphicsKind),
 }
 
@@ -479,6 +482,139 @@ pub fn build_visibility_input(asset: &GltfAsset) -> PipelineUpload {
     }
 }
 
+// ── SkinPalette — compute ───────────────────────────────────────────────────
+//
+// Primary:   joint_count × mat4  (world matrices from Pose, indexed by skin.joints)
+// Secondary: joint_count × mat4  (inverse bind matrices from asset)
+// Output:    joint_count × mat4  (palette = world[joint[i]] * IBM[i])
+//
+// One workgroup per 64 joints.
+
+/// Build the skin-palette compute payload for a single skin.
+///
+/// `pose.world` must be up-to-date (call `Pose::sample` before this).
+/// Returns `None` when `skin_idx` is out of range.
+pub fn build_skin_palette_input(
+    asset:    &GltfAsset,
+    pose:     &Pose,
+    skin_idx: usize,
+) -> Option<PipelineUpload> {
+    let skin = asset.skins.get(skin_idx)?;
+    let joint_count = skin.joints.len();
+    if joint_count == 0 {
+        return None;
+    }
+
+    // Primary: world matrices for each joint (node index from skin.joints).
+    let mut primary: Vec<u8> = Vec::with_capacity(joint_count * 64);
+    for &node_idx in &skin.joints {
+        let m = pose.world.get(node_idx as usize).copied().unwrap_or(IDENTITY_M4);
+        for v in m { primary.extend_from_slice(&v.to_le_bytes()); }
+    }
+
+    // Secondary: inverse bind matrices (one per joint).
+    let mut secondary: Vec<u8> = Vec::with_capacity(joint_count * 64);
+    for ibm in &skin.inverse_bind_matrices {
+        for v in ibm { secondary.extend_from_slice(&v.to_le_bytes()); }
+    }
+    // Pad secondary to same length as primary if IBMs are missing.
+    while secondary.len() < primary.len() {
+        for v in IDENTITY_M4 { secondary.extend_from_slice(&v.to_le_bytes()); }
+    }
+
+    let wg = workgroups_1d(joint_count as u32);
+    Some(PipelineUpload {
+        kind:            GltfPipelineKind::SkinPalette,
+        primary_bytes:   primary.into_iter().collect(),
+        secondary_bytes: secondary.into_iter().collect(),
+        element_count:   joint_count as u32,
+        element_stride:  64,
+        workgroups:      wg,
+        is_mesh:         false,
+    })
+}
+
+// ── MorphBlend — compute ────────────────────────────────────────────────────
+//
+// Primary:   vertex_count × ForgeVertex (48 B rest-pose)
+// Secondary: header(8 B) + weights(T×4 B) + deltas(T×V×36 B)
+//   header: [target_count as f32 bits, vertex_count as f32 bits]
+//   deltas: Δpos[3] + Δnorm[3] + Δtan[3] per (target, vertex)
+// Output:   same size as primary (posed vertex buffer)
+//
+// One workgroup per 64 vertices.
+
+/// Build the morph-blend compute payload for a single mesh primitive.
+///
+/// Returns `None` when the primitive has no morph targets or when `node_idx`
+/// is not found in the asset.
+pub fn build_morph_blend_input(
+    asset:    &GltfAsset,
+    mesh_idx: usize,
+    prim_idx: usize,
+    pose:     &Pose,
+    node_idx: usize,
+) -> Option<PipelineUpload> {
+    let mesh = asset.meshes.get(mesh_idx)?;
+    let prim = mesh.primitives.get(prim_idx)?;
+    if prim.morph_targets.is_empty() { return None; }
+
+    let vertex_count = prim.streams.positions.len();
+    let target_count = prim.morph_targets.len();
+
+    // Effective weights: pose override if present, else mesh defaults.
+    let weights: &[f32] = if let Some(w) = pose.morph_weights.get(node_idx) {
+        if !w.is_empty() { w } else { &mesh.weights }
+    } else {
+        &mesh.weights
+    };
+
+    // Primary: rest-pose vertices in ForgeVertex layout.
+    let primary = pack_primitive_vertices(prim);
+
+    // Secondary buffer layout (all f32, uints stored as bit-reinterpreted f32):
+    //   [0]           f32  target_count (bits = uint)
+    //   [1]           f32  vertex_count (bits = uint)
+    //   [2..2+T-1]    f32  weight[T]
+    //   [2+T..]       f32  deltas[T × V × 9]
+    let secondary_floats = 2 + target_count + target_count * vertex_count * 9;
+    let mut sec: Vec<u8> = Vec::with_capacity(secondary_floats * 4);
+
+    // Header.
+    sec.extend_from_slice(&(target_count as u32).to_ne_bytes()); // bit-cast to float later
+    sec.extend_from_slice(&(vertex_count  as u32).to_ne_bytes());
+
+    // Weights (padded or truncated to target_count).
+    for t in 0..target_count {
+        let w = weights.get(t).copied().unwrap_or(0.0f32);
+        sec.extend_from_slice(&w.to_le_bytes());
+    }
+
+    // Deltas: [T][V][9 floats = Δpos(3) + Δnorm(3) + Δtan(3)].
+    for t in 0..target_count {
+        let mt = &prim.morph_targets[t];
+        for v in 0..vertex_count {
+            let dp = mt.positions.get(v).copied().unwrap_or([0.0; 3]);
+            let dn = mt.normals  .get(v).copied().unwrap_or([0.0; 3]);
+            let dt = mt.tangents .get(v).copied().unwrap_or([0.0; 3]);
+            for f in dp { sec.extend_from_slice(&f.to_le_bytes()); }
+            for f in dn { sec.extend_from_slice(&f.to_le_bytes()); }
+            for f in dt { sec.extend_from_slice(&f.to_le_bytes()); }
+        }
+    }
+
+    let wg = workgroups_1d(vertex_count as u32);
+    Some(PipelineUpload {
+        kind:            GltfPipelineKind::MorphBlend,
+        primary_bytes:   primary,
+        secondary_bytes: sec.into_iter().collect(),
+        element_count:   vertex_count as u32,
+        element_stride:  VERT_BYTES as u32,
+        workgroups:      wg,
+        is_mesh:         false,
+    })
+}
+
 // ── Dispatch table ──────────────────────────────────────────────────────────
 
 /// Build one `PipelineUpload` for every compute pipeline kind the engine
@@ -532,6 +668,9 @@ impl GltfPipelineKind {
             GltfPipelineKind::MaterialFlattening  => Some(build_material_input(asset)),
             GltfPipelineKind::AmbientOcclusion    => Some(build_ao_input(asset)),
             GltfPipelineKind::VisibilityPass      => Some(build_visibility_input(asset)),
+            // SkinPalette / MorphBlend require a Pose — use the dedicated builders.
+            GltfPipelineKind::SkinPalette         => None,
+            GltfPipelineKind::MorphBlend          => None,
             GltfPipelineKind::Graphics(_)         => None,
         }
     }

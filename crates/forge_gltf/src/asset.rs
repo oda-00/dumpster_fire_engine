@@ -17,6 +17,7 @@ use thin_vec::ThinVec;
 use crate::animation::*;
 use crate::camera::*;
 use crate::codec::extensions;
+use crate::codec::meshopt::{MeshoptFilter, MeshoptMode};
 use crate::error::*;
 use crate::light::*;
 use crate::material::*;
@@ -24,6 +25,11 @@ use crate::mesh::*;
 use crate::scene::*;
 use crate::skin::*;
 use crate::texture::*;
+
+/// KTX2 magic header bytes.
+const KTX2_MAGIC: [u8; 12] = [
+    0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+];
 
 /// Metadata from the glTF `asset` property (spec §2.1).
 #[derive(Debug, Clone)]
@@ -89,21 +95,36 @@ impl GltfAsset {
     }
 
     pub fn load_slice(bytes: &[u8]) -> GltfResult<Self> {
-        // First try unmodified. If deserialize fails with the
-        // KHR_animation_pointer-specific "missing field `node`", patch the
-        // JSON and retry.
-        let (doc, buffers, images, per_anim_patches) = match gltf::import_slice(bytes) {
-            Ok((doc, b, i)) => (doc, b, i, Vec::new()),
-            Err(e) => {
-                if let Some((patched, patches)) = crate::preprocess::rewrite_animation_pointer(bytes) {
-                    let (doc, b, i) = gltf::import_slice(&patched)?;
-                    (doc, b, i, patches)
-                } else {
-                    return Err(e.into());
+        // Step 1: resolve any KHR_animation_pointer JSON patch needed.
+        // We parse via Gltf::from_slice (structure-only, no image decode)
+        // so we can control image loading ourselves.
+        let (effective_bytes, per_anim_patches): (std::borrow::Cow<'_, [u8]>, Vec<crate::preprocess::PointerPatch>) =
+            match gltf::Gltf::from_slice(bytes) {
+                Ok(_) => (std::borrow::Cow::Borrowed(bytes), Vec::new()),
+                Err(_) => {
+                    if let Some((patched, patches)) = crate::preprocess::rewrite_animation_pointer(bytes) {
+                        (std::borrow::Cow::Owned(patched), patches)
+                    } else {
+                        // Re-parse to get the actual error.
+                        gltf::Gltf::from_slice(bytes).map_err(GltfError::Io)?;
+                        unreachable!()
+                    }
                 }
-            }
-        };
-        let mut asset = extract_asset_with_patches(&doc, &buffers, &images, &per_anim_patches)?;
+            };
+
+        // Step 2: Parse document and load buffer data.
+        let gltf_obj = gltf::Gltf::from_slice(effective_bytes.as_ref())
+            .map_err(GltfError::Io)?;
+        let mut buffer_data = gltf::import_buffers(&gltf_obj.document, None, gltf_obj.blob)
+            .map_err(GltfError::Io)?;
+
+        // Step 3: Pre-decompress any EXT_meshopt_compression buffer views.
+        preprocess_meshopt_buffer_views(effective_bytes.as_ref(), &mut buffer_data);
+
+        // Step 4: Decode images with our custom decoders (WebP, KTX2/BasisU, PNG, JPEG).
+        let image_data = load_images_custom(&gltf_obj.document, &buffer_data);
+
+        let mut asset = extract_asset_with_patches(&gltf_obj.document, &buffer_data, &image_data, &per_anim_patches)?;
         // Attach pointer channels and drop the sentinel node-0 channels.
         for (i, patch) in per_anim_patches.into_iter().enumerate() {
             let Some(anim) = asset.animations.get_mut(i) else { continue };
@@ -281,19 +302,24 @@ fn extract_meshes(
     doc:     &gltf::Document,
     buffers: &[gltf::buffer::Data],
 ) -> GltfResult<ThinVec<Mesh>> {
-    let mut out = ThinVec::with_capacity(doc.meshes().count());
-    for mesh in doc.meshes() {
-        let mut primitives = ThinVec::new();
+    use rayon::prelude::*;
+
+    // gltf::Mesh<'_> wraps &'_ Root + a mesh index — Sync when Root: Sync.
+    // Collect first so rayon can slice the Vec across threads.
+    let meshes: Vec<gltf::Mesh<'_>> = doc.meshes().collect();
+    let results: Vec<GltfResult<Mesh>> = meshes.par_iter().map(|mesh| {
+        let mut primitives = ThinVec::with_capacity(mesh.primitives().count());
         for prim in mesh.primitives() {
             primitives.push(extract_primitive(&prim, buffers)?);
         }
-        out.push(Mesh {
-            name: mesh.name().map(str::to_owned),
+        Ok(Mesh {
+            name:     mesh.name().map(str::to_owned),
             primitives,
-            weights: mesh.weights().map(|ws| ws.iter().copied().collect()).unwrap_or_default(),
-        });
-    }
-    Ok(out)
+            weights:  mesh.weights().map(|ws| ws.iter().copied().collect()).unwrap_or_default(),
+        })
+    }).collect();
+
+    results.into_iter().collect::<GltfResult<ThinVec<Mesh>>>()
 }
 
 fn extract_primitive(
@@ -626,21 +652,25 @@ fn extract_images(doc: &gltf::Document, images: &[gltf::image::Data]) -> ThinVec
         }
     }
 
-    images
-        .iter()
-        .enumerate()
-        .map(|(i, data)| {
-            let (w, h, rgba) = decode_to_rgba8(data);
-            let name = doc.images().nth(i).and_then(|im| im.name().map(str::to_owned));
-            Image {
-                name,
-                width:  w,
-                height: h,
-                rgba,
-                format: hints[i],
-            }
-        })
-        .collect()
+    // Pre-extract names sequentially (gltf iterator types may not be Send).
+    let names: Vec<Option<String>> = doc.images()
+        .map(|im| im.name().map(str::to_owned))
+        .collect();
+
+    use rayon::prelude::*;
+    let hints_ref: &[ImageFormatHint] = &hints;
+
+    let decoded: Vec<Image> = images.par_iter().enumerate().map(|(i, data)| {
+        let (w, h, rgba) = decode_to_rgba8(data);
+        Image {
+            name:   names.get(i).and_then(|n| n.clone()),
+            width:  w,
+            height: h,
+            rgba,
+            format: *hints_ref.get(i).unwrap_or(&ImageFormatHint::Linear),
+        }
+    }).collect();
+    decoded.into_iter().collect()
 }
 
 fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
@@ -744,6 +774,330 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
 }
 #[inline] fn f32_to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+// ── Phase 4 codec hooks ──────────────────────────────────────────────────────
+
+/// Pre-process EXT_meshopt_compression: decompress any buffer views that
+/// carry the extension and write the decompressed bytes into the fallback
+/// range in the buffer data. This runs before the gltf crate's accessor
+/// readers see the data, so regular `prim.reader(...)` calls get clean bytes.
+fn preprocess_meshopt_buffer_views(
+    raw_bytes: &[u8],
+    buffer_data: &mut Vec<gltf::buffer::Data>,
+) {
+    let json_val = match extract_json_value(raw_bytes) {
+        Some(v) => v,
+        None    => return,
+    };
+    let bvs = match json_val["bufferViews"].as_array() {
+        Some(a) => a,
+        None    => return,
+    };
+
+    for bv in bvs {
+        let Some(ext) = bv.get("extensions")
+            .and_then(|e| e.get("EXT_meshopt_compression")) else { continue };
+
+        let comp_buf_idx = ext["buffer"].as_u64().unwrap_or(0) as usize;
+        let comp_off     = ext["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let comp_len     = ext["byteLength"].as_u64().unwrap_or(0) as usize;
+        let stride       = ext["byteStride"].as_u64().unwrap_or(1) as usize;
+        let count        = ext["count"].as_u64().unwrap_or(0) as usize;
+        let mode_str     = ext["mode"].as_str().unwrap_or("ATTRIBUTES");
+        let filter_str   = ext["filter"].as_str().unwrap_or("NONE");
+
+        if comp_buf_idx >= buffer_data.len() || count == 0 || stride == 0 { continue; }
+
+        let mode = match mode_str {
+            "ATTRIBUTES" => MeshoptMode::Attributes,
+            "TRIANGLES"  => MeshoptMode::Triangles,
+            "INDICES"    => MeshoptMode::Indices,
+            _            => continue,
+        };
+        let filter = match filter_str {
+            "OCTAHEDRAL"  => MeshoptFilter::Octahedral,
+            "QUATERNION"  => MeshoptFilter::Quaternion,
+            "EXPONENTIAL" => MeshoptFilter::Exponential,
+            _             => MeshoptFilter::None,
+        };
+
+        // Read compressed bytes into an owned Vec (avoids aliasing when we
+        // write back below, in case src and dst are in the same buffer).
+        let comp_end = comp_off.saturating_add(comp_len);
+        if comp_end > buffer_data[comp_buf_idx].0.len() { continue; }
+        let compressed: Vec<u8> = buffer_data[comp_buf_idx].0[comp_off..comp_end].to_vec();
+
+        let decompressed = match crate::codec::meshopt::decompress_buffer_view(
+            mode, filter, count, stride, &compressed,
+        ) {
+            Ok(d)  => d,
+            Err(_) => continue,
+        };
+
+        // Write decompressed bytes into the fallback buffer-view location.
+        let dst_buf_idx = bv["buffer"].as_u64().unwrap_or(0) as usize;
+        let dst_off     = bv["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let dst_len     = bv["byteLength"].as_u64().unwrap_or(0) as usize;
+
+        if dst_buf_idx >= buffer_data.len() { continue; }
+        let dst_end = dst_off.saturating_add(dst_len);
+        if dst_end > buffer_data[dst_buf_idx].0.len() { continue; }
+
+        let copy_len = dst_len.min(decompressed.len());
+        buffer_data[dst_buf_idx].0[dst_off..dst_off + copy_len]
+            .copy_from_slice(&decompressed[..copy_len]);
+    }
+}
+
+/// Load all images from the document, using our hand-rolled decoders for
+/// WebP and KTX2/BasisU, and falling back to the gltf crate (image crate)
+/// for PNG and JPEG. Images that fail to decode are replaced with a 1×1
+/// black-transparent dummy so the rest of the asset loads normally.
+/// Decoding is done in parallel (one rayon task per image).
+fn load_images_custom(
+    doc: &gltf::Document,
+    buffer_data: &[gltf::buffer::Data],
+) -> Vec<gltf::image::Data> {
+    use rayon::prelude::*;
+
+    // Pre-extract owned sources sequentially (gltf types aren't Send).
+    enum RawSource {
+        Bytes { bytes: Vec<u8>, mime: Option<String> },
+        Unsupported,
+    }
+    let sources: Vec<RawSource> = doc.images().map(|img| {
+        match img.source() {
+            gltf::image::Source::View { view, mime_type } => {
+                let buf = &buffer_data[view.buffer().index()].0;
+                match buf.get(view.offset()..view.offset() + view.length()) {
+                    Some(slice) => RawSource::Bytes {
+                        bytes: slice.to_vec(),
+                        mime:  Some(mime_type.to_owned()),
+                    },
+                    None => RawSource::Unsupported,
+                }
+            }
+            gltf::image::Source::Uri { uri, mime_type } => {
+                if let Some(rest) = uri.strip_prefix("data:") {
+                    let mut parts = rest.splitn(2, ";base64,");
+                    let uri_mime = parts.next().map(str::to_owned);
+                    if let Some(b64) = parts.next() {
+                        if let Some(bytes) = simple_base64_decode(b64) {
+                            let mime = uri_mime.or_else(|| mime_type.map(str::to_owned));
+                            return RawSource::Bytes { bytes, mime };
+                        }
+                    }
+                }
+                RawSource::Unsupported
+            }
+        }
+    }).collect();
+
+    let dummy = || gltf::image::Data {
+        pixels: vec![0, 0, 0, 0],
+        format: gltf::image::Format::R8G8B8A8,
+        width: 1, height: 1,
+    };
+
+    // Decode in parallel — each image is independent.
+    sources.into_par_iter().map(|src| match src {
+        RawSource::Bytes { bytes, mime } => {
+            decode_image_bytes(&bytes, mime.as_deref()).unwrap_or_else(|_| dummy())
+        }
+        RawSource::Unsupported => dummy(),
+    }).collect()
+}
+
+fn load_single_image_custom(
+    source:      gltf::image::Source<'_>,
+    buffer_data: &[gltf::buffer::Data],
+) -> GltfResult<gltf::image::Data> {
+    match source {
+        gltf::image::Source::View { view, mime_type } => {
+            let buf = &buffer_data[view.buffer().index()].0;
+            let bytes = buf.get(view.offset()..view.offset() + view.length())
+                .ok_or(GltfError::InvalidAccessor("image view out of bounds"))?;
+            decode_image_bytes(bytes, Some(mime_type))
+        }
+        gltf::image::Source::Uri { uri, mime_type } => {
+            // Only data URIs are supported in slice context (no filesystem access).
+            if let Some(rest) = uri.strip_prefix("data:") {
+                let mut parts = rest.splitn(2, ";base64,");
+                let uri_mime = parts.next();
+                let b64 = parts.next()
+                    .ok_or(GltfError::InvalidAccessor("bad data URI format"))?;
+                let bytes = simple_base64_decode(b64)
+                    .ok_or(GltfError::InvalidAccessor("base64 decode failed"))?;
+                let eff_mime = uri_mime.or(mime_type);
+                decode_image_bytes(&bytes, eff_mime)
+            } else {
+                // External URI: fall through to gltf crate, which will error
+                // for slice context — treat as unsupported.
+                Err(GltfError::UnsupportedFeature(
+                    format!("external URI image in slice context: {uri}")
+                ))
+            }
+        }
+    }
+}
+
+fn decode_image_bytes(bytes: &[u8], mime_type: Option<&str>) -> GltfResult<gltf::image::Data> {
+    // WebP detection
+    let is_webp = mime_type == Some("image/webp")
+        || (bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP");
+
+    if is_webp {
+        let (w, h, rgba) = crate::codec::webp::decode_to_rgba8(bytes)?;
+        return Ok(gltf::image::Data {
+            pixels: rgba.to_vec(),
+            format: gltf::image::Format::R8G8B8A8,
+            width:  w,
+            height: h,
+        });
+    }
+
+    // KTX2 detection
+    let is_ktx2 = mime_type == Some("image/ktx2")
+        || bytes.get(..12).map_or(false, |m| m == KTX2_MAGIC);
+
+    if is_ktx2 {
+        let (w, h, rgba) = decode_ktx2_to_rgba8(bytes)?;
+        return Ok(gltf::image::Data {
+            pixels: rgba,
+            format: gltf::image::Format::R8G8B8A8,
+            width:  w,
+            height: h,
+        });
+    }
+
+    // PNG / JPEG: use the gltf crate's image-crate decoder.
+    // We reconstruct a minimal Source::View from the raw bytes by re-wrapping
+    // them into the gltf::image::Data path using image_crate directly via
+    // the approach in gltf's import.rs.
+    decode_standard_image(bytes, mime_type)
+}
+
+/// Decode PNG / JPEG bytes via the `image` crate (re-exposed through gltf).
+fn decode_standard_image(
+    bytes:     &[u8],
+    mime_type: Option<&str>,
+) -> GltfResult<gltf::image::Data> {
+    use image::GenericImageView;
+    let fmt = if mime_type == Some("image/png") {
+        Some(image::ImageFormat::Png)
+    } else if mime_type == Some("image/jpeg") {
+        Some(image::ImageFormat::Jpeg)
+    } else {
+        // Sniff from bytes.
+        match bytes.get(..4) {
+            Some([0x89, 0x50, 0x4E, 0x47]) => Some(image::ImageFormat::Png),
+            Some([0xFF, 0xD8, ..])          => Some(image::ImageFormat::Jpeg),
+            _                               => None,
+        }
+    };
+    let dyn_img = match fmt {
+        Some(f) => image::load_from_memory_with_format(bytes, f)
+            .map_err(|_| GltfError::InvalidAccessor("image decode failed"))?,
+        None    => image::load_from_memory(bytes)
+            .map_err(|_| GltfError::InvalidAccessor("image decode failed, unknown format"))?,
+    };
+    let (w, h) = dyn_img.dimensions();
+    let pixels = dyn_img.into_rgba8().into_raw();
+    Ok(gltf::image::Data {
+        pixels,
+        format: gltf::image::Format::R8G8B8A8,
+        width: w,
+        height: h,
+    })
+}
+
+/// Decode a KTX2 container to raw RGBA8 pixels.
+/// Handles BasisLZ (ETC1S) and raw (UASTC) supercompression.
+fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
+    use crate::codec::ktx2::{Ktx2, SupercompressionScheme};
+
+    let ktx = Ktx2::parse(bytes)?;
+    let w = ktx.pixel_width;
+    let h = ktx.pixel_height.max(1);
+
+    let level_data = ktx.level_data(bytes, 0)
+        .ok_or(GltfError::InvalidAccessor("KTX2 has no level 0 data"))?;
+
+    let rgba: Vec<u8> = match ktx.supercompression {
+        SupercompressionScheme::None => {
+            // vkFormat == 0 (VK_FORMAT_UNDEFINED) → UASTC 4×4 blocks.
+            // Any other format we attempt raw R8G8B8A8 passthrough.
+            if ktx.vk_format == 0 {
+                crate::codec::basisu_uastc::transcode_to_rgba8(level_data, w, h).to_vec()
+            } else if ktx.vk_format == 37 {
+                // VK_FORMAT_R8G8B8A8_UNORM — already decoded.
+                level_data.to_vec()
+            } else {
+                return Err(GltfError::UnsupportedFeature(
+                    format!("KTX2 uncompressed vkFormat {}", ktx.vk_format),
+                ));
+            }
+        }
+        SupercompressionScheme::BasisLZ => {
+            // ETC1S via BasisLZ supercompression.
+            crate::codec::basisu_etc1s::transcode_to_rgba8(
+                &ktx.sgd, level_data, w, h,
+            )?.to_vec()
+        }
+        _ => {
+            return Err(GltfError::UnsupportedFeature(
+                format!("KTX2 supercompression scheme {:?}", ktx.supercompression),
+            ));
+        }
+    };
+
+    Ok((w, h, rgba))
+}
+
+/// Parse the JSON portion of raw glTF/GLB bytes into a serde_json Value.
+fn extract_json_value(bytes: &[u8]) -> Option<serde_json::Value> {
+    const GLB_MAGIC: u32 = 0x46546C67;
+    if bytes.len() >= 12
+        && u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) == GLB_MAGIC
+    {
+        // GLB: JSON chunk is at bytes 12..12+json_chunk_length
+        if bytes.len() < 20 { return None; }
+        let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+        // Chunk type at [16..20] should be 0x4E4F534A ("JSON")
+        let json_bytes = bytes.get(20..20 + json_len)?;
+        serde_json::from_slice(json_bytes).ok()
+    } else {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+/// Minimal base64 decoder (no external dep).
+fn simple_base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: [u8; 128] = {
+        let mut t = [255u8; 128];
+        let src = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut i = 0usize;
+        while i < src.len() { t[src[i] as usize] = i as u8; i += 1; }
+        t
+    };
+    let input = input.trim().as_bytes();
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &c in input {
+        if c == b'=' { break; }
+        if c as usize >= 128 { return None; }
+        let v = TABLE[c as usize];
+        if v == 255 { return None; }
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 // ── Skins ───────────────────────────────────────────────────────────────────

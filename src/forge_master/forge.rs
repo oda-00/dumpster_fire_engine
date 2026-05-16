@@ -263,6 +263,9 @@ pub struct GraphicsForge {
 pub struct GraphicsMold {
     pub render_pass: vk::RenderPass,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
+    /// Set 1 layout (material UBO + 5 texture samplers) for ForwardLit.
+    /// `null()` for non-ForwardLit kinds.
+    pub material_set_layout: vk::DescriptorSetLayout,
     pub pipeline_layout: vk::PipelineLayout,
     pub pipeline: vk::Pipeline,
 }
@@ -406,8 +409,58 @@ impl GraphicsForge {
             }
         };
 
-        // Pipeline layout — ForwardLit exposes a mat4 push constant (MVP).
-        let set_layouts = [descriptor_set_layout];
+        // Set 1 — material descriptor layout (ForwardLit only):
+        //   binding 0 = UNIFORM_BUFFER (fragment), binding 1-5 = COMBINED_IMAGE_SAMPLER (fragment).
+        let material_set_layout = if matches!(self.kind, GraphicsOreKind::ForwardLit) {
+            let mat_bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(2)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(3)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(4)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(5)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            ];
+            let mat_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+                .bindings(&mat_bindings);
+            match unsafe { device.create_descriptor_set_layout(&mat_layout_info, None) } {
+                Ok(l) => l,
+                Err(e) => {
+                    unsafe {
+                        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                        device.destroy_render_pass(render_pass, None);
+                    }
+                    return Err(ForgeError::Vk(e));
+                }
+            }
+        } else {
+            vk::DescriptorSetLayout::null()
+        };
+
+        // Pipeline layout — ForwardLit exposes a mat4 push constant (MVP) and two sets.
         let push_ranges: &[vk::PushConstantRange] = match self.kind {
             GraphicsOreKind::ForwardLit => &[vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -415,8 +468,17 @@ impl GraphicsForge {
                 .size(64)], // sizeof(mat4)
             GraphicsOreKind::Ui => &[],
         };
+        // Build set_layouts slice dynamically (one or two entries).
+        let set_layouts_two   = [descriptor_set_layout, material_set_layout];
+        let set_layouts_one   = [descriptor_set_layout];
+        let set_layouts_ref: &[vk::DescriptorSetLayout] =
+            if material_set_layout != vk::DescriptorSetLayout::null() {
+                &set_layouts_two
+            } else {
+                &set_layouts_one
+            };
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&set_layouts)
+            .set_layouts(set_layouts_ref)
             .push_constant_ranges(push_ranges);
         let pipeline_layout = match unsafe {
             device.create_pipeline_layout(&pipeline_layout_info, None)
@@ -424,6 +486,9 @@ impl GraphicsForge {
             Ok(l) => l,
             Err(e) => {
                 unsafe {
+                    if material_set_layout != vk::DescriptorSetLayout::null() {
+                        device.destroy_descriptor_set_layout(material_set_layout, None);
+                    }
                     device.destroy_descriptor_set_layout(descriptor_set_layout, None);
                     device.destroy_render_pass(render_pass, None);
                 }
@@ -432,13 +497,19 @@ impl GraphicsForge {
         };
 
         // Shader modules — destroyed before returning regardless of outcome.
+        let destroy_layouts = |device: &ash::Device| unsafe {
+            if material_set_layout != vk::DescriptorSetLayout::null() {
+                device.destroy_descriptor_set_layout(material_set_layout, None);
+            }
+            device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+        };
         let vert_info = vk::ShaderModuleCreateInfo::default().code(&self.vert_spirv);
         let vert_module = match unsafe { device.create_shader_module(&vert_info, None) } {
             Ok(m) => m,
             Err(e) => {
                 unsafe {
                     device.destroy_pipeline_layout(pipeline_layout, None);
-                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    destroy_layouts(device);
                     device.destroy_render_pass(render_pass, None);
                 }
                 return Err(ForgeError::Vk(e));
@@ -451,7 +522,7 @@ impl GraphicsForge {
                 unsafe {
                     device.destroy_shader_module(vert_module, None);
                     device.destroy_pipeline_layout(pipeline_layout, None);
-                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    destroy_layouts(device);
                     device.destroy_render_pass(render_pass, None);
                 }
                 return Err(ForgeError::Vk(e));
@@ -567,7 +638,7 @@ impl GraphicsForge {
                     device.destroy_shader_module(frag_module, None);
                     device.destroy_shader_module(vert_module, None);
                     device.destroy_pipeline_layout(pipeline_layout, None);
-                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    destroy_layouts(device);
                     device.destroy_render_pass(render_pass, None);
                     return Err(ForgeError::Vk(err));
                 }
@@ -582,6 +653,7 @@ impl GraphicsForge {
         Ok(GraphicsMold {
             render_pass,
             descriptor_set_layout,
+            material_set_layout,
             pipeline_layout,
             pipeline,
         })
@@ -598,6 +670,10 @@ impl GraphicsMold {
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 device.destroy_pipeline_layout(self.pipeline_layout, None);
                 self.pipeline_layout = vk::PipelineLayout::null();
+            }
+            if self.material_set_layout != vk::DescriptorSetLayout::null() {
+                device.destroy_descriptor_set_layout(self.material_set_layout, None);
+                self.material_set_layout = vk::DescriptorSetLayout::null();
             }
             if self.descriptor_set_layout != vk::DescriptorSetLayout::null() {
                 device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
