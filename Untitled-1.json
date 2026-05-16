@@ -1,0 +1,48 @@
+{
+    "uri": "AnimatedColorsCube.glb",
+    "mimeType": "model/gltf-binary",
+    "validatorVersion": "2.0.0-dev.3.10",
+    "validatedAt": "2026-05-15T21:35:46.276Z",
+    "issues": {
+        "numErrors": 0,
+        "numWarnings": 0,
+        "numInfos": 1,
+        "numHints": 0,
+        "messages": [
+            {
+                "code": "INCOMPLETE_EXTENSION_SUPPORT",
+                "message": "Validation support for this extension is incomplete; the asset may have undetected issues.",
+                "severity": 2,
+                "pointer": "/animations/0/channels/2/target/extensions/KHR_animation_pointer"
+            }
+        ],
+        "truncated": false
+    },
+    "info": {
+        "version": "2.0",
+        "generator": "Khronos glTF Blender I/O v4.2.57",
+        "extensionsUsed": [
+            "KHR_animation_pointer"
+        ],
+        "resources": [
+            {
+                "pointer": "/buffers/0",
+                "mimeType": "application/gltf-buffer",
+                "storage": "glb",
+                "byteLength": 11188
+            }
+        ],
+        "animationCount": 1,
+        "materialCount": 4,
+        "hasMorphTargets": false,
+        "hasSkins": false,
+        "hasTextures": false,
+        "hasDefaultScene": true,
+        "drawCallCount": 4,
+        "totalVertexCount": 96,
+        "totalTriangleCount": 48,
+        "maxUVs": 0,
+        "maxInfluences": 0,
+        "maxAttributes": 2
+    }
+}

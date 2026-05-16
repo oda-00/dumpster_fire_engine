@@ -4,6 +4,9 @@
 
 use std::sync::Arc;
 
+use std::sync::mpsc;
+use std::thread;
+
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -11,7 +14,7 @@ use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::WindowId;
 
 use dumpster_fire_engine::forge_master::{
-    ForgeMaster, GraphicsForgeId, GraphicsOreKind,
+    ForgeMaster, GraphicsForgeId, GraphicsOreKind, MeshOre,
 };
 use dumpster_fire_engine::forge_master::{FrameId, GpuMesh, GraphicsFramePlan};
 use dumpster_fire_engine::render::{
@@ -37,15 +40,25 @@ fn main() {
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App { live: None, model_path: path };
+    let mut app = App {
+        live: None,
+        model_path: path,
+        mesh_rx: None,
+        mesh_ready: false,
+    };
+       
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
 // ── Application state ───────────────────────────────────────────────────────
 
+
 struct App {
     live:       Option<LiveState>,
     model_path: String,
+    mesh_rx:    Option<mpsc::Receiver<MeshOre>>,
+    mesh_ready: bool,
+
 }
 
 struct LiveState {
@@ -77,21 +90,16 @@ impl ApplicationHandler for App {
             .as_raw();
         let ctx = VulkanContext::with_surface(display_handle)
             .expect("Vulkan init");
-
-        // ── Load mesh from disk ──────────────────────────────────────────────
-        let ore = load_first_mesh(&self.model_path)
-            .unwrap_or_else(|e| panic!("failed to load '{}': {e}", self.model_path));
-        println!(
-            "Loaded '{}': {} vertices, {} indices",
-            self.model_path,
-            ore.vertices.len(),
-            ore.indices.len()
-        );
-
-        // ── Upload to GPU ────────────────────────────────────────────────────
-        let gpu_mesh = GpuMesh::upload(&ctx.mesh_upload_ctx(), &ore)
-            .expect("GpuMesh upload");
-        let mesh = Arc::new(gpu_mesh);
+        // ── Start background mesh loader ─────────────────────────────────────
+        let path = self.model_path.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let ore = load_first_mesh(&path)
+                .unwrap_or_else(|e| panic!("failed to load '{}': {e}", path));
+            tx.send(ore).unwrap();
+        });
+        self.mesh_rx = Some(rx);
+        self.mesh_ready = false;
 
         // ── ForwardLit forge ─────────────────────────────────────────────────
         let mut forge = ForgeMaster::new(
@@ -136,15 +144,17 @@ impl ApplicationHandler for App {
         let window_handle = renderer.add_window(window);
 
         // ── Graphics factory (one indexed draw of the loaded mesh) ───────────
-        let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "mesh");
-        proto.push_call(GraphicsFramePlan::new_mesh(
-            FrameId::new(1),
-            "model",
-            mesh,
-        ));
-        renderer.build_graphics_factory(window_handle, proto);
+   
+   
 
         self.live = Some(LiveState { ctx, renderer, window_handle, winit_id });
+        if let Some(gfx) = &self.live.as_ref().unwrap().renderer
+            .window(self.live.as_ref().unwrap().window_handle)
+            .unwrap()
+            .graphics
+        {
+            gfx.winit_window.request_redraw();
+        }
     }
 
     fn window_event(
@@ -164,6 +174,32 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // If mesh not yet loaded, poll for it
+                if !self.mesh_ready {
+                    if let Some(rx) = &self.mesh_rx {
+                        if let Ok(ore) = rx.try_recv() {
+                            let gpu_mesh = GpuMesh::upload(
+                                &live.ctx.mesh_upload_ctx(),
+                                &ore,
+                            )
+                            .expect("GpuMesh upload");
+                            let mesh = Arc::new(gpu_mesh);
+
+                            let mut proto =
+                                Proto::<GraphicsTag>::new(ProtoId::new(1), "mesh");
+                            proto.push_call(GraphicsFramePlan::new_mesh(
+                                FrameId::new(1),
+                                "model",
+                                mesh,
+                            ));
+                            live
+                                .renderer
+                                .build_graphics_factory(live.window_handle, proto);
+                            self.mesh_ready = true;
+                        }
+                    }
+                }
+
                 let window = live
                     .renderer
                     .window_mut(live.window_handle)

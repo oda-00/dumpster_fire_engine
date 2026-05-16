@@ -13,13 +13,30 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = "2"
 thin-vec   = "0.2"
 glam       = "0.29"
 rayon      = "1"
 ash        = "0.38.0"
 ash-window = "0.13"
 winit      = "0.30.13"
-gltf       = "1"
+gltf = { version = "1.4", default-features = false, features = [
+    "import",
+    "KHR_lights_punctual",
+    "KHR_materials_transmission",
+    "KHR_materials_ior",
+    "KHR_materials_volume",
+    "KHR_materials_unlit",
+    "KHR_materials_emissive_strength",
+    "KHR_texture_transform",
+    "extras",
+    "extensions",
+    "names",
+    "utils",
+] }
+mikktspace = "0.3"
 object     = { version = "0.36", default-features = false, features = ["read", "std"] }
 
 [target.'cfg(unix)'.dependencies]

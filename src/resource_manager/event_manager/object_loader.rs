@@ -62,7 +62,40 @@ mod sys {
 
     pub const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
 }
+#[cfg(windows)]
+mod sys {
+    use core::ffi::{c_void, c_int};
 
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn VirtualAlloc(
+            lpAddress: *mut c_void,
+            dwSize: usize,
+            flAllocationType: u32,
+            flProtect: u32,
+        ) -> *mut c_void;
+        pub fn VirtualFree(lpAddress: *mut c_void, dwSize: usize, dwFreeType: u32) -> i32;
+        pub fn VirtualProtect(
+            lpAddress: *mut c_void,
+            dwSize: usize,
+            flNewProtect: u32,
+            lpflOldProtect: *mut u32,
+        ) -> i32;
+    }
+
+    #[link(name = "ucrt")]
+    unsafe extern "C" {
+        pub fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
+        pub fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+        pub fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+    }
+
+    pub const MEM_COMMIT:  u32 = 0x00001000;
+    pub const MEM_RESERVE: u32 = 0x00002000;
+    pub const MEM_RELEASE: u32 = 0x00008000;
+    pub const PAGE_READWRITE: u32 = 0x04;
+    pub const PAGE_EXECUTE_READ: u32 = 0x20;
+}
 // ── Executable memory region ──────────────────────────────────────────────────
 
 struct MmapRegion {
@@ -104,13 +137,45 @@ impl MmapRegion {
             ) == 0
         }
     }
+    
+        #[cfg(windows)]
+    fn alloc(size: usize) -> Option<Self> {
+        debug_assert!(size > 0);
+        let len = align_up(size, 4096);
+        let ptr = unsafe {
+            sys::VirtualAlloc(
+                core::ptr::null_mut(),
+                len,
+                sys::MEM_COMMIT | sys::MEM_RESERVE,
+                sys::PAGE_READWRITE,
+            )
+        };
+        if ptr.is_null() { return None; }
+        Some(MmapRegion { ptr: ptr as *mut u8, len })
+    }
+        #[cfg(windows)]
+    fn make_exec(&self) -> bool {
+        let mut old = 0u32;
+        unsafe {
+            sys::VirtualProtect(self.ptr as _, self.len, sys::PAGE_EXECUTE_READ, &mut old) != 0
+        }
+    }
 }
 
 impl Drop for MmapRegion {
     fn drop(&mut self) {
+        if self.ptr.is_null() { return; }
         #[cfg(unix)]
-        if !self.ptr.is_null() && self.len > 0 {
-            unsafe { sys::munmap(self.ptr as _, self.len); }
+        {
+            if self.len > 0 {
+                unsafe { sys::munmap(self.ptr as _, self.len); }
+            }
+        }
+        #[cfg(windows)]
+        {
+            if self.len > 0 {
+                unsafe { sys::VirtualFree(self.ptr as _, 0, sys::MEM_RELEASE); }
+            }
         }
     }
 }
@@ -354,6 +419,13 @@ fn resolve_target(
 
 fn resolve_external(name: &str) -> Result<usize, LoadError> {
     #[cfg(unix)]
+    match name {
+        "memset"  => return Ok(sys::memset  as *const () as usize),
+        "memcpy"  => return Ok(sys::memcpy  as *const () as usize),
+        "memmove" => return Ok(sys::memmove as *const () as usize),
+        _ => {}
+    }
+        #[cfg(windows)]
     match name {
         "memset"  => return Ok(sys::memset  as *const () as usize),
         "memcpy"  => return Ok(sys::memcpy  as *const () as usize),
