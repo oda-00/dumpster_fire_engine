@@ -14,8 +14,9 @@ use ash::vk;
 use thin_vec::ThinVec;
 
 use forge_gltf::{
-    GltfAsset, PipelineParams, PipelineUpload,
-    build_all_compute_uploads, build_graphics_draws, build_ui_draws,
+    GltfAsset, PipelineParams, PipelineUpload, Pose,
+    build_all_compute_uploads, build_graphics_draws, build_graphics_draws_with_matrices,
+    build_ui_draws,
 };
 
 use crate::forge_master::frame::GraphicsFramePlan;
@@ -356,6 +357,42 @@ pub fn build_ui_plans(
     // Touch the helper so the compiler keeps it warm (and so the dependency
     // graph between build_ui_draws and the bridge stays explicit).
     let _ = build_ui_draws(asset).len();
+    Ok(plans)
+}
+
+/// Build draw plans against a pre-sampled `Pose`. Same upload semantics as
+/// `build_graphics_plans`: meshes are uploaded once per (mesh, primitive)
+/// and shared across draws; only the per-draw world matrix changes between
+/// frames. Call once after each `Pose::sample` to get the frame's draw list.
+pub fn build_graphics_plans_with_pose(
+    asset:      &GltfAsset,
+    pose:       &Pose,
+    upload_ctx: &MeshUploadCtx,
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    let mut cache: Vec<Vec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
+        .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
+        .collect();
+
+    let draws = build_graphics_draws_with_matrices(asset, &pose.world);
+    let mut plans = ThinVec::with_capacity(draws.len());
+    for (i, d) in draws.iter().enumerate() {
+        let mesh_slot = &mut cache[d.mesh as usize][d.primitive as usize];
+        if mesh_slot.is_none() {
+            let ore = primitive_to_mesh_ore(asset, d.mesh, d.primitive);
+            let gpu = GpuMesh::upload(upload_ctx, &ore)?;
+            *mesh_slot = Some(Arc::new(gpu));
+        }
+        let mesh = mesh_slot.as_ref().unwrap().clone();
+        let plan = GraphicsFramePlan::new_mesh(
+            crate::forge_master::frame::FrameId::new((i + 1) as i64),
+            d.material
+                .map(|m| format!("animated_prim_{i}_mat_{m}"))
+                .unwrap_or_else(|| format!("animated_prim_{i}")),
+            mesh,
+        )
+        .with_mvp(d.world_matrix);
+        plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
+    }
     Ok(plans)
 }
 

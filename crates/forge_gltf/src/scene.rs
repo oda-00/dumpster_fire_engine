@@ -94,6 +94,18 @@ pub fn compose_world_matrices(
     scene_roots: &[NodeIndex],
     nodes:       &[Node],
 ) -> ThinVec<[f32; 16]> {
+    let locals: ThinVec<[f32; 16]> = nodes.iter().map(|n| n.local_matrix).collect();
+    compose_world_matrices_from(scene_roots, nodes, &locals)
+}
+
+/// Same as `compose_world_matrices`, but with caller-provided per-node local
+/// matrices — used by the animation evaluator to fold sampled TRS values into
+/// the world transform without mutating the node tree.
+pub fn compose_world_matrices_from(
+    scene_roots: &[NodeIndex],
+    nodes:       &[Node],
+    locals:      &[[f32; 16]],
+) -> ThinVec<[f32; 16]> {
     let mut out: ThinVec<[f32; 16]> = (0..nodes.len())
         .map(|_| crate::pipeline::IDENTITY_M4)
         .collect();
@@ -103,10 +115,9 @@ pub fn compose_world_matrices(
         stack.push((root, crate::pipeline::IDENTITY_M4));
     }
     while let Some((idx, parent_world)) = stack.pop() {
-        let node = &nodes[idx as usize];
-        let world = mat4_mul(&parent_world, &node.local_matrix);
+        let world = mat4_mul(&parent_world, &locals[idx as usize]);
         out[idx as usize] = world;
-        for &child in &node.children {
+        for &child in &nodes[idx as usize].children {
             stack.push((child, world));
         }
     }

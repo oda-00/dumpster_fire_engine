@@ -180,7 +180,16 @@ fn workgroups_1d(elements: u32) -> [u32; 3] {
 /// All draws are tagged `ForwardLit` — the engine bridge can re-tag a UI
 /// subset later if needed.
 pub fn build_graphics_draws(asset: &GltfAsset) -> ThinVec<GraphicsDraw> {
-    let world = asset.world_matrices();
+    build_graphics_draws_with_matrices(asset, &asset.world_matrices())
+}
+
+/// Same as `build_graphics_draws` but with caller-supplied world matrices —
+/// the typical use case is feeding a `Pose::world` from the animation
+/// evaluator so each frame's draw list reflects the sampled animation.
+pub fn build_graphics_draws_with_matrices(
+    asset: &GltfAsset,
+    world: &[[f32; 16]],
+) -> ThinVec<GraphicsDraw> {
     let mut out = ThinVec::new();
     for (node_idx, node) in asset.nodes.iter().enumerate() {
         let Some(mesh_idx) = node.mesh else { continue };
