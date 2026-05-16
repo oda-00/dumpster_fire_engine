@@ -162,6 +162,63 @@ pub fn sample_vec3(s: &AnimSampler, t: f32) -> [f32; 3] {
     }
 }
 
+/// Sample one element of a multi-scalar sampler. `stride` is the number of
+/// scalars per keyframe (e.g. morph weights pack N scalars per frame); `k`
+/// is the index within the keyframe. Used by morph-target weight tracks
+/// and by KHR_animation_pointer scalar tracks.
+pub fn sample_scalar(s: &AnimSampler, t: f32, stride: usize, k: usize) -> f32 {
+    let SamplerOutput::Scalars(out) = &s.output else {
+        // Caller passed a vec-shaped sampler; degrade by reading element k
+        // of whatever vector form is available.
+        return match &s.output {
+            SamplerOutput::Vec3(_) => {
+                let v = sample_vec3(s, t);
+                v.get(k).copied().unwrap_or(0.0)
+            }
+            SamplerOutput::Vec4(_) => {
+                let v = sample_quat(s, t);
+                v.get(k).copied().unwrap_or(0.0)
+            }
+            _ => 0.0,
+        };
+    };
+    if out.is_empty() || stride == 0 { return 0.0; }
+    let frames = out.len() / stride;
+    if frames == 0 { return 0.0; }
+
+    // Slice `out` as one element per "keyframe-slot". `locate_segment`
+    // operates on the input timeline (always one entry per keyframe).
+    let (lo, hi, u) = locate_segment(&s.input, t);
+    let pick = |frame: usize, slot: usize| -> f32 {
+        let i = frame * stride + slot;
+        out.get(i).copied().unwrap_or(0.0)
+    };
+    match s.interpolation {
+        Interpolation::Step   => pick(lo, k),
+        Interpolation::Linear => {
+            let a = pick(lo, k);
+            let b = pick(hi, k);
+            a + (b - a) * u
+        }
+        Interpolation::CubicSpline => {
+            // Layout is [in_tan_0, value_0, out_tan_0, in_tan_1, value_1, ...]
+            // — three samples per keyframe, each of `stride` scalars.
+            let dt = (s.input[hi] - s.input[lo]).max(1e-12);
+            let p0 = pick(lo * 3 + 1, k);
+            let p1 = pick(hi * 3 + 1, k);
+            let m0 = pick(lo * 3 + 2, k);
+            let m1 = pick(hi * 3, k);
+            hermite(p0, m0 * dt, p1, m1 * dt, u)
+        }
+    }
+}
+
+/// Public spherical-linear-interpolation entry point — used by the pose
+/// blender to mix the rest pose with a second animation track.
+pub fn slerp_quat_pub(a: [f32; 4], b: [f32; 4], u: f32) -> [f32; 4] {
+    slerp_quat(a, b, u)
+}
+
 pub fn sample_quat(s: &AnimSampler, t: f32) -> [f32; 4] {
     let SamplerOutput::Vec4(out) = &s.output else { return [0.0, 0.0, 0.0, 1.0]; };
     if out.is_empty() { return [0.0, 0.0, 0.0, 1.0]; }

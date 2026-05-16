@@ -16,6 +16,7 @@ use thin_vec::ThinVec;
 
 use crate::animation::*;
 use crate::camera::*;
+use crate::codec::extensions;
 use crate::error::*;
 use crate::light::*;
 use crate::material::*;
@@ -24,8 +25,46 @@ use crate::scene::*;
 use crate::skin::*;
 use crate::texture::*;
 
+/// Metadata from the glTF `asset` property (spec §2.1).
+#[derive(Debug, Clone)]
+pub struct AssetMetadata {
+    /// Required: must start with `"2."`.
+    pub version:     String,
+    /// Optional minimum required version (must be ≤ 2.0 to load).
+    pub min_version: Option<String>,
+    /// Name of tool that generated the file.
+    pub generator:   Option<String>,
+    /// Copyright notice.
+    pub copyright:   Option<String>,
+}
+
+impl Default for AssetMetadata {
+    fn default() -> Self {
+        Self {
+            version:     "2.0".to_owned(),
+            min_version: None,
+            generator:   None,
+            copyright:   None,
+        }
+    }
+}
+
+/// One entry from the top-level `KHR_materials_variants.variants` array.
+#[derive(Debug, Clone)]
+pub struct MaterialVariant {
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct GltfAsset {
+    /// Parsed `asset` metadata block.
+    pub asset_metadata:        AssetMetadata,
+    /// `extensionsUsed` array.
+    pub extensions_used:       ThinVec<String>,
+    /// `extensionsRequired` array.
+    pub extensions_required:   ThinVec<String>,
+    /// Top-level `KHR_materials_variants.variants` list (may be empty).
+    pub material_variants:     ThinVec<MaterialVariant>,
     pub scenes:        ThinVec<Scene>,
     pub default_scene: Option<u32>,
     pub nodes:         ThinVec<Node>,
@@ -107,7 +146,24 @@ fn extract_asset_with_patches(
     images:  &[gltf::image::Data],
     patches: &[crate::preprocess::PointerPatch],
 ) -> GltfResult<GltfAsset> {
+    let asset_metadata = extract_asset_metadata(doc)?;
+    let extensions_used     = extract_extensions_used(doc);
+    let extensions_required = extract_extensions_required(doc);
+
+    // Validate that every required extension is supported.
+    for ext in &extensions_required {
+        if !extensions::is_supported(ext) {
+            return Err(GltfError::UnsupportedExtension(ext.clone()));
+        }
+    }
+
+    let material_variants = extract_material_variants(doc);
+
     Ok(GltfAsset {
+        asset_metadata,
+        extensions_used,
+        extensions_required,
+        material_variants,
         scenes:        extract_scenes(doc),
         default_scene: doc.default_scene().map(|s| s.index() as u32),
         nodes:         extract_nodes(doc),
@@ -121,6 +177,57 @@ fn extract_asset_with_patches(
         cameras:       extract_cameras(doc),
         lights:        extract_lights(doc),
     })
+}
+
+fn extract_asset_metadata(doc: &gltf::Document) -> GltfResult<AssetMetadata> {
+    let a = &doc.as_json().asset;
+    let version = a.version.to_string();
+    if !version.starts_with("2.") {
+        return Err(GltfError::UnsupportedVersion(format!(
+            "expected 2.x, got {version}"
+        )));
+    }
+    let min_version = a.min_version.as_ref().map(|s| s.to_string());
+    if let Some(ref mv) = min_version {
+        // Parse X.Y — reject anything with major > 2 or major == 2 and minor > 0.
+        if let Some((maj, min)) = mv.split_once('.') {
+            let maj = maj.parse::<u32>().unwrap_or(99);
+            let min = min.parse::<u32>().unwrap_or(99);
+            if maj > 2 || (maj == 2 && min > 0) {
+                return Err(GltfError::UnsupportedVersion(format!(
+                    "minVersion {mv} is above 2.0"
+                )));
+            }
+        }
+    }
+    Ok(AssetMetadata {
+        version,
+        min_version,
+        generator: a.generator.as_ref().map(|s| s.to_string()),
+        copyright: a.copyright.as_ref().map(|s| s.to_string()),
+    })
+}
+
+fn extract_extensions_used(doc: &gltf::Document) -> ThinVec<String> {
+    doc.as_json().extensions_used.iter().map(|s| s.to_string()).collect()
+}
+
+fn extract_extensions_required(doc: &gltf::Document) -> ThinVec<String> {
+    doc.as_json().extensions_required.iter().map(|s| s.to_string()).collect()
+}
+
+fn extract_material_variants(doc: &gltf::Document) -> ThinVec<MaterialVariant> {
+    // KHR_materials_variants stores its top-level data in doc.extensions.
+    use serde_json::Value;
+    let Some(exts) = doc.as_json().extensions.as_ref() else { return ThinVec::new(); };
+    let Some(khr) = exts.others.get("KHR_materials_variants") else { return ThinVec::new(); };
+    let Some(arr) = khr.get("variants").and_then(|v| v.as_array()) else { return ThinVec::new(); };
+    arr.iter()
+        .filter_map(|v: &Value| {
+            let name = v.as_object()?.get("name")?.as_str()?.to_owned();
+            Some(MaterialVariant { name })
+        })
+        .collect()
 }
 
 // ── Scenes / nodes ──────────────────────────────────────────────────────────
@@ -204,13 +311,20 @@ fn extract_primitive(
     let mut streams = VertexStreams::default();
     streams.positions = positions;
 
-    streams.normals = reader.read_normals()
-        .map(|it| it.collect())
-        .unwrap_or_else(|| (0..n).map(|_| [0.0_f32, 1.0, 0.0]).collect());
+    let indices: ThinVec<u32> = match reader.read_indices() {
+        Some(it) => it.into_u32().collect(),
+        None     => (0..n as u32).collect(),
+    };
 
-    streams.tangents = reader.read_tangents()
-        .map(|it| it.collect())
-        .unwrap_or_else(|| (0..n).map(|_| [1.0_f32, 0.0, 0.0, 1.0]).collect());
+    // Per spec §3.7.2.1: when NORMAL is absent and topology is triangles,
+    // compute flat normals. For non-triangle topologies fall back to Y-up.
+    streams.normals = if let Some(it) = reader.read_normals() {
+        it.collect()
+    } else if matches!(prim.mode(), gltf::mesh::Mode::Triangles) {
+        flat_normals(&streams.positions, &indices)
+    } else {
+        (0..n).map(|_| [0.0_f32, 1.0, 0.0]).collect()
+    };
 
     // Multi-set UVs (TEXCOORD_n) — pull until None.
     let mut set = 0u32;
@@ -222,9 +336,32 @@ fn extract_primitive(
         streams.uv_sets.push((0..n).map(|_| [0.0_f32, 0.0]).collect());
     }
 
+    // Per spec §3.7.2.1: when TANGENT is absent but NORMAL + TEXCOORD_0 are
+    // present and topology is triangles, generate MikkTSpace tangents.
+    streams.tangents = if let Some(it) = reader.read_tangents() {
+        it.collect()
+    } else if matches!(prim.mode(), gltf::mesh::Mode::Triangles)
+        && !streams.normals.is_empty()
+        && !streams.uv_sets.is_empty()
+    {
+        crate::codec::mikktspace::generate_tangents(
+            &streams.positions,
+            &streams.normals,
+            &streams.uv_sets[0],
+            &indices,
+        )
+    } else {
+        (0..n).map(|_| [1.0_f32, 0.0, 0.0, 1.0]).collect()
+    };
+
     set = 0;
     while let Some(c) = reader.read_colors(set) {
-        streams.colors.push(c.into_rgba_f32().collect());
+        // Clamp colors to [0,1] per spec §3.7.2.2
+        let clamped: ThinVec<[f32; 4]> = c.into_rgba_f32()
+            .map(|[r, g, b, a]| [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0),
+                                   b.clamp(0.0, 1.0), a.clamp(0.0, 1.0)])
+            .collect();
+        streams.colors.push(clamped);
         set += 1;
     }
 
@@ -239,12 +376,7 @@ fn extract_primitive(
         set += 1;
     }
 
-    let indices: ThinVec<u32> = match reader.read_indices() {
-        Some(it) => it.into_u32().collect(),
-        None     => (0..n as u32).collect(),
-    };
-
-    // Morph targets — each target shares the parent primitive's vertex count.
+    // Morph targets.
     let mut morph_targets = ThinVec::new();
     for morph in reader.read_morph_targets() {
         let (pos, norm, tan) = morph;
@@ -255,23 +387,108 @@ fn extract_primitive(
         morph_targets.push(mt);
     }
 
+    // Custom _UNDERSCORED attributes (spec §3.7.2.1).
+    let mut custom_attrs = ThinVec::new();
+    for (semantic, accessor) in prim.attributes() {
+        let name = match &semantic {
+            gltf::mesh::Semantic::Extras(n) => n.as_str(),
+            _ => continue,
+        };
+        if !name.starts_with('_') { continue; }
+        match crate::codec::sparse::resolve_custom_attribute(name, &accessor, buffers) {
+            Ok(ca) => custom_attrs.push(ca),
+            Err(GltfError::SpecViolation(s)) => return Err(GltfError::SpecViolation(s)),
+            Err(_) => {}
+        }
+    }
+
+    // KHR_materials_variants per-primitive mappings
+    let variant_mappings = extract_primitive_variant_mappings(prim);
+
     let bounds = {
-        // Prefer accessor min/max; fall back to a scan.
         let bb = prim.bounding_box();
         Aabb { min: bb.min, max: bb.max }
     };
 
     Ok(Primitive {
-        topology: PrimitiveTopology::from_mode(prim.mode()),
+        topology:        PrimitiveTopology::from_mode(prim.mode()),
         streams,
         indices,
-        material: prim.material().index().map(|i| i as u32),
+        material:        prim.material().index().map(|i| i as u32),
         morph_targets,
         bounds,
+        custom_attrs,
+        variant_mappings,
     })
 }
 
+/// Compute one flat normal per triangle and duplicate it to all three vertices.
+/// The result has the same length as `positions`.
+fn flat_normals(positions: &[[f32; 3]], indices: &[u32]) -> ThinVec<[f32; 3]> {
+    let n = positions.len();
+    let mut out: ThinVec<[f32; 3]> = (0..n).map(|_| [0.0_f32, 1.0, 0.0]).collect();
+    let tri_count = indices.len() / 3;
+    for t in 0..tri_count {
+        let i0 = indices[t * 3]     as usize;
+        let i1 = indices[t * 3 + 1] as usize;
+        let i2 = indices[t * 3 + 2] as usize;
+        if i0 >= n || i1 >= n || i2 >= n { continue; }
+        let p0 = positions[i0];
+        let p1 = positions[i1];
+        let p2 = positions[i2];
+        let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
+        let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
+        let nx = e1[1]*e2[2] - e1[2]*e2[1];
+        let ny = e1[2]*e2[0] - e1[0]*e2[2];
+        let nz = e1[0]*e2[1] - e1[1]*e2[0];
+        let len = (nx*nx + ny*ny + nz*nz).sqrt();
+        let norm = if len > 1e-12 { [nx/len, ny/len, nz/len] } else { [0.0, 1.0, 0.0] };
+        out[i0] = norm;
+        out[i1] = norm;
+        out[i2] = norm;
+    }
+    out
+}
+
+fn extract_primitive_variant_mappings(prim: &gltf::Primitive<'_>) -> ThinVec<VariantMapping> {
+    let Some(khr) = prim.extension_value("KHR_materials_variants") else { return ThinVec::new(); };
+    let Some(arr) = khr.get("mappings").and_then(|v: &serde_json::Value| v.as_array()) else { return ThinVec::new(); };
+    arr.iter()
+        .filter_map(|v: &serde_json::Value| {
+            let obj = v.as_object()?;
+            let material = obj.get("material")?.as_u64()? as u32;
+            let variants: ThinVec<u32> = obj.get("variants")
+                .and_then(|v: &serde_json::Value| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
+                .unwrap_or_default();
+            Some(VariantMapping { material, variants })
+        })
+        .collect()
+}
+
 // ── Materials ───────────────────────────────────────────────────────────────
+
+fn apply_texture_transform_from_json(val: &serde_json::Value, tr: &mut TextureRef) {
+    let Some(obj) = val.as_object() else { return };
+    if let Some(arr) = obj.get("offset").and_then(|v| v.as_array()) {
+        if let (Some(x), Some(y)) = (arr.first().and_then(|v| v.as_f64()),
+                                      arr.get(1).and_then(|v| v.as_f64())) {
+            tr.uv_offset = [x as f32, y as f32];
+        }
+    }
+    if let Some(r) = obj.get("rotation").and_then(|v| v.as_f64()) {
+        tr.uv_rotation = r as f32;
+    }
+    if let Some(arr) = obj.get("scale").and_then(|v| v.as_array()) {
+        if let (Some(x), Some(y)) = (arr.first().and_then(|v| v.as_f64()),
+                                      arr.get(1).and_then(|v| v.as_f64())) {
+            tr.uv_scale = [x as f32, y as f32];
+        }
+    }
+    if let Some(tc) = obj.get("texCoord").and_then(|v| v.as_u64()) {
+        tr.tex_coord_set = tc as u32;
+    }
+}
 
 fn texture_ref_from(info: gltf::texture::Info<'_>) -> TextureRef {
     let texture = info.texture().index() as u32;
@@ -307,20 +524,24 @@ fn extract_materials(doc: &gltf::Document) -> ThinVec<Material> {
             out.pbr.metallic_roughness_texture =
                 pbr.metallic_roughness_texture().map(texture_ref_from);
 
-            // KHR_texture_transform is exposed on `gltf::texture::Info` only;
-            // NormalTexture / OcclusionTexture don't surface it through the
-            // public crate API, so we record the plain reference here.
             if let Some(n) = m.normal_texture() {
                 let texture = n.texture().index() as u32;
                 let tex_coord_set = n.tex_coord();
-                let tr = TextureRef::identity(texture, tex_coord_set);
+                let mut tr = TextureRef::identity(texture, tex_coord_set);
+                // The typed gltf API exposes KHR_texture_transform via extensions().
+                if let Some(ext_val) = n.extensions().and_then(|e| e.get("KHR_texture_transform")) {
+                    apply_texture_transform_from_json(ext_val, &mut tr);
+                }
                 out.normal = NormalTexture { texture: Some(tr), scale: n.scale() };
             }
 
             if let Some(o) = m.occlusion_texture() {
                 let texture = o.texture().index() as u32;
                 let tex_coord_set = o.tex_coord();
-                let tr = TextureRef::identity(texture, tex_coord_set);
+                let mut tr = TextureRef::identity(texture, tex_coord_set);
+                if let Some(ext_val) = o.extensions().and_then(|e| e.get("KHR_texture_transform")) {
+                    apply_texture_transform_from_json(ext_val, &mut tr);
+                }
                 out.occlusion = OcclusionTexture { texture: Some(tr), strength: o.strength() };
             }
 

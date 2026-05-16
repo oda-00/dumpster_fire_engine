@@ -14,6 +14,7 @@ pub mod animation;
 pub mod asset;
 pub mod builder;
 pub mod camera;
+pub mod codec;
 pub mod error;
 pub mod light;
 pub mod material;

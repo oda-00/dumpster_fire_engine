@@ -194,7 +194,13 @@ pub fn build_graphics_draws_with_matrices(
     for (node_idx, node) in asset.nodes.iter().enumerate() {
         let Some(mesh_idx) = node.mesh else { continue };
         let mesh = &asset.meshes[mesh_idx as usize];
-        let world_m = world.get(node_idx).copied().unwrap_or(IDENTITY_M4);
+        // Per spec §3.7.3.2: skinned mesh nodes MUST NOT use their node's world
+        // transform — the joint palette provides the full transform.
+        let world_m = if node.skin.is_some() {
+            IDENTITY_M4
+        } else {
+            world.get(node_idx).copied().unwrap_or(IDENTITY_M4)
+        };
         for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
             out.push(GraphicsDraw {
                 kind:         GltfGraphicsKind::ForwardLit,

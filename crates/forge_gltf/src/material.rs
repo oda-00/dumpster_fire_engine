@@ -206,6 +206,38 @@ impl Default for DiffuseTransmission {
     }
 }
 
+/// KHR_materials_volume_scatter — non-standard scattering extension used by
+/// `ScatteringSkull.glb` and similar subsurface assets.
+#[derive(Debug, Clone, Default)]
+pub struct VolumeScatter {
+    pub scatter_color:    [f32; 3],
+    pub scatter_distance: f32,
+    pub anisotropy:       f32,
+}
+
+/// KHR_materials_pbrSpecularGlossiness — legacy (pre-2.0 ratification) but
+/// still widely used. Fields per the extension spec §2.
+#[derive(Debug, Clone)]
+pub struct PbrSpecularGlossiness {
+    pub diffuse_factor:               [f32; 4],
+    pub diffuse_texture:              Option<TextureRef>,
+    pub specular_factor:              [f32; 3],
+    pub glossiness_factor:            f32,
+    pub specular_glossiness_texture:  Option<TextureRef>,
+}
+
+impl Default for PbrSpecularGlossiness {
+    fn default() -> Self {
+        Self {
+            diffuse_factor:              [1.0, 1.0, 1.0, 1.0],
+            diffuse_texture:             None,
+            specular_factor:             [1.0, 1.0, 1.0],
+            glossiness_factor:           1.0,
+            specular_glossiness_texture: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Material {
     pub name:                Option<String>,
@@ -231,6 +263,10 @@ pub struct Material {
     pub diffuse_transmission:Option<DiffuseTransmission>,
     /// KHR_materials_dispersion: a single scalar.
     pub dispersion:          f32,
+    /// KHR_materials_volume_scatter (non-standard / experimental).
+    pub volume_scatter:      Option<VolumeScatter>,
+    /// KHR_materials_pbrSpecularGlossiness — legacy specular/glossiness workflow.
+    pub pbr_specular_glossiness: Option<PbrSpecularGlossiness>,
 }
 
 impl Default for Material {
@@ -256,7 +292,9 @@ impl Default for Material {
             iridescence:       None,
             anisotropy:        None,
             diffuse_transmission: None,
-            dispersion:        0.0,
+            dispersion:               0.0,
+            volume_scatter:           None,
+            pbr_specular_glossiness:  None,
         }
     }
 }
@@ -508,5 +546,29 @@ pub fn parse_material_extensions(
 
     if let Some(o) = extensions.get("KHR_materials_dispersion").and_then(|v| v.as_object()) {
         out.dispersion = f32_field(o, "dispersion", 0.0);
+    }
+
+    // KHR_materials_volume_scatter (non-standard, but used by ScatteringSkull and others)
+    if let Some(o) = extensions.get("KHR_materials_volume_scatter").and_then(|v| v.as_object()) {
+        out.volume_scatter = Some(VolumeScatter {
+            scatter_color:    vec3_field(o, "scatterColor", [1.0, 1.0, 1.0]),
+            scatter_distance: f32_field(o, "scatterDistance", 0.0),
+            anisotropy:       f32_field(o, "anisotropy", 0.0),
+        });
+    }
+
+    // KHR_materials_pbrSpecularGlossiness
+    if let Some(o) = extensions.get("KHR_materials_pbrSpecularGlossiness").and_then(|v| v.as_object()) {
+        let mut sg = PbrSpecularGlossiness::default();
+        if let Some(arr) = o.get("diffuseFactor").and_then(|v| v.as_array()) {
+            for (i, slot) in sg.diffuse_factor.iter_mut().enumerate() {
+                if let Some(v) = arr.get(i).and_then(|v| v.as_f64()) { *slot = v as f32; }
+            }
+        }
+        sg.diffuse_texture              = texture_ref_field(o, "diffuseTexture");
+        sg.specular_factor              = vec3_field(o, "specularFactor", [1.0, 1.0, 1.0]);
+        sg.glossiness_factor            = f32_field(o, "glossinessFactor", 1.0);
+        sg.specular_glossiness_texture  = texture_ref_field(o, "specularGlossinessTexture");
+        out.pbr_specular_glossiness = Some(sg);
     }
 }

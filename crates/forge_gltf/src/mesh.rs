@@ -8,6 +8,7 @@
 //! to keep pipeline adapters branch-free.
 
 use thin_vec::ThinVec;
+pub use crate::codec::sparse::CustomAttribute;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -118,14 +119,25 @@ impl Aabb {
     }
 }
 
+/// Per-primitive material variant mapping (KHR_materials_variants).
+#[derive(Debug, Clone)]
+pub struct VariantMapping {
+    pub material: u32,
+    pub variants: ThinVec<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Primitive {
-    pub topology: PrimitiveTopology,
-    pub streams:  VertexStreams,
-    pub indices:  ThinVec<u32>,
-    pub material: Option<u32>,
-    pub morph_targets: ThinVec<MorphTarget>,
-    pub bounds:   Aabb,
+    pub topology:        PrimitiveTopology,
+    pub streams:         VertexStreams,
+    pub indices:         ThinVec<u32>,
+    pub material:        Option<u32>,
+    pub morph_targets:   ThinVec<MorphTarget>,
+    pub bounds:          Aabb,
+    /// Custom `_UNDERSCORED` vertex attributes (may be empty).
+    pub custom_attrs:    ThinVec<CustomAttribute>,
+    /// KHR_materials_variants mappings (may be empty).
+    pub variant_mappings: ThinVec<VariantMapping>,
 }
 
 #[derive(Debug, Clone)]
