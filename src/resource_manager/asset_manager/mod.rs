@@ -12,6 +12,12 @@ pub use fetch::*;
 pub use pipe::*;
 pub use pipeline::*;
 
+// Re-export the hand-rolled glTF facade so callers can `use
+// dumpster_fire_engine::resource_manager::asset_manager::forge_gltf::*` and
+// reach scenes, materials, animations, etc. without depending on the
+// workspace crate directly.
+pub use forge_gltf;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

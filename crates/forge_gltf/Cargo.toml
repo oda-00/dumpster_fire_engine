@@ -1,0 +1,29 @@
+[package]
+name    = "forge_gltf"
+version = "0.1.0"
+edition = "2024"
+
+# Hand-rolled façade on top of the `gltf` crate. Pulls every kind of node,
+# mesh, material, texture, skin, animation, camera and light out of a glTF
+# document, then exposes pipeline-specific byte-layout adapters that drive
+# every compute and graphics pipeline the engine knows about.
+#
+# Kept as a leaf workspace crate (no engine dep, no Vulkan dep) so it stays
+# easy to unit-test without a GPU and easy to reuse from tools/benches.
+
+[dependencies]
+thin-vec = "0.2"
+gltf = { version = "1.4", default-features = false, features = [
+    "import",
+    "KHR_lights_punctual",
+    "KHR_materials_transmission",
+    "KHR_materials_ior",
+    "KHR_materials_volume",
+    "KHR_materials_unlit",
+    "KHR_materials_emissive_strength",
+    "KHR_texture_transform",
+    "extras",
+    "extensions",
+    "names",
+    "utils",
+] }
