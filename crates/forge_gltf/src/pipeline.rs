@@ -12,7 +12,7 @@ use thin_vec::ThinVec;
 
 use crate::asset::GltfAsset;
 use crate::light::LightBlock;
-use crate::material::MaterialBlock;
+use crate::material::{MaterialBlock, MaterialExtBlock};
 use crate::mesh::{Mesh, Primitive, PrimitiveTopology};
 
 pub const IDENTITY_M4: [f32; 16] = [
@@ -401,27 +401,39 @@ fn mat4_mul_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
 
 // ── MaterialFlattening — compute ────────────────────────────────────────────
 //
-// Every material as an 80-byte `MaterialBlock`.
+// Per material we write an 80-byte `MaterialBlock` (PBR + base extensions)
+// in `primary_bytes` and a 128-byte `MaterialExtBlock` (clearcoat / sheen /
+// specular / iridescence / anisotropy / diffuse_transmission / dispersion)
+// in `secondary_bytes`. Both arrays are the same length and indexed by
+// material id — shaders bind them as a pair.
 
 pub fn build_material_input(asset: &GltfAsset) -> PipelineUpload {
-    let mut bytes: Vec<u8> = Vec::with_capacity(asset.materials.len() * MaterialBlock::BYTES);
+    let n = asset.materials.len();
+    let mut base: Vec<u8> = Vec::with_capacity(n * MaterialBlock::BYTES);
+    let mut ext:  Vec<u8> = Vec::with_capacity(n * MaterialExtBlock::BYTES);
     for m in &asset.materials {
-        let block = MaterialBlock::from_material(m);
-        bytes.extend_from_slice(unsafe {
+        let b = MaterialBlock::from_material(m);
+        base.extend_from_slice(unsafe {
             core::slice::from_raw_parts(
-                (&block as *const MaterialBlock).cast::<u8>(),
+                (&b as *const MaterialBlock).cast::<u8>(),
                 MaterialBlock::BYTES,
             )
         });
+        let e = MaterialExtBlock::from_material(m);
+        ext.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(
+                (&e as *const MaterialExtBlock).cast::<u8>(),
+                MaterialExtBlock::BYTES,
+            )
+        });
     }
-    let count = asset.materials.len() as u32;
     PipelineUpload {
         kind:            GltfPipelineKind::MaterialFlattening,
-        primary_bytes:   bytes.into_iter().collect(),
-        secondary_bytes: ThinVec::new(),
-        element_count:   count,
+        primary_bytes:   base.into_iter().collect(),
+        secondary_bytes: ext.into_iter().collect(),
+        element_count:   n as u32,
         element_stride:  MaterialBlock::BYTES as u32,
-        workgroups:      workgroups_1d(count),
+        workgroups:      workgroups_1d(n as u32),
         is_mesh:         false,
     }
 }

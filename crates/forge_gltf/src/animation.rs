@@ -39,11 +39,23 @@ pub struct AnimChannel {
     pub sampler:     u32,
 }
 
+/// KHR_animation_pointer — replaces a channel's `target.node` with a JSON
+/// pointer like `/materials/0/pbrMetallicRoughness/baseColorFactor`. We
+/// keep the original pointer string verbatim; the engine routes it to the
+/// right uniform.
+#[derive(Debug, Clone)]
+pub struct AnimPointerChannel {
+    pub pointer: String,
+    pub sampler: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Animation {
-    pub name:     Option<String>,
-    pub samplers: ThinVec<AnimSampler>,
-    pub channels: ThinVec<AnimChannel>,
+    pub name:             Option<String>,
+    pub samplers:         ThinVec<AnimSampler>,
+    pub channels:         ThinVec<AnimChannel>,
+    /// KHR_animation_pointer channels (sibling to `channels`).
+    pub pointer_channels: ThinVec<AnimPointerChannel>,
 }
 
 impl Animation {

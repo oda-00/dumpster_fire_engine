@@ -42,13 +42,46 @@ pub struct GltfAsset {
 
 impl GltfAsset {
     pub fn load(path: impl AsRef<Path>) -> GltfResult<Self> {
-        let (doc, buffers, images) = gltf::import(path)?;
-        extract_asset(&doc, &buffers, &images)
+        // Read the bytes first so we can pre-process KHR_animation_pointer.
+        let bytes = std::fs::read(path).map_err(|e| {
+            GltfError::Io(gltf::Error::Io(e))
+        })?;
+        Self::load_slice(&bytes)
     }
 
     pub fn load_slice(bytes: &[u8]) -> GltfResult<Self> {
-        let (doc, buffers, images) = gltf::import_slice(bytes)?;
-        extract_asset(&doc, &buffers, &images)
+        // First try unmodified. If deserialize fails with the
+        // KHR_animation_pointer-specific "missing field `node`", patch the
+        // JSON and retry.
+        let (doc, buffers, images, per_anim_patches) = match gltf::import_slice(bytes) {
+            Ok((doc, b, i)) => (doc, b, i, Vec::new()),
+            Err(e) => {
+                if let Some((patched, patches)) = crate::preprocess::rewrite_animation_pointer(bytes) {
+                    let (doc, b, i) = gltf::import_slice(&patched)?;
+                    (doc, b, i, patches)
+                } else {
+                    return Err(e.into());
+                }
+            }
+        };
+        let mut asset = extract_asset_with_patches(&doc, &buffers, &images, &per_anim_patches)?;
+        // Attach pointer channels and drop the sentinel node-0 channels.
+        for (i, patch) in per_anim_patches.into_iter().enumerate() {
+            let Some(anim) = asset.animations.get_mut(i) else { continue };
+            let skip = patch.patched_channel_indices;
+            if !skip.is_empty() {
+                let kept: thin_vec::ThinVec<crate::animation::AnimChannel> = anim
+                    .channels
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| !skip.contains(&(*idx as u32)))
+                    .map(|(_, c)| c.clone())
+                    .collect();
+                anim.channels = kept;
+            }
+            for p in patch.pointers { anim.pointer_channels.push(p); }
+        }
+        Ok(asset)
     }
 
     /// Default scene if specified, else the first scene, else `None`.
@@ -68,10 +101,11 @@ impl GltfAsset {
     }
 }
 
-fn extract_asset(
+fn extract_asset_with_patches(
     doc:     &gltf::Document,
     buffers: &[gltf::buffer::Data],
     images:  &[gltf::image::Data],
+    patches: &[crate::preprocess::PointerPatch],
 ) -> GltfResult<GltfAsset> {
     Ok(GltfAsset {
         scenes:        extract_scenes(doc),
@@ -83,7 +117,7 @@ fn extract_asset(
         images:        extract_images(doc, images),
         samplers:      extract_samplers(doc),
         skins:         extract_skins(doc, buffers),
-        animations:    extract_animations(doc, buffers)?,
+        animations:    extract_animations(doc, buffers, patches)?,
         cameras:       extract_cameras(doc),
         lights:        extract_lights(doc),
     })
@@ -309,6 +343,13 @@ fn extract_materials(doc: &gltf::Document) -> ThinVec<Material> {
                 };
             }
 
+            // Pluck the extension data the gltf crate doesn't model
+            // (clearcoat, sheen, specular, iridescence, anisotropy,
+            // diffuse_transmission, dispersion) out of the raw JSON map.
+            if let Some(ext) = m.extensions() {
+                parse_material_extensions(&mut out, ext);
+            }
+
             out
         })
         .collect()
@@ -518,9 +559,18 @@ fn extract_skins(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> ThinVe
 fn extract_animations(
     doc:     &gltf::Document,
     buffers: &[gltf::buffer::Data],
+    patches: &[crate::preprocess::PointerPatch],
 ) -> GltfResult<ThinVec<Animation>> {
     let mut out = ThinVec::with_capacity(doc.animations().count());
-    for anim in doc.animations() {
+    for (anim_idx, anim) in doc.animations().enumerate() {
+        // Channel indices that were rewritten by the KHR_animation_pointer
+        // pre-pass — their samplers point at non-TRS data that the gltf
+        // crate's typed reader would assert on, so we route them through
+        // `pointer_channels` separately.
+        let patched_idx: &[u32] = patches
+            .get(anim_idx)
+            .map(|p| p.patched_channel_indices.as_slice())
+            .unwrap_or(&[]);
         // Sampler readers live on each Channel; the easiest robust path is
         // to walk channels and stash the (input, output) data keyed by the
         // sampler's index. Multiple channels may share a sampler — we keep
@@ -538,7 +588,10 @@ fn extract_animations(
             })
             .collect();
 
-        for c in anim.channels() {
+        for (ch_idx, c) in anim.channels().enumerate() {
+            // Skip pointer-patched channels — their samplers point at
+            // non-TRS data; the typed reader would assert on stride.
+            if patched_idx.contains(&(ch_idx as u32)) { continue; }
             let s_idx = c.sampler().index();
             if decoded[s_idx].is_some() { continue; }
             let reader = c.reader(|buf| Some(&*buffers[buf.index()]));
@@ -575,6 +628,7 @@ fn extract_animations(
             name: anim.name().map(str::to_owned),
             samplers,
             channels,
+            pointer_channels: ThinVec::new(),
         });
     }
     Ok(out)

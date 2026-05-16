@@ -22,8 +22,8 @@ use dumpster_fire_engine::resource_manager::asset_manager::{
 };
 
 use forge_gltf::{
-    GltfAsset, MaterialBlock, PipelineParams, Pose,
-    build_graphics_draws_with_matrices,
+    GltfAsset, MaterialBlock, MaterialExtBlock, PipelineParams, Pose,
+    build_graphics_draws_with_matrices, build_material_input,
 };
 
 const ASSETS: &str = "assets/models";
@@ -358,3 +358,68 @@ fn make_translating_box_glb() -> Vec<u8> {
 // Suppress unused-import warning when building without GPU.
 #[allow(dead_code)]
 fn _force_use(_: FrameId) {}
+
+// ── 9. KHR_materials_clearcoat / sheen / transmission on ToyCar ────────────
+
+#[test]
+fn toycar_carries_clearcoat_sheen_and_transmission() {
+    let asset = load_asset(asset_path("ToyCar.glb")).expect("load ToyCar");
+    assert_eq!(asset.materials.len(), 3);
+    // ToyCar mat0 = body (clearcoat), mat1 = fabric (sheen), mat2 = glass (transmission)
+    assert!(asset.materials[0].clearcoat.is_some(), "ToyCar body uses clearcoat");
+    assert!(asset.materials[1].sheen.is_some(),    "ToyCar fabric uses sheen");
+    assert!(asset.materials[2].transmission.factor > 0.0, "ToyCar glass uses transmission");
+
+    // Extension block should reflect the ext data.
+    let ext = MaterialExtBlock::from_material(&asset.materials[0]);
+    assert_eq!(ext.flags[0], 1, "clearcoat flag set");
+    assert!(ext.clearcoat[0] > 0.0, "clearcoat factor > 0");
+
+    let ext1 = MaterialExtBlock::from_material(&asset.materials[1]);
+    assert_eq!(ext1.flags[1], 1, "sheen flag set");
+}
+
+// ── 10. KHR_materials_diffuse_transmission + dispersion (ScatteringSkull) ──
+
+#[test]
+fn scattering_skull_carries_diffuse_transmission_and_dispersion() {
+    let asset = load_asset(asset_path("ScatteringSkull.glb")).expect("load ScatteringSkull");
+    let m = &asset.materials[0];
+    assert!(m.diffuse_transmission.is_some(), "skull uses diffuse_transmission");
+    assert!(m.dispersion > 0.0, "skull uses KHR_materials_dispersion");
+
+    let ext = MaterialExtBlock::from_material(m);
+    assert_eq!(ext.flags2[1], 1, "diffuse_transmission flag set");
+    assert!(ext.anisotropy[2] > 0.0, "dispersion lives in anisotropy.z slot");
+}
+
+// ── 11. KHR_animation_pointer pre-pass actually loads the file ─────────────
+
+#[test]
+fn animation_pointer_files_load_and_expose_pointer_channels() {
+    let asset = load_asset(asset_path("AnimatedColorsCube.glb"))
+        .expect("AnimatedColorsCube must load after KHR_animation_pointer pre-pass");
+    let anim = &asset.animations[0];
+    assert!(!anim.pointer_channels.is_empty(),
+        "KHR_animation_pointer channels recorded separately from regular channels");
+    let pc = &anim.pointer_channels[0];
+    assert!(pc.pointer.starts_with('/'), "pointer is a JSON path");
+
+    let big = load_asset(asset_path("AnimationPointerUVs.glb"))
+        .expect("AnimationPointerUVs must load too");
+    assert!(!big.animations[0].pointer_channels.is_empty());
+    assert!(big.animations[0].pointer_channels.len() > 50,
+        "AnimationPointerUVs has dozens of pointer channels");
+}
+
+// ── 12. MaterialFlattening pipeline now emits ext block in secondary buffer ─
+
+#[test]
+fn material_flattening_emits_both_base_and_ext_blocks() {
+    let asset = load_asset(asset_path("ToyCar.glb")).expect("load ToyCar");
+    let up = build_material_input(&asset);
+    let n = asset.materials.len();
+    assert_eq!(up.element_count, n as u32);
+    assert_eq!(up.primary_bytes.len(),   n * MaterialBlock::BYTES);
+    assert_eq!(up.secondary_bytes.len(), n * MaterialExtBlock::BYTES);
+}
