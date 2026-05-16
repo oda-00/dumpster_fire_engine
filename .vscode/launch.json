@@ -1,0 +1,65 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Rust Binary (LLDB)",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=${workspaceFolderBasename}",
+          "--package=${workspaceFolderBasename}"
+        ],
+        "filter": {
+          "name": "${workspaceFolderBasename}",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "type": "cppvsdbg",
+      "request": "launch",
+      "name": "Debug with MSVC (Windows)",
+      "program": "${workspaceFolder}/target/debug/${workspaceFolderBasename}.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "miDebuggerPath": "C:\\Program Files\\LLVM\\bin\\lldb.exe",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "type": "cppdbg",
+      "request": "launch",
+      "name": "Debug with Clang (GDB)",
+      "program": "${workspaceFolder}/target/debug/${workspaceFolderBasename}.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "miDebuggerPath": "C:\\Program Files\\LLVM\\bin\\lldb.exe",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "Cargo Build"
+    }
+  ]
+}
