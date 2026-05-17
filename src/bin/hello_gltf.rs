@@ -27,12 +27,13 @@ use dumpster_fire_engine::render::{
     Window, WindowId as RenderWindowId,
 };
 use dumpster_fire_engine::resource_manager::asset_manager::{
-    build_graphics_plans_maximal, build_skin_morph_proto, collect_morph_output_buffers,
-    collect_skin_palette_buffers, forge_gltf::{GltfAsset, Pose}, load_asset,
+    build_graphics_plans_maximal_with_meshes, build_skin_morph_proto,
+    collect_morph_output_buffers, collect_skin_palette_buffers,
+    forge_gltf::{GltfAsset, Pose}, load_asset,
     pack_primitive_skin_attrs, primitive_is_skinned, register_skin_morph_forges,
-    SkinningFrame,
+    upload_all_primitive_meshes, SkinningFrame,
 };
-use dumpster_fire_engine::forge_master::ore::GpuSkinBuffer;
+use dumpster_fire_engine::forge_master::ore::{GpuMesh, GpuSkinBuffer};
 use dumpster_fire_engine::resource_manager::gltf_driver::{
     AsyncGltfLoader, GltfCache, GltfUploadCtx, MaterialHandle,
     allocate_skin_palette_set, create_material, create_material_pool,
@@ -82,6 +83,12 @@ struct AssetState {
     pose:            Pose,
     /// Pre-resolved descriptor set per material index. Built once on load.
     material_sets:   Vec<Option<vk::DescriptorSet>>,
+    /// One Arc<GpuMesh> per (mesh, prim) — uploaded once at load time and
+    /// reused across frames. Without this, every frame would re-upload and
+    /// destroy every primitive's vertex / index buffers, which both
+    /// thrashes the device and creates use-after-free races against the
+    /// previous frame's draw submission.
+    meshes:          std::collections::HashMap<(usize, usize), std::sync::Arc<GpuMesh>>,
     /// Per-skinned-primitive joints+weights vertex buffer (binding 1).
     /// (mesh_idx, prim_idx) → owned GpuSkinBuffer.
     skin_vertex_buffers: std::collections::HashMap<(usize, usize), GpuSkinBuffer>,
@@ -254,9 +261,23 @@ impl ApplicationHandler for App {
                                         upload_materials(&live.ctx, live, &mut cache, &asset);
                                     let skin_vertex_buffers =
                                         upload_skin_vertex_buffers(&live.ctx, &asset);
+                                    // Upload every primitive's GpuMesh exactly once.
+                                    // The HashMap is owned by AssetState; per-frame plan
+                                    // builds clone the Arc<GpuMesh> into the factory.
+                                    let meshes = match upload_all_primitive_meshes(
+                                        &asset, &live.ctx.mesh_upload_ctx(),
+                                    ) {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            eprintln!("mesh upload failed: {e:?}");
+                                            event_loop.exit();
+                                            return;
+                                        }
+                                    };
 
                                     self.asset_loaded = Some(AssetState {
                                         asset, pose, material_sets,
+                                        meshes,
                                         skin_vertex_buffers, cache,
                                         last_anim_time: -1.0,
                                     });
@@ -283,9 +304,17 @@ impl ApplicationHandler for App {
 
                     let needs_rebuild = advanced || state.last_anim_time < 0.0;
                     if needs_rebuild {
-                        // Reset the per-frame skin-palette descriptor pool so we
-                        // can re-allocate sets pointing at the new compute output.
+                        // Drain the GPU before we rebuild this frame's compute +
+                        // graphics factories. Both `build_compute_factory` and
+                        // `build_graphics_factory` `Factory::destroy` the previous
+                        // frame's slot, which frees buffers / descriptor sets that
+                        // may still be referenced by the previous frame's
+                        // in-flight submission. `device_wait_idle` is the simplest
+                        // correct fence to use here; a per-frame fence + per-slot
+                        // descriptor pool would let us avoid the stall, but for
+                        // single-asset hello-gltf rendering this is fine.
                         unsafe {
+                            live.ctx.device.device_wait_idle().ok();
                             live.ctx.device.reset_descriptor_pool(
                                 live.skin_pool, vk::DescriptorPoolResetFlags::empty(),
                             ).ok();
@@ -346,22 +375,17 @@ impl ApplicationHandler for App {
                             palette_sets_by_node,
                         };
 
-                        let upload_ctx = live.ctx.mesh_upload_ctx();
-                        match build_graphics_plans_maximal(
+                        let plans = build_graphics_plans_maximal_with_meshes(
                             &state.asset,
                             &state.pose,
-                            &upload_ctx,
+                            &state.meshes,
                             &state.material_sets,
                             &morph_buffers,
                             &skinning,
-                        ) {
-                            Ok(plans) => {
-                                let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "gltf_scene");
-                                for plan in plans { proto.push_call(plan); }
-                                live.renderer.build_graphics_factory(live.window_handle, proto);
-                            }
-                            Err(e) => eprintln!("plan build error: {e:?}"),
-                        }
+                        );
+                        let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "gltf_scene");
+                        for plan in plans { proto.push_call(plan); }
+                        live.renderer.build_graphics_factory(live.window_handle, proto);
                         state.last_anim_time = t;
                     }
                 }

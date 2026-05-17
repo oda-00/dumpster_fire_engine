@@ -82,25 +82,27 @@ impl Renderer {
     pub fn build_compute_factory(
         &mut self,
         window_h: WindowHandle,
-        proto: Proto<ComputeTag>,
+        proto:    Proto<ComputeTag>,
     ) -> ForgeResult<FactoryHandle> {
+        let device = self.forge.device.clone();
         let window = self
             .windows
             .get_mut(window_h)
             .expect("window handle is stale or was never valid");
-        window.build_compute_factory(proto, &mut self.forge)
+        window.build_compute_factory(proto, &mut self.forge, &device)
     }
 
     pub fn build_graphics_factory(
         &mut self,
         window_h: WindowHandle,
-        proto: Proto<GraphicsTag>,
+        proto:    Proto<GraphicsTag>,
     ) -> FactoryHandle {
+        let device = self.forge.device.clone();
         let window = self
             .windows
             .get_mut(window_h)
             .expect("window handle is stale or was never valid");
-        window.build_graphics_factory(proto)
+        window.build_graphics_factory(proto, &device)
     }
 }
 

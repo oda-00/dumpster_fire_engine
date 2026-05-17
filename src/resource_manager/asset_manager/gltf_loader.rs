@@ -578,10 +578,33 @@ pub fn build_graphics_plans_full(
     )
 }
 
+/// Upload every (mesh, primitive) pair as a `GpuMesh` exactly once and
+/// return a (mesh_idx, prim_idx) → Arc<GpuMesh> cache. Call once at
+/// asset-load time and pass the resulting cache to every per-frame
+/// `build_graphics_plans_*_with_meshes` call so meshes survive across
+/// frames instead of churning every redraw.
+pub fn upload_all_primitive_meshes(
+    asset:      &GltfAsset,
+    upload_ctx: &MeshUploadCtx,
+) -> ForgeResult<std::collections::HashMap<(usize, usize), Arc<GpuMesh>>> {
+    let mut out = std::collections::HashMap::new();
+    for (mi, mesh) in asset.meshes.iter().enumerate() {
+        for pi in 0..mesh.primitives.len() {
+            let ore = primitive_to_mesh_ore(asset, mi as u32, pi as u32);
+            let gpu = GpuMesh::upload(upload_ctx, &ore)?;
+            out.insert((mi, pi), Arc::new(gpu));
+        }
+    }
+    Ok(out)
+}
+
 /// The final per-frame plan builder. Beyond `_full`, this also routes
 /// skinned primitives to the `SkinnedForwardLit` pipeline, attaches the
 /// per-vertex joints/weights buffer at vertex binding 1, and binds the
 /// SkinPalette descriptor set at descriptor set 2.
+///
+/// Uploads new `GpuMesh` instances inline per call — for cross-frame
+/// reuse, see `build_graphics_plans_maximal_with_meshes`.
 pub fn build_graphics_plans_maximal(
     asset:         &GltfAsset,
     pose:          &Pose,
@@ -719,6 +742,65 @@ pub fn collect_skin_palette_buffers(
         }
     }
     out
+}
+
+/// Cross-frame-cache variant of `build_graphics_plans_maximal`. Same
+/// behaviour except it borrows the pre-uploaded GpuMesh cache (built once
+/// at asset-load time via `upload_all_primitive_meshes`) instead of
+/// re-uploading every primitive every frame. This is the per-frame entry
+/// point for any renderer that animates the scene — re-uploading on each
+/// redraw both costs perf and risks destroying GPU resources still in
+/// flight from the previous frame's submission.
+pub fn build_graphics_plans_maximal_with_meshes(
+    asset:         &GltfAsset,
+    pose:          &Pose,
+    meshes:        &std::collections::HashMap<(usize, usize), Arc<GpuMesh>>,
+    material_sets: &[Option<vk::DescriptorSet>],
+    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    skinning:      &SkinningFrame,
+) -> ThinVec<GraphicsFramePlan> {
+    let draws = build_graphics_draws_with_matrices(asset, &pose.world);
+    let mut plans = ThinVec::with_capacity(draws.len());
+    for (i, d) in draws.iter().enumerate() {
+        let Some(mesh) = meshes.get(&(d.mesh as usize, d.primitive as usize)) else { continue };
+
+        let node = &asset.nodes[d.node as usize];
+        let is_skinned = node.skin.is_some()
+            && primitive_is_skinned(asset, d.mesh, d.primitive);
+        let skin_vb = if is_skinned {
+            skinning.skin_vertex_buffers.get(&(d.mesh as usize, d.primitive as usize)).copied()
+        } else { None };
+        let palette_set = if is_skinned {
+            skinning.palette_sets_by_node.get(&(d.node as usize)).copied()
+        } else { None };
+
+        let mut plan = GraphicsFramePlan::new_mesh(
+            crate::forge_master::frame::FrameId::new((i + 1) as i64),
+            d.material
+                .map(|m| format!("animated_prim_{i}_mat_{m}"))
+                .unwrap_or_else(|| format!("animated_prim_{i}")),
+            mesh.clone(),
+        )
+        .with_mvp(d.world_matrix);
+        if let Some(mat_idx) = d.material {
+            if let Some(Some(set)) = material_sets.get(mat_idx as usize) {
+                plan = plan.with_material_set(*set);
+            }
+        }
+        if let Some(&buf) = morph_buffers.get(&(d.mesh as usize, d.primitive as usize)) {
+            plan = plan.with_vertex_buffer_override(buf);
+        }
+        if is_skinned && skin_vb.is_some() && palette_set.is_some() {
+            plan = plan
+                .with_kind(GraphicsOreKind::SkinnedForwardLit)
+                .with_skin_vertex_buffer(skin_vb.unwrap())
+                .with_skin_palette_set(palette_set.unwrap());
+            plans.push(plan);
+        } else {
+            plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
+        }
+    }
+    plans
 }
 
 fn primitive_to_mesh_ore(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> MeshOre {

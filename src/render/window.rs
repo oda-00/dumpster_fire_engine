@@ -277,17 +277,19 @@ impl Window {
 
     pub fn build_compute_factory(
         &mut self,
-        proto: Proto<ComputeTag>,
-        forge: &mut ForgeMaster,
+        proto:  Proto<ComputeTag>,
+        forge:  &mut ForgeMaster,
+        device: &ash::Device,
     ) -> ForgeResult<FactoryHandle> {
-        self.factory_master.build_compute_proto(proto, forge)
+        self.factory_master.build_compute_proto(proto, forge, device)
     }
 
     pub fn build_graphics_factory(
         &mut self,
-        proto: Proto<GraphicsTag>,
+        proto:  Proto<GraphicsTag>,
+        device: &ash::Device,
     ) -> FactoryHandle {
-        self.factory_master.build_graphics_proto(proto)
+        self.factory_master.build_graphics_proto(proto, device)
     }
 
     /// Destroy all Vulkan resources (if any) and the factory master.

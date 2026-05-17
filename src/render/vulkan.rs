@@ -134,27 +134,42 @@ impl VulkanContext {
             vk::QueueFlags::COMPUTE
         };
 
+        // Optional manual override: pick a specific physical device by its
+        // index in the enumeration order. Useful in WSL where the loader
+        // may surface both /dev/dxg (DZN/D3D12 — a real GPU) and lavapipe
+        // (CPU); the user can force the GPU even when our heuristic loses.
+        let override_idx: Option<usize> = std::env::var("DUMPSTER_VK_DEVICE_INDEX")
+            .ok().and_then(|s| s.parse().ok());
+
         let mut chosen: Option<(vk::PhysicalDevice, u32)> = None;
         let mut best_score: (u8, u64) = (0, 0);
 
-        for pd in physicals {
+        println!("vulkan: enumerating {} physical device(s)", physicals.len());
+        for (pd_idx, pd) in physicals.into_iter().enumerate() {
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(pd) };
-            let Some((qfi, _)) = families
+            let qfi_opt = families
                 .iter()
                 .enumerate()
                 .find(|(_, f)| f.queue_flags.contains(required_flags))
-            else {
-                continue;
-            };
+                .map(|(i, _)| i as u32);
 
             let props = unsafe { instance.get_physical_device_properties(pd) };
+            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+                .to_string_lossy();
             let type_tier: u8 = match props.device_type {
                 vk::PhysicalDeviceType::DISCRETE_GPU   => 4,
                 vk::PhysicalDeviceType::INTEGRATED_GPU => 3,
                 vk::PhysicalDeviceType::VIRTUAL_GPU    => 2,
                 vk::PhysicalDeviceType::CPU            => 1,
                 _                                      => 0,
+            };
+            let type_str = match props.device_type {
+                vk::PhysicalDeviceType::DISCRETE_GPU   => "DISCRETE_GPU",
+                vk::PhysicalDeviceType::INTEGRATED_GPU => "INTEGRATED_GPU",
+                vk::PhysicalDeviceType::VIRTUAL_GPU    => "VIRTUAL_GPU",
+                vk::PhysicalDeviceType::CPU            => "CPU",
+                _                                      => "OTHER",
             };
 
             let mem = unsafe { instance.get_physical_device_memory_properties(pd) };
@@ -165,10 +180,27 @@ impl VulkanContext {
                 .map(|i| mem.memory_heaps[i].size)
                 .sum();
 
+            let usable = qfi_opt.is_some();
+            println!(
+                "vulkan:   [{pd_idx}] {name} — {type_str} (tier {type_tier}), \
+                 {:.0} MB DEVICE_LOCAL, queue_ok={usable}",
+                vram as f64 / 1_048_576.0,
+            );
+            let Some(qfi) = qfi_opt else { continue };
+
+            // Manual override beats heuristic.
+            if Some(pd_idx) == override_idx {
+                chosen = Some((pd, qfi));
+                best_score = (u8::MAX, u64::MAX);
+                println!("vulkan: device [{pd_idx}] forced via DUMPSTER_VK_DEVICE_INDEX");
+                continue;
+            }
+            if override_idx.is_some() { continue; }
+
             let score = (type_tier, vram);
             if score > best_score {
                 best_score = score;
-                chosen = Some((pd, qfi as u32));
+                chosen = Some((pd, qfi));
             }
         }
 

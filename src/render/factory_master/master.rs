@@ -44,18 +44,37 @@ impl FactoryMaster {
         &mut self,
         proto: Proto<ComputeTag>,
         forge: &mut ForgeMaster,
+        device: &ash::Device,
     ) -> ForgeResult<FactoryHandle> {
         let id = FactoryId::new(proto.id.raw());
         let factory = Factory::from_compute_proto(id, proto, forge)?;
-        Ok(self.insert(factory))
+        Ok(self.replace_or_insert(factory, device))
     }
 
     pub fn build_graphics_proto(
         &mut self,
-        proto: Proto<GraphicsTag>,
+        proto:  Proto<GraphicsTag>,
+        device: &ash::Device,
     ) -> FactoryHandle {
         let id = FactoryId::new(proto.id.raw());
         let factory = Factory::from_graphics_proto(id, proto);
+        self.replace_or_insert(factory, device)
+    }
+
+    /// Insert `factory`, or — if one with the same `FactoryId` is already
+    /// live — destroy the old one and substitute the new. This is the
+    /// per-frame entry point: each render frame rebuilds its compute /
+    /// graphics protos and they overwrite their predecessors in place
+    /// instead of accumulating forever (which would leak GPU memory and
+    /// cause every previous frame's draws to keep firing).
+    pub fn replace_or_insert(&mut self, factory: Factory, device: &ash::Device) -> FactoryHandle {
+        let id = factory.id;
+        if let Some(existing) = self.handle_of(id) {
+            // Drop the old factory first to free its compute Ingots /
+            // GraphicsFrame Arc<GpuMesh> references before the new factory
+            // takes ownership of the slot.
+            self.remove(existing, device);
+        }
         self.insert(factory)
     }
 
