@@ -29,6 +29,36 @@ pub struct Node {
     pub light:       Option<u32>,
     /// Indices into morph-target weights of the referenced mesh (if any).
     pub weights:     ThinVec<f32>,
+    /// EXT_mesh_gpu_instancing — when populated, this node fans the
+    /// referenced mesh into N draws with per-instance TRS overrides.
+    pub instances:   Option<NodeInstances>,
+}
+
+/// Per-instance transform overrides for an `EXT_mesh_gpu_instancing` node.
+/// All three accessors are optional; absent fields default to the identity
+/// (zero translation, identity rotation, unit scale). The three arrays
+/// are the same length — the number of instances.
+#[derive(Debug, Clone, Default)]
+pub struct NodeInstances {
+    /// Per-instance translation vectors. Empty → fill with zeros.
+    pub translation: ThinVec<[f32; 3]>,
+    /// Per-instance rotation quaternions (x, y, z, w). Empty → fill with
+    /// `[0, 0, 0, 1]`.
+    pub rotation:    ThinVec<[f32; 4]>,
+    /// Per-instance scales. Empty → fill with `[1, 1, 1]`.
+    pub scale:       ThinVec<[f32; 3]>,
+}
+
+impl NodeInstances {
+    /// Number of instances declared by this block — derived from the
+    /// longest populated stream so a partial spec (e.g. translation-only)
+    /// still drives a correct draw count.
+    pub fn len(&self) -> usize {
+        self.translation.len()
+            .max(self.rotation.len())
+            .max(self.scale.len())
+    }
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
 }
 
 #[derive(Debug, Clone)]

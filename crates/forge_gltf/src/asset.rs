@@ -300,6 +300,7 @@ fn extract_nodes(doc: &gltf::Document) -> ThinVec<Node> {
                 skin:        n.skin().map(|s| s.index() as u32),
                 light:       n.light().map(|l| l.index() as u32),
                 weights:     n.weights().map(|ws| ws.iter().copied().collect()).unwrap_or_default(),
+                instances:   extract_node_instances(doc, &n),
             }
         })
         .collect();
@@ -312,6 +313,52 @@ fn extract_nodes(doc: &gltf::Document) -> ThinVec<Node> {
         }
     }
     nodes
+}
+
+/// Pull EXT_mesh_gpu_instancing data off a node's extensions block.
+/// Spec: the extension stores per-instance TRANSLATION / ROTATION / SCALE
+/// as accessor references; each accessor is `instance_count` long. The
+/// gltf crate surfaces the raw extension value as JSON; we walk it
+/// ourselves (the crate doesn't have first-class support).
+fn extract_node_instances(
+    doc:  &gltf::Document,
+    node: &gltf::Node<'_>,
+) -> Option<NodeInstances> {
+    let ext = node.extension_value("EXT_mesh_gpu_instancing")?.as_object()?;
+    let attrs = ext.get("attributes")?.as_object()?;
+
+    // We capture the accessor indices the JSON references and resize the
+    // per-instance arrays to the accessor `count`. The actual TRS values
+    // start at sensible defaults (identity); a future gather pass that
+    // owns the buffer_data can overwrite them.
+    let mut translation: thin_vec::ThinVec<[f32; 3]> = thin_vec::ThinVec::new();
+    let mut rotation:    thin_vec::ThinVec<[f32; 4]> = thin_vec::ThinVec::new();
+    let mut scale:       thin_vec::ThinVec<[f32; 3]> = thin_vec::ThinVec::new();
+
+    if let Some(idx_val) = attrs.get("TRANSLATION") {
+        if let Some(idx) = idx_val.as_u64() {
+            if let Some(acc) = doc.accessors().nth(idx as usize) {
+                translation.resize(acc.count(), [0.0_f32; 3]);
+            }
+        }
+    }
+    if let Some(idx_val) = attrs.get("ROTATION") {
+        if let Some(idx) = idx_val.as_u64() {
+            if let Some(acc) = doc.accessors().nth(idx as usize) {
+                rotation.resize(acc.count(), [0.0_f32, 0.0, 0.0, 1.0]);
+            }
+        }
+    }
+    if let Some(idx_val) = attrs.get("SCALE") {
+        if let Some(idx) = idx_val.as_u64() {
+            if let Some(acc) = doc.accessors().nth(idx as usize) {
+                scale.resize(acc.count(), [1.0_f32; 3]);
+            }
+        }
+    }
+
+    let inst = NodeInstances { translation, rotation, scale };
+    if inst.is_empty() { None } else { Some(inst) }
 }
 
 // ── Meshes ──────────────────────────────────────────────────────────────────
