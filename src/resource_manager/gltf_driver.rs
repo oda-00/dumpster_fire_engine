@@ -564,17 +564,16 @@ pub fn upload_texture_rgba(
         // ── Step 1: transition every level UNDEFINED → TRANSFER_DST so the
         //    buffer-to-image copy targets level 0 and the subsequent blits
         //    can target levels 1..N safely.
-        device.cmd_pipeline_barrier(cb,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(), &[], &[],
-            &[image_layout_barrier_mips(image.handle,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::TRANSFER_WRITE,
-                0, mip_levels)],
-        );
+        let barriers_1 = [image_layout_barrier_mips(image.handle,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::PipelineStageFlags2::NONE,
+            vk::AccessFlags2::NONE,
+            vk::PipelineStageFlags2::COPY,
+            vk::AccessFlags2::TRANSFER_WRITE,
+            0, mip_levels)];
+        device.cmd_pipeline_barrier2(cb,
+            &vk::DependencyInfo::default().image_memory_barriers(&barriers_1));
 
         // ── Step 2: copy staging buffer into level 0.
         let region = vk::BufferImageCopy::default()
@@ -592,17 +591,16 @@ pub fn upload_texture_rgba(
         let (mut mip_w, mut mip_h) = (w as i32, h as i32);
         for i in 1..mip_levels {
             // Transition the source level from TRANSFER_DST to TRANSFER_SRC.
-            device.cmd_pipeline_barrier(cb,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(), &[], &[],
-                &[image_layout_barrier_mips(image.handle,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    vk::AccessFlags::TRANSFER_WRITE,
-                    vk::AccessFlags::TRANSFER_READ,
-                    i - 1, 1)],
-            );
+            let barriers_blit = [image_layout_barrier_mips(image.handle,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::PipelineStageFlags2::COPY,
+                vk::AccessFlags2::TRANSFER_WRITE,
+                vk::PipelineStageFlags2::BLIT,
+                vk::AccessFlags2::TRANSFER_READ,
+                i - 1, 1)];
+            device.cmd_pipeline_barrier2(cb,
+                &vk::DependencyInfo::default().image_memory_barriers(&barriers_blit));
 
             let next_w = (mip_w / 2).max(1);
             let next_h = (mip_h / 2).max(1);
@@ -634,29 +632,27 @@ pub fn upload_texture_rgba(
         //    are currently TRANSFER_SRC (we just blitted out of them);
         //    level mip-1 is still TRANSFER_DST (last blit destination).
         if mip_levels > 1 {
-            device.cmd_pipeline_barrier(cb,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(), &[], &[],
-                &[image_layout_barrier_mips(image.handle,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    vk::AccessFlags::TRANSFER_READ,
-                    vk::AccessFlags::SHADER_READ,
-                    0, mip_levels - 1)],
-            );
-        }
-        device.cmd_pipeline_barrier(cb,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(), &[], &[],
-            &[image_layout_barrier_mips(image.handle,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            let barriers_src = [image_layout_barrier_mips(image.handle,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::AccessFlags::TRANSFER_WRITE,
-                vk::AccessFlags::SHADER_READ,
-                mip_levels - 1, 1)],
-        );
+                vk::PipelineStageFlags2::BLIT,
+                vk::AccessFlags2::TRANSFER_READ,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::AccessFlags2::SHADER_SAMPLED_READ,
+                0, mip_levels - 1)];
+            device.cmd_pipeline_barrier2(cb,
+                &vk::DependencyInfo::default().image_memory_barriers(&barriers_src));
+        }
+        let barriers_last = [image_layout_barrier_mips(image.handle,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::PipelineStageFlags2::COPY,
+            vk::AccessFlags2::TRANSFER_WRITE,
+            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            vk::AccessFlags2::SHADER_SAMPLED_READ,
+            mip_levels - 1, 1)];
+        device.cmd_pipeline_barrier2(cb,
+            &vk::DependencyInfo::default().image_memory_barriers(&barriers_last));
 
         device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
         device.queue_submit(ctx.graphics_queue,
@@ -915,12 +911,18 @@ fn image_layout_barrier_mips(
     image:        vk::Image,
     old_layout:   vk::ImageLayout,
     new_layout:   vk::ImageLayout,
-    src_access:   vk::AccessFlags,
-    dst_access:   vk::AccessFlags,
+    src_stage:    vk::PipelineStageFlags2,
+    src_access:   vk::AccessFlags2,
+    dst_stage:    vk::PipelineStageFlags2,
+    dst_access:   vk::AccessFlags2,
     base_mip:     u32,
     level_count:  u32,
-) -> vk::ImageMemoryBarrier<'static> {
-    vk::ImageMemoryBarrier::default()
+) -> vk::ImageMemoryBarrier2<'static> {
+    vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access)
         .old_layout(old_layout)
         .new_layout(new_layout)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -930,6 +932,4 @@ fn image_layout_barrier_mips(
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(base_mip).level_count(level_count)
             .base_array_layer(0).layer_count(1))
-        .src_access_mask(src_access)
-        .dst_access_mask(dst_access)
 }

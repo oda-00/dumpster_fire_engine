@@ -590,21 +590,21 @@ impl Window {
             // ordering guarantees the compute dispatch FINISHES before this
             // draw starts, but does NOT guarantee the compute writes are
             // visible to the vertex stage's reads — that needs an explicit
-            // memory barrier. A global SHADER_WRITE → VERTEX_ATTRIBUTE_READ
-            // | SHADER_READ barrier covers both MorphBlend (read via
-            // VERTEX_INPUT as a vertex source) and SkinPalette (read via
-            // VERTEX_SHADER as an SSBO).
-            let mem_barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ
-                    | vk::AccessFlags::SHADER_READ);
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::VERTEX_INPUT | vk::PipelineStageFlags::VERTEX_SHADER,
-                vk::DependencyFlags::empty(),
-                &[mem_barrier], &[], &[],
-            );
+            // memory barrier. Sync2 per-stage masks let us scope this
+            // precisely to VERTEX_ATTRIBUTE_INPUT (for MorphBlend, read via
+            // vertex input) + VERTEX_SHADER (for SkinPalette, read as SSBO)
+            // instead of a coarse VERTEX_INPUT | VERTEX_SHADER.
+            let mem_barrier2 = vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
+                    | vk::PipelineStageFlags2::VERTEX_SHADER)
+                .dst_access_mask(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ
+                    | vk::AccessFlags2::SHADER_STORAGE_READ);
+            let memory_barriers = [mem_barrier2];
+            let dep_info = vk::DependencyInfo::default()
+                .memory_barriers(&memory_barriers);
+            device.cmd_pipeline_barrier2(command_buffer, &dep_info);
 
             device.cmd_begin_render_pass(command_buffer, &rp_begin, vk::SubpassContents::INLINE);
 

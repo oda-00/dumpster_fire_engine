@@ -88,7 +88,11 @@ impl VulkanContext {
             .application_version(0)
             .engine_name(&engine_name_c)
             .engine_version(0)
-            .api_version(vk::API_VERSION_1_2);
+            // Vulkan 1.3 baseline: needed for synchronization2 + dynamic
+            // rendering. Lavapipe (Mesa software Vulkan) reports 1.3 since
+            // Mesa 23.0; real GPUs likewise. The KHR ext fallback isn't
+            // worth maintaining when 1.3 is universally available.
+            .api_version(vk::API_VERSION_1_3);
 
         let instance_extensions: Vec<*const i8> = match display_handle {
             Some(dh) => ash_window::enumerate_required_extensions(dh)
@@ -310,14 +314,23 @@ impl VulkanContext {
         }
 
         let swapchain_ext = ash::khr::swapchain::NAME.as_ptr();
-        let device_extensions: Vec<*const i8> = if want_graphics {
-            vec![swapchain_ext]
-        } else {
-            Vec::new()
-        };
+        let sync2_ext     = ash::khr::synchronization2::NAME.as_ptr();
+        let mut device_extensions: Vec<*const i8> = Vec::new();
+        if want_graphics {
+            device_extensions.push(swapchain_ext);
+        }
+        device_extensions.push(sync2_ext);
+
+        // Enable the synchronization2 feature — required by every
+        // cmd_pipeline_barrier2 / queue_submit2 / VK_KHR_synchronization2
+        // call. Baked into Vulkan 1.3 but we explicitly request the KHR
+        // extension so the loader pulls it in on 1.2 drivers too.
+        let mut sync2_features = vk::PhysicalDeviceSynchronization2Features::default()
+            .synchronization2(true);
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
-            .enabled_extension_names(&device_extensions);
+            .enabled_extension_names(&device_extensions)
+            .push_next(&mut sync2_features);
 
         let device = match unsafe { instance.create_device(physical_device, &device_info, None) } {
             Ok(d) => d,

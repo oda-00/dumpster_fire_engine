@@ -368,16 +368,10 @@ impl StagedOre {
             storage_buffer_upload_barrier(self.primary.handle, self.primary.size),
             storage_buffer_upload_barrier(self.secondary.handle, self.secondary.size),
         ];
+        let dep_info = vk::DependencyInfo::default()
+            .buffer_memory_barriers(&barriers);
         unsafe {
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &barriers,
-                &[],
-            );
+            device.cmd_pipeline_barrier2(command_buffer, &dep_info);
         }
     }
 
@@ -828,31 +822,32 @@ impl GpuMesh {
             );
 
             // Release ownership to graphics family if they differ.
-            // src_access=TRANSFER_WRITE, dst_access=0 on the release side.
+            // Sync2: src_stage=COPY, dst_stage=NONE on the release half;
+            // the acquire half on graphics queue restates the stages.
             if need_ownership_xfer {
                 let release = [
-                    vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::empty())
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .dst_access_mask(vk::AccessFlags2::NONE)
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(vertex_buffer.handle)
                         .offset(0).size(vb_size),
-                    vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::empty())
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .dst_access_mask(vk::AccessFlags2::NONE)
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(index_buffer.handle)
                         .offset(0).size(ib_size),
                 ];
-                device.cmd_pipeline_barrier(
-                    transfer_cb,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                    vk::DependencyFlags::empty(),
-                    &[], &release, &[],
-                );
+                let dep_info = vk::DependencyInfo::default()
+                    .buffer_memory_barriers(&release);
+                device.cmd_pipeline_barrier2(transfer_cb, &dep_info);
             }
 
             device.end_command_buffer(transfer_cb).map_err(ForgeError::Vk)?;
@@ -884,28 +879,28 @@ impl GpuMesh {
                 ).map_err(ForgeError::Vk)?;
 
                 let acquire = [
-                    vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .src_access_mask(vk::AccessFlags2::NONE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT)
+                        .dst_access_mask(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ)
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(vertex_buffer.handle)
                         .offset(0).size(vb_size),
-                    vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::INDEX_READ)
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .src_access_mask(vk::AccessFlags2::NONE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::INDEX_INPUT)
+                        .dst_access_mask(vk::AccessFlags2::INDEX_READ)
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(index_buffer.handle)
                         .offset(0).size(ib_size),
                 ];
-                device.cmd_pipeline_barrier(
-                    gfx_cb,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::VERTEX_INPUT,
-                    vk::DependencyFlags::empty(),
-                    &[], &acquire, &[],
-                );
+                let dep_info = vk::DependencyInfo::default()
+                    .buffer_memory_barriers(&acquire);
+                device.cmd_pipeline_barrier2(gfx_cb, &dep_info);
 
                 device.end_command_buffer(gfx_cb).map_err(ForgeError::Vk)?;
 
@@ -1061,10 +1056,12 @@ pub fn non_zero_size(size: vk::DeviceSize) -> vk::DeviceSize {
 pub fn storage_buffer_upload_barrier(
     buffer: vk::Buffer,
     size: vk::DeviceSize,
-) -> vk::BufferMemoryBarrier<'static> {
-    vk::BufferMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+) -> vk::BufferMemoryBarrier2<'static> {
+    vk::BufferMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .buffer(buffer)
@@ -1075,10 +1072,12 @@ pub fn storage_buffer_upload_barrier(
 pub fn storage_buffer_readback_barrier(
     buffer: vk::Buffer,
     size: vk::DeviceSize,
-) -> vk::BufferMemoryBarrier<'static> {
-    vk::BufferMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+) -> vk::BufferMemoryBarrier2<'static> {
+    vk::BufferMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .buffer(buffer)

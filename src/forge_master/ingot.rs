@@ -137,27 +137,20 @@ impl Ingot {
         command_buffer: vk::CommandBuffer,
     ) {
         if let IngotArtifact::Image2d { result, .. } = &self.artifact {
-            let barrier = vk::ImageMemoryBarrier::default()
+            let barriers = [vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                .src_access_mask(vk::AccessFlags2::NONE)
+                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::GENERAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .image(result.handle)
-                .subresource_range(color_subresource_range());
-
-            unsafe {
-                device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
-            }
+                .subresource_range(color_subresource_range())];
+            let dep_info = vk::DependencyInfo::default()
+                .image_memory_barriers(&barriers);
+            unsafe { device.cmd_pipeline_barrier2(command_buffer, &dep_info); }
         }
     }
 
@@ -166,18 +159,10 @@ impl Ingot {
             IngotArtifact::Buffer {
                 result, readback, ..
             } => {
-                let barrier = storage_buffer_readback_barrier(result.handle, result.size);
-                unsafe {
-                    device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[barrier],
-                        &[],
-                    );
-                }
+                let barriers = [storage_buffer_readback_barrier(result.handle, result.size)];
+                let dep_info = vk::DependencyInfo::default()
+                    .buffer_memory_barriers(&barriers);
+                unsafe { device.cmd_pipeline_barrier2(command_buffer, &dep_info); }
                 let region = [vk::BufferCopy::default()
                     .src_offset(0)
                     .dst_offset(0)
@@ -189,27 +174,20 @@ impl Ingot {
             IngotArtifact::Image2d {
                 result, readback, ..
             } => {
-                let barrier = vk::ImageMemoryBarrier::default()
+                let barriers = [vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
                     .old_layout(vk::ImageLayout::GENERAL)
                     .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(result.handle)
-                    .subresource_range(color_subresource_range());
-
-                unsafe {
-                    device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
-                }
+                    .subresource_range(color_subresource_range())];
+                let dep_info = vk::DependencyInfo::default()
+                    .image_memory_barriers(&barriers);
+                unsafe { device.cmd_pipeline_barrier2(command_buffer, &dep_info); }
 
                 let region = [vk::BufferImageCopy::default()
                     .buffer_offset(0)
