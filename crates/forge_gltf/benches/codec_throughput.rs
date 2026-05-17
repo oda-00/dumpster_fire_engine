@@ -15,6 +15,7 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use forge_gltf::codec;
+use forge_gltf::{GltfAsset, Pose};
 
 // ─── UASTC (basisu_uastc) ───────────────────────────────────────────────────
 //
@@ -228,6 +229,41 @@ fn synth_draco_header_only() -> Vec<u8> {
     b
 }
 
+// ─── Pose sample (animation evaluator hot path) ─────────────────────────────
+//
+// Pose::sample drives the CPU side of every animated glTF asset every
+// frame. The inner cost is dominated by compose_trs (quat→mat4 expansion)
+// per animated joint + a recursive world-matrix composition pass. Bench it
+// against the largest local skinned asset (BrainStem, 57 joints) so future
+// regressions show up. Throughput is published in joints/sec via
+// Throughput::Elements.
+fn bench_pose_sample(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pose");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/models/BrainStem.glb");
+    if !path.exists() {
+        eprintln!("bench skipped: {} not found", path.display());
+        return;
+    }
+    let asset = GltfAsset::load(&path).expect("load BrainStem");
+    if asset.animations.is_empty() { return; }
+    let anim_idx = 0;
+    let total_joints = asset.skins.first().map_or(0, |s| s.joints.len());
+    let anim_duration = asset.animations[anim_idx].duration().max(1e-3);
+
+    group.throughput(Throughput::Elements(total_joints as u64));
+    group.bench_function("sample_brainstem", |b| {
+        let mut pose = Pose::rest(&asset);
+        let mut t = 0.0f32;
+        b.iter(|| {
+            t = (t + 0.016) % anim_duration; // ~60 Hz advance
+            pose.sample(black_box(&asset), black_box(&asset.animations[anim_idx]), black_box(t));
+            black_box(&pose.world);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_uastc,
@@ -235,5 +271,6 @@ criterion_group!(
     bench_webp_vp8l,
     bench_ktx2_parse,
     bench_draco_header,
+    bench_pose_sample,
 );
 criterion_main!(benches);

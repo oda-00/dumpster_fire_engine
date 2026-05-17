@@ -95,7 +95,7 @@ impl GltfAsset {
         // Set the base directory so external .png / .bin URIs can resolve
         // relative to the file we just read. Threading this through every
         // call site cleanly is more invasive than we want here, so we stash
-        // it in a per-thread cell that `load_single_image_custom` consults
+        // it in a per-thread cell that `load_images_custom` consults
         // when it sees a non-data:// URI.
         let parent = p.parent().unwrap_or_else(|| Path::new("."));
         let prev = set_image_base_dir(Some(parent.to_path_buf()));
@@ -873,104 +873,111 @@ fn preprocess_meshopt_buffer_views(
 /// for PNG and JPEG. Images that fail to decode are replaced with a 1×1
 /// black-transparent dummy so the rest of the asset loads normally.
 /// Decoding is done in parallel (one rayon task per image).
+/// Parallel-friendly owned form of a glTF image source. Built sequentially
+/// from `gltf::image::Source<'_>` (which borrows the document and isn't
+/// `Send`) and consumed in parallel by `load_single_image_custom` from a
+/// rayon worker.
+pub(crate) enum RawSource {
+    /// Inline bytes pulled from a buffer view or a `data:` URI. `mime`
+    /// disambiguates WebP / KTX2 / PNG / JPEG when the file's magic isn't
+    /// authoritative.
+    Bytes { bytes: Vec<u8>, mime: Option<String> },
+    /// Relative path resolved against the per-thread `IMAGE_BASE_DIR`
+    /// (set by `GltfAsset::load`). Falls back to an error if `load_slice`
+    /// was called without a base dir set.
+    ExternalUri { path_str: String, mime: Option<String> },
+    /// The gltf crate exposed a source variant we don't know how to honour,
+    /// or the bytes were truncated.
+    Unsupported,
+}
+
+/// Decode one image source (post-extraction) into a CPU-side `image::Data`.
+/// Dispatches between embedded-bytes, external-URI-on-disk, and the
+/// unsupported error path.
+fn load_single_image_custom(src: RawSource) -> GltfResult<gltf::image::Data> {
+    match src {
+        RawSource::Bytes { bytes, mime } => decode_image_bytes(&bytes, mime.as_deref()),
+        RawSource::ExternalUri { path_str, mime } => {
+            let path_str = path_str.strip_prefix("file://").unwrap_or(&path_str).to_owned();
+            let Some(base) = image_base_dir() else {
+                return Err(GltfError::UnsupportedFeature(
+                    format!("external URI image without filesystem context: {path_str}")
+                ));
+            };
+            let resolved = base.join(&path_str);
+            let bytes = std::fs::read(&resolved).map_err(|e| {
+                GltfError::Io(gltf::Error::Io(e))
+            })?;
+            decode_image_bytes(&bytes, mime.as_deref())
+        }
+        RawSource::Unsupported => Err(GltfError::UnsupportedFeature(
+            "image source variant not understood (truncated bytes or unknown URI)".to_owned()
+        )),
+    }
+}
+
+/// Convert a borrowed `gltf::image::Source<'_>` into the owned, `Send`able
+/// `RawSource` used by the parallel-decode path. Inline-bytes sources are
+/// copied out of the document; external URIs are stashed as relative
+/// paths for `load_single_image_custom` to resolve later.
+fn extract_raw_source(
+    src:         gltf::image::Source<'_>,
+    buffer_data: &[gltf::buffer::Data],
+) -> RawSource {
+    match src {
+        gltf::image::Source::View { view, mime_type } => {
+            let buf = &buffer_data[view.buffer().index()].0;
+            match buf.get(view.offset()..view.offset() + view.length()) {
+                Some(slice) => RawSource::Bytes {
+                    bytes: slice.to_vec(),
+                    mime:  Some(mime_type.to_owned()),
+                },
+                None => RawSource::Unsupported,
+            }
+        }
+        gltf::image::Source::Uri { uri, mime_type } => {
+            if let Some(rest) = uri.strip_prefix("data:") {
+                let mut parts = rest.splitn(2, ";base64,");
+                let uri_mime = parts.next().map(str::to_owned);
+                if let Some(b64) = parts.next() {
+                    if let Some(bytes) = simple_base64_decode(b64) {
+                        let mime = uri_mime.or_else(|| mime_type.map(str::to_owned));
+                        return RawSource::Bytes { bytes, mime };
+                    }
+                }
+                RawSource::Unsupported
+            } else {
+                RawSource::ExternalUri {
+                    path_str: uri.to_owned(),
+                    mime:     mime_type.map(str::to_owned),
+                }
+            }
+        }
+    }
+}
+
 fn load_images_custom(
     doc: &gltf::Document,
     buffer_data: &[gltf::buffer::Data],
 ) -> Vec<gltf::image::Data> {
     use rayon::prelude::*;
-
-    // Pre-extract owned sources sequentially (gltf types aren't Send).
-    enum RawSource {
-        Bytes { bytes: Vec<u8>, mime: Option<String> },
-        Unsupported,
-    }
-    let sources: Vec<RawSource> = doc.images().map(|img| {
-        match img.source() {
-            gltf::image::Source::View { view, mime_type } => {
-                let buf = &buffer_data[view.buffer().index()].0;
-                match buf.get(view.offset()..view.offset() + view.length()) {
-                    Some(slice) => RawSource::Bytes {
-                        bytes: slice.to_vec(),
-                        mime:  Some(mime_type.to_owned()),
-                    },
-                    None => RawSource::Unsupported,
-                }
-            }
-            gltf::image::Source::Uri { uri, mime_type } => {
-                if let Some(rest) = uri.strip_prefix("data:") {
-                    let mut parts = rest.splitn(2, ";base64,");
-                    let uri_mime = parts.next().map(str::to_owned);
-                    if let Some(b64) = parts.next() {
-                        if let Some(bytes) = simple_base64_decode(b64) {
-                            let mime = uri_mime.or_else(|| mime_type.map(str::to_owned));
-                            return RawSource::Bytes { bytes, mime };
-                        }
-                    }
-                }
-                RawSource::Unsupported
-            }
-        }
-    }).collect();
-
+    // Pre-extract owned sources sequentially (gltf types aren't Send),
+    // then decode in parallel through `load_single_image_custom`.
+    let sources: Vec<RawSource> = doc.images()
+        .map(|img| extract_raw_source(img.source(), buffer_data))
+        .collect();
     let dummy = || gltf::image::Data {
         pixels: vec![0, 0, 0, 0],
         format: gltf::image::Format::R8G8B8A8,
         width: 1, height: 1,
     };
-
-    // Decode in parallel — each image is independent.
-    sources.into_par_iter().map(|src| match src {
-        RawSource::Bytes { bytes, mime } => {
-            decode_image_bytes(&bytes, mime.as_deref()).unwrap_or_else(|_| dummy())
-        }
-        RawSource::Unsupported => dummy(),
-    }).collect()
-}
-
-fn load_single_image_custom(
-    source:      gltf::image::Source<'_>,
-    buffer_data: &[gltf::buffer::Data],
-) -> GltfResult<gltf::image::Data> {
-    match source {
-        gltf::image::Source::View { view, mime_type } => {
-            let buf = &buffer_data[view.buffer().index()].0;
-            let bytes = buf.get(view.offset()..view.offset() + view.length())
-                .ok_or(GltfError::InvalidAccessor("image view out of bounds"))?;
-            decode_image_bytes(bytes, Some(mime_type))
-        }
-        gltf::image::Source::Uri { uri, mime_type } => {
-            // data:// — base64-decode in-place.
-            if let Some(rest) = uri.strip_prefix("data:") {
-                let mut parts = rest.splitn(2, ";base64,");
-                let uri_mime = parts.next();
-                let b64 = parts.next()
-                    .ok_or(GltfError::InvalidAccessor("bad data URI format"))?;
-                let bytes = simple_base64_decode(b64)
-                    .ok_or(GltfError::InvalidAccessor("base64 decode failed"))?;
-                let eff_mime = uri_mime.or(mime_type);
-                return decode_image_bytes(&bytes, eff_mime);
-            }
-            // file:// or relative path — resolve against the base dir set by
-            // GltfAsset::load. Without a base dir (load_slice was called
-            // directly without filesystem context) we treat it as
-            // unsupported and let the caller substitute a fallback.
-            let path_str = uri.strip_prefix("file://").unwrap_or(uri);
-            let Some(base) = image_base_dir() else {
-                return Err(GltfError::UnsupportedFeature(
-                    format!("external URI image without filesystem context: {uri}")
-                ));
-            };
-            let resolved = base.join(path_str);
-            let bytes = std::fs::read(&resolved).map_err(|e| {
-                GltfError::Io(gltf::Error::Io(e))
-            })?;
-            decode_image_bytes(&bytes, mime_type)
-        }
-    }
+    sources.into_par_iter()
+        .map(|src| load_single_image_custom(src).unwrap_or_else(|_| dummy()))
+        .collect()
 }
 
 // Per-thread image-resolution base directory. Set by `GltfAsset::load` so
-// `load_single_image_custom` can resolve external URI references to disk;
+// `load_images_custom` can resolve external URI references to disk;
 // `load_slice` callers leave this `None` and external URIs error cleanly.
 thread_local! {
     static IMAGE_BASE_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =

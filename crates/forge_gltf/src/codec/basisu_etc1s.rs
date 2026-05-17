@@ -156,7 +156,12 @@ impl<'a> BitStream<'a> {
         }
     }
 
-    /// Read exactly `n` bits (n ≤ 16) in LSB-first order.
+    /// Read exactly `n` bits (n ≤ 16) in LSB-first order. The Huffman
+    /// decoder inlines peek-and-consume directly against `window` /
+    /// `bits_in` to avoid the redundant refill the general `read` would
+    /// re-issue, so this method is only reachable from the bit-stream
+    /// unit tests in this module.
+    #[cfg(test)]
     #[inline(always)]
     fn read(&mut self, n: u32) -> GltfResult<u32> {
         self.refill();
@@ -289,6 +294,11 @@ impl HuffTable {
 }
 
 /// Reverse the lowest `bits` bits of `v`, producing a `bits`-wide integer.
+/// Kept under `cfg(test)` because the production Huffman decoder uses LSB-
+/// first canonical codes (no reversal needed) — the helper is retained for
+/// the bit-reversal unit tests so future MSB-first variants can be
+/// validated against a known-correct reference.
+#[cfg(test)]
 #[inline(always)]
 fn reverse_bits(v: u32, bits: u32) -> u32 {
     if bits == 0 {

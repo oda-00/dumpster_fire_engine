@@ -419,7 +419,9 @@ unsafe fn prefix_sum_u8_sse2(data: &mut [u8]) {
 
     // Scalar tail.
     if i < len {
-        let mut prev = unsafe { _mm_extract_epi16(carry, 0) as u8 };
+        // Already inside an `unsafe fn`; the surrounding contract allows
+        // raw SSE intrinsics without an additional `unsafe` block.
+        let mut prev = _mm_extract_epi16(carry, 0) as u8;
         while i < len {
             unsafe {
                 let v = *ptr.add(i);
