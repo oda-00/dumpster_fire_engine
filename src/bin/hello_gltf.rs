@@ -62,21 +62,25 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        live: None,
         model_path: path,
         loader: None,
-        asset_loaded: None,
         start: Instant::now(),
+        asset_loaded: None,
+        live: None,
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
+/// Field order matters here too: `asset_loaded` owns
+/// `GpuMesh`/`GpuSkinBuffer`/`GltfCache`, all of which dereference
+/// `live.ctx.device` in their Drop. It must be listed BEFORE `live` so
+/// Rust drops it first.
 struct App {
-    live:         Option<LiveState>,
     model_path:   String,
     loader:       Option<AsyncGltfLoader>,
-    asset_loaded: Option<AssetState>,
     start:        Instant,
+    asset_loaded: Option<AssetState>,
+    live:         Option<LiveState>,
 }
 
 struct AssetState {
@@ -93,7 +97,10 @@ struct AssetState {
     /// Per-skinned-primitive joints+weights vertex buffer (binding 1).
     /// (mesh_idx, prim_idx) → owned GpuSkinBuffer.
     skin_vertex_buffers: std::collections::HashMap<(usize, usize), GpuSkinBuffer>,
-    /// Owned by the App for the lifetime of the asset.
+    /// Owns the GpuTexture / GpuMaterial GPU resources. We never read it
+    /// after upload — it's stored only so Drop runs in the right order
+    /// (after AssetState's other fields, before LiveState's device).
+    #[allow(dead_code)]
     cache:           GltfCache,
     /// Track if we've ever animated.
     last_anim_time:  f32,
@@ -104,17 +111,49 @@ struct AssetState {
     rest_aabb:       ([f32; 3], [f32; 3]),
 }
 
+/// Field order matters for `Drop`: Rust drops fields top-to-bottom, so
+/// every resource that depends on the device (descriptor pools, the
+/// renderer's windows + factories) must be declared BEFORE `ctx`. The
+/// renderer's `Drop` cleans up its windows + factory ingots; the pool
+/// and layout fields are raw handles that we destroy in our own Drop
+/// impl below — both happen before the VulkanContext (and its device)
+/// drops at the bottom.
 struct LiveState {
-    ctx:               VulkanContext,
-    renderer:          Renderer,
-    window_handle:     dumpster_fire_engine::render::WindowHandle,
-    winit_id:          WindowId,
     material_pool:     vk::DescriptorPool,
     material_layout:   vk::DescriptorSetLayout,
     /// Skin palette descriptor set pool — reset every frame so the
     /// per-frame palette set allocations recycle.
     skin_pool:         vk::DescriptorPool,
     skin_set_layout:   vk::DescriptorSetLayout,
+    renderer:          Renderer,
+    window_handle:     dumpster_fire_engine::render::WindowHandle,
+    winit_id:          WindowId,
+    /// MUST drop last — every other field above this borrows from
+    /// `ctx.device` (directly or transitively).
+    ctx:               VulkanContext,
+}
+
+impl Drop for LiveState {
+    fn drop(&mut self) {
+        // Drain the device before tearing down descriptor pools / layouts.
+        // The renderer's own Drop will then run and free its window's
+        // factories without racing in-flight submissions.
+        unsafe {
+            let _ = self.ctx.device.device_wait_idle();
+            if self.skin_pool != vk::DescriptorPool::null() {
+                self.ctx.device.destroy_descriptor_pool(self.skin_pool, None);
+            }
+            if self.skin_set_layout != vk::DescriptorSetLayout::null() {
+                self.ctx.device.destroy_descriptor_set_layout(self.skin_set_layout, None);
+            }
+            if self.material_pool != vk::DescriptorPool::null() {
+                self.ctx.device.destroy_descriptor_pool(self.material_pool, None);
+            }
+            // Note: material_layout is owned by the GraphicsMold (the
+            // renderer's window) and gets destroyed there. We just
+            // hold a copy of the handle.
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -398,6 +437,22 @@ impl ApplicationHandler for App {
                         let aspect = extent.width as f32 / extent.height.max(1) as f32;
                         let view_proj = view_projection_from_aabb(&state.rest_aabb, aspect);
 
+                        // Ensure the cache has a dummy material; pass it as
+                        // the per-frame fallback so draws whose primitive has
+                        // `material = None` (or assets with zero materials)
+                        // bind a valid set 1 instead of leaving the slot
+                        // undefined.
+                        let upload_ctx_for_dummy = GltfUploadCtx {
+                            device:              &live.ctx.device,
+                            memory_properties:   &live.ctx.memory_properties,
+                            graphics_queue:      live.ctx.queue,
+                            command_pool:        live.ctx.command_pool,
+                            material_set_layout: live.material_layout,
+                            material_pool:       live.material_pool,
+                        };
+                        let fallback_material = state.cache
+                            .ensure_dummy_material(&upload_ctx_for_dummy)
+                            .ok();
                         let plans = build_graphics_plans_maximal_with_meshes_vp(
                             &state.asset,
                             &state.pose,
@@ -406,6 +461,7 @@ impl ApplicationHandler for App {
                             &morph_buffers,
                             &skinning,
                             &view_proj,
+                            fallback_material,
                         );
                         let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "gltf_scene");
                         for plan in plans { proto.push_call(plan); }

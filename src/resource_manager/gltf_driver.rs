@@ -300,12 +300,18 @@ pub fn create_material_pool(
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
 pub struct GltfCache {
-    pub materials:   Arena<MaterialTag, GpuMaterial>,
-    pub textures:    Arena<TextureTag,  GpuTexture>,
-    dummy_tex:       Option<TextureHandle>,
+    pub materials:    Arena<MaterialTag, GpuMaterial>,
+    pub textures:     Arena<TextureTag,  GpuTexture>,
+    dummy_tex:        Option<TextureHandle>,
+    /// Sensible-defaults material used by any draw whose primitive has
+    /// `material = None` or whose asset has zero materials. Without this
+    /// the ForwardLit fragment shader's set 1 reads are undefined.
+    dummy_material:   Option<vk::DescriptorSet>,
+    /// Backing UBO for `dummy_material`; we own it to free it on drop.
+    dummy_material_ubo: Option<ForgeBuffer>,
     /// Device handle stored so `Drop` can destroy every GPU resource the
     /// cache owns. `ash::Device` clones bump an inner Arc — cheap.
-    device:          Option<ash::Device>,
+    device:           Option<ash::Device>,
 }
 
 impl GltfCache {
@@ -313,10 +319,12 @@ impl GltfCache {
     /// (textures, materials) when dropped.
     pub fn new(device: ash::Device) -> Self {
         Self {
-            materials:       Arena::new(),
-            textures:        Arena::new(),
-            dummy_tex:       None,
-            device:          Some(device),
+            materials:          Arena::new(),
+            textures:           Arena::new(),
+            dummy_tex:          None,
+            dummy_material:     None,
+            dummy_material_ubo: None,
+            device:             Some(device),
         }
     }
 
@@ -325,9 +333,11 @@ impl GltfCache {
     /// at process exit). New code should use `new(device)` instead.
     pub fn detached() -> Self {
         Self {
-            materials:       Arena::new(),
-            textures:        Arena::new(),
-            dummy_tex:       None,
+            materials:          Arena::new(),
+            textures:           Arena::new(),
+            dummy_tex:          None,
+            dummy_material:     None,
+            dummy_material_ubo: None,
             device:          None,
         }
     }
@@ -352,6 +362,99 @@ impl GltfCache {
         Ok(h)
     }
 
+    /// Ensure a default ForwardLit material descriptor set exists (white
+    /// 1×1 albedo, default factors) and return its `vk::DescriptorSet`.
+    /// Used as the fallback for any draw whose primitive lacks a material
+    /// or whose asset has zero materials — without it, validation flags
+    /// the shader's set 1 reads as accessing unbound descriptors.
+    pub fn ensure_dummy_material(
+        &mut self,
+        ctx: &GltfUploadCtx<'_>,
+    ) -> Result<vk::DescriptorSet, ForgeError> {
+        if let Some(set) = self.dummy_material {
+            return Ok(set);
+        }
+        let dummy_tex = self.ensure_dummy_texture(ctx)?;
+        let uniform   = MaterialUniform::default();
+        let device    = ctx.device;
+        let mp        = ctx.memory_properties;
+        let ubo_size  = std::mem::size_of::<MaterialUniform>() as vk::DeviceSize;
+
+        // DEVICE_LOCAL UBO with one-shot staging — mirrors `create_material`.
+        let mut staging = ForgeBuffer::create(
+            device, mp, ubo_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        staging.write_bytes(device, uniform.as_bytes())?;
+        let ubo = ForgeBuffer::create(
+            device, mp, ubo_size,
+            vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
+        unsafe {
+            let cb = alloc_single_cmd(device, ctx.command_pool)?;
+            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(ForgeError::Vk)?;
+            device.begin_command_buffer(cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            ).map_err(ForgeError::Vk)?;
+            let copy = vk::BufferCopy::default().size(ubo_size);
+            device.cmd_copy_buffer(cb, staging.handle, ubo.handle, &[copy]);
+            device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
+            device.queue_submit(
+                ctx.graphics_queue,
+                &[vk::SubmitInfo::default().command_buffers(&[cb])],
+                fence,
+            ).map_err(ForgeError::Vk)?;
+            device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+            device.destroy_fence(fence, None);
+            device.free_command_buffers(ctx.command_pool, &[cb]);
+            staging.destroy(device);
+        }
+
+        // Allocate one set + bind dummy texture into all five slots.
+        let set = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(ctx.material_pool)
+                    .set_layouts(&[ctx.material_set_layout]),
+            ).map_err(ForgeError::Vk)?.remove(0)
+        };
+        let buf_info = [vk::DescriptorBufferInfo::default()
+            .buffer(ubo.handle).offset(0).range(ubo_size)];
+        let dummy = self.textures.get(dummy_tex)
+            .expect("dummy_tex just inserted above");
+        let img_info = [vk::DescriptorImageInfo::default()
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_view(dummy.image.view)
+            .sampler(dummy.sampler)];
+        let mut writes = vec![
+            vk::WriteDescriptorSet::default()
+                .dst_set(set).dst_binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&buf_info),
+        ];
+        for i in 0..TEXTURE_SLOT_COUNT {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set).dst_binding((i + 1) as u32)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&img_info),
+            );
+        }
+        unsafe { device.update_descriptor_sets(&writes, &[]); }
+
+        self.dummy_material_ubo = Some(ubo);
+        self.dummy_material     = Some(set);
+        Ok(set)
+    }
+
+    pub fn dummy_material_set(&self) -> Option<vk::DescriptorSet> {
+        self.dummy_material
+    }
+
     pub fn texture(&self, h: TextureHandle) -> Option<&GpuTexture> {
         self.textures.get(h)
     }
@@ -369,6 +472,9 @@ impl GltfCache {
         unsafe {
             for mat in self.materials.values_mut() { mat.destroy(device); }
             for tex in self.textures.values_mut()  { tex.destroy(device); }
+            if let Some(mut ubo) = self.dummy_material_ubo.take() {
+                ubo.destroy(device);
+            }
         }
     }
 }

@@ -877,7 +877,8 @@ pub fn build_graphics_plans_maximal_with_meshes(
     skinning:      &SkinningFrame,
 ) -> ThinVec<GraphicsFramePlan> {
     build_graphics_plans_maximal_with_meshes_vp(
-        asset, pose, meshes, material_sets, morph_buffers, skinning, &IDENTITY_MAT4,
+        asset, pose, meshes, material_sets, morph_buffers, skinning,
+        &IDENTITY_MAT4, None,
     )
 }
 
@@ -893,13 +894,14 @@ const IDENTITY_MAT4: [f32; 16] = [
 /// rasterizer actually gets clip-space coordinates. Pass identity to keep
 /// the original "MVP = world only" behaviour.
 pub fn build_graphics_plans_maximal_with_meshes_vp(
-    asset:         &GltfAsset,
-    pose:          &Pose,
-    meshes:        &std::collections::HashMap<(usize, usize), Arc<GpuMesh>>,
-    material_sets: &[Option<vk::DescriptorSet>],
-    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
-    skinning:      &SkinningFrame,
-    view_proj:     &[f32; 16],
+    asset:             &GltfAsset,
+    pose:              &Pose,
+    meshes:            &std::collections::HashMap<(usize, usize), Arc<GpuMesh>>,
+    material_sets:     &[Option<vk::DescriptorSet>],
+    morph_buffers:     &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    skinning:          &SkinningFrame,
+    view_proj:         &[f32; 16],
+    fallback_material: Option<vk::DescriptorSet>,
 ) -> ThinVec<GraphicsFramePlan> {
     let draws = build_graphics_draws_with_matrices(asset, &pose.world);
     let mut plans = ThinVec::with_capacity(draws.len());
@@ -925,10 +927,15 @@ pub fn build_graphics_plans_maximal_with_meshes_vp(
             mesh.clone(),
         )
         .with_mvp(mvp);
-        if let Some(mat_idx) = d.material {
-            if let Some(Some(set)) = material_sets.get(mat_idx as usize) {
-                plan = plan.with_material_set(*set);
-            }
+        // Try the asset's material first, then fall back to the cache's
+        // dummy white material so every ForwardLit / SkinnedForwardLit
+        // draw has a bound set 1 (the shader reads from it
+        // unconditionally; missing means UB and a validation error).
+        let resolved_set = d.material
+            .and_then(|m| material_sets.get(m as usize).copied().flatten())
+            .or(fallback_material);
+        if let Some(set) = resolved_set {
+            plan = plan.with_material_set(set);
         }
         if let Some(&buf) = morph_buffers.get(&(d.mesh as usize, d.primitive as usize)) {
             plan = plan.with_vertex_buffer_override(buf);
