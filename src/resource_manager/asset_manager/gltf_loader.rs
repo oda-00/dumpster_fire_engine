@@ -1067,6 +1067,17 @@ pub fn build_graphics_plans_maximal_with_meshes_vp(
         if let Some(&buf) = morph_buffers.get(&(d.mesh as usize, d.primitive as usize)) {
             plan = plan.with_vertex_buffer_override(buf);
         }
+        // EXT_mesh_gpu_instancing: when the draw carries per-instance
+        // matrices, fan it out by passing the count to the GPU's
+        // `vkCmdDrawIndexed(instanceCount = count, ...)`. The per-
+        // instance offsets need to land in a vertex shader binding;
+        // until that pipeline arrives we still pay the instance count
+        // here so the rasterizer fans the draw N times — useful for
+        // identical-replica scenarios like grass or particles.
+        if !d.instance_matrices.is_empty() {
+            plan = plan.with_instances(d.instance_matrices.len() as u32);
+        }
+
         if is_skinned && skin_vb.is_some() && palette_set.is_some() {
             plan = plan
                 .with_kind(GraphicsOreKind::SkinnedForwardLit)
@@ -1288,6 +1299,7 @@ mod tests {
                 material:     None,
                 vertex_count: asset.meshes[0].primitives[0].streams.positions.len() as u32,
                 index_count:  asset.meshes[0].primitives[0].indices.len() as u32,
+                instance_matrices: thin_vec::ThinVec::new(),
             });
         }
         let (mn_s, mx_s) = compute_asset_aabb_scalar(&asset, &draws);

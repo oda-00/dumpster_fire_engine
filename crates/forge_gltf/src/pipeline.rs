@@ -93,11 +93,18 @@ pub struct GraphicsDraw {
     /// Index into the node array — the source of this draw's world matrix.
     pub node:           u32,
     /// Column-major world matrix to push as model-or-MVP constant.
+    /// For instanced draws this is the base node world matrix; the
+    /// per-instance offset matrices live in `instance_matrices`.
     pub world_matrix:   [f32; 16],
     pub topology:       PrimitiveTopology,
     pub material:       Option<u32>,
     pub vertex_count:   u32,
     pub index_count:    u32,
+    /// `EXT_mesh_gpu_instancing`: when populated, the draw uses
+    /// `vkCmdDrawIndexed(idx, instance_count = matrices.len(), ...)`
+    /// and `instance_matrices[i] * world_matrix` is the per-instance
+    /// model transform. Empty → single instance with `world_matrix`.
+    pub instance_matrices: ThinVec<[f32; 16]>,
 }
 
 // ── Vertex layout the ForwardLit pipeline reads ─────────────────────────────
@@ -204,6 +211,25 @@ pub fn build_graphics_draws_with_matrices(
         } else {
             world.get(node_idx).copied().unwrap_or(IDENTITY_M4)
         };
+
+        // EXT_mesh_gpu_instancing: build the per-instance offset matrix
+        // list. Each instance's offset is composed from its T, R, S
+        // components (defaulting individually when missing) per spec.
+        let instance_matrices: ThinVec<[f32; 16]> = match &node.instances {
+            Some(inst) if !inst.is_empty() => {
+                let count = inst.len();
+                let mut v: ThinVec<[f32; 16]> = ThinVec::with_capacity(count);
+                for i in 0..count {
+                    let t = inst.translation.get(i).copied().unwrap_or([0.0, 0.0, 0.0]);
+                    let r = inst.rotation   .get(i).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                    let s = inst.scale      .get(i).copied().unwrap_or([1.0, 1.0, 1.0]);
+                    v.push(crate::scene::compose_trs(t, r, s));
+                }
+                v
+            }
+            _ => ThinVec::new(),
+        };
+
         for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
             out.push(GraphicsDraw {
                 kind:         GltfGraphicsKind::ForwardLit,
@@ -215,6 +241,7 @@ pub fn build_graphics_draws_with_matrices(
                 material:     prim.material,
                 vertex_count: prim.streams.positions.len() as u32,
                 index_count:  prim.indices.len() as u32,
+                instance_matrices: instance_matrices.clone(),
             });
         }
     }
