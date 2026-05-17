@@ -149,6 +149,64 @@ fn interpolate(e0: u8, e1: u8, w: u8) -> u8 {
     (((64 - w) * e0 + w * e1 + 32) >> 6) as u8
 }
 
+/// Interpolate one RGBA texel — four `interpolate(...)` calls collapsed
+/// into a single SSE2 mul-add chain. Used by every UASTC mode's inner
+/// per-texel loop. Lanes 0..3 of the output hold R, G, B, A.
+///
+/// On x86_64 the SSE2 path packs e0/e1 into 16-bit lanes, computes
+/// `(64-w)*e0 + w*e1 + 32` as a single `_mm_madd_epi16`, shifts right 6,
+/// then `_mm_packus_epi16` saturates back to u8. Replaces 4 scalar
+/// interpolate calls (28 ALU ops) with 5 SIMD ops.
+#[inline]
+fn interpolate_rgba(lo: [u8; 4], hi: [u8; 4], w: u8) -> [u8; 4] {
+    #[cfg(target_arch = "x86_64")]
+    unsafe { return interpolate_rgba_sse2(lo, hi, w); }
+    #[cfg(not(target_arch = "x86_64"))]
+    [
+        interpolate(lo[0], hi[0], w),
+        interpolate(lo[1], hi[1], w),
+        interpolate(lo[2], hi[2], w),
+        interpolate(lo[3], hi[3], w),
+    ]
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn interpolate_rgba_sse2(lo: [u8; 4], hi: [u8; 4], w: u8) -> [u8; 4] {
+    use std::arch::x86_64::*;
+    unsafe {
+        // Unpack the 4 endpoint pairs into 16-bit lanes:
+        //   lo16 = [lo[0], lo[1], lo[2], lo[3], 0, 0, 0, 0]  (u16)
+        //   hi16 = [hi[0], hi[1], hi[2], hi[3], 0, 0, 0, 0]
+        let lo_u32 = u32::from_le_bytes(lo);
+        let hi_u32 = u32::from_le_bytes(hi);
+        let zero = _mm_setzero_si128();
+        let lo_packed = _mm_cvtsi32_si128(lo_u32 as i32);
+        let hi_packed = _mm_cvtsi32_si128(hi_u32 as i32);
+        let lo16 = _mm_unpacklo_epi8(lo_packed, zero);
+        let hi16 = _mm_unpacklo_epi8(hi_packed, zero);
+        // weights16 = [64-w, w, 64-w, w, 64-w, w, 64-w, w]
+        let wval = w as i16;
+        let weights16 = _mm_set_epi16(wval, 64 - wval, wval, 64 - wval, wval, 64 - wval, wval, 64 - wval);
+        // Build [lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], lo[3], hi[3]] in u16
+        // so _mm_madd_epi16 computes (lo*(64-w) + hi*w) per channel.
+        let interleaved = _mm_unpacklo_epi16(lo16, hi16);
+        // Each pair of 16-bit lanes (lo, hi) * (64-w, w) → one 32-bit sum.
+        let products = _mm_madd_epi16(interleaved, weights16);
+        // Add the rounding constant 32 to each 32-bit lane.
+        let rounded = _mm_add_epi32(products, _mm_set1_epi32(32));
+        // Shift right by 6.
+        let scaled = _mm_srli_epi32(rounded, 6);
+        // Pack back to 16-bit then 8-bit (saturate to 0..255).
+        let scaled16 = _mm_packus_epi32(scaled, scaled);
+        let scaled8 = _mm_packus_epi16(scaled16, scaled16);
+        // Extract the low 4 bytes.
+        let packed = _mm_cvtsi128_si32(scaled8) as u32;
+        packed.to_le_bytes()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Subset helpers
 // ---------------------------------------------------------------------------
@@ -219,15 +277,13 @@ fn decode_ss_sp_rgb(
     let b1 = expand_endpoint(b1, ep_bits);
 
     let wtab = weight_table(wt_bits);
+    let lo = [r0, g0, b0, 255];
+    let hi = [r1, g1, b1, 255];
     for t in 0..16usize {
         let wi = br.read(wt_bits) as usize;
         let w = wtab[wi];
-        write_pixel(out, t,
-            interpolate(r0, r1, w),
-            interpolate(g0, g1, w),
-            interpolate(b0, b1, w),
-            255,
-        );
+        let rgba = interpolate_rgba(lo, hi, w);
+        write_pixel(out, t, rgba[0], rgba[1], rgba[2], 255);
     }
 }
 
@@ -261,15 +317,13 @@ fn decode_ss_sp_rgba(
     let a1 = expand_endpoint(a1, ep_bits_a);
 
     let wtab = weight_table(wt_bits);
+    let lo = [r0, g0, b0, a0];
+    let hi = [r1, g1, b1, a1];
     for t in 0..16usize {
         let wi = br.read(wt_bits) as usize;
         let w = wtab[wi];
-        write_pixel(out, t,
-            interpolate(r0, r1, w),
-            interpolate(g0, g1, w),
-            interpolate(b0, b1, w),
-            interpolate(a0, a1, w),
-        );
+        let rgba = interpolate_rgba(lo, hi, w);
+        write_pixel(out, t, rgba[0], rgba[1], rgba[2], rgba[3]);
     }
 }
 
@@ -317,13 +371,15 @@ fn decode_ss_dp_rgba(
     for i in 0..16 {
         w1[i] = wtab[br.read(wt_bits) as usize];
     }
+    let lo = [r0, g0, b0, a0];
+    let hi = [r1, g1, b1, a1];
     for t in 0..16usize {
-        write_pixel(out, t,
-            interpolate(r0, r1, w0[t]),
-            interpolate(g0, g1, w0[t]),
-            interpolate(b0, b1, w0[t]),
-            interpolate(a0, a1, w1[t]),
-        );
+        // Plane 0 uses w0 for RGB; plane 1 uses w1 for A. RGB and A share
+        // the same endpoint pair, so we only need an extra scalar interpolate
+        // for A — RGB benefits from the SIMD path.
+        let rgba_p0 = interpolate_rgba(lo, hi, w0[t]);
+        let a       = interpolate(a0, a1, w1[t]);
+        write_pixel(out, t, rgba_p0[0], rgba_p0[1], rgba_p0[2], a);
     }
 }
 
@@ -357,21 +413,16 @@ fn decode_2s_sp_rgb(
 
     // Subset 0: endpoints (r0,g0,b0) – (r1,g1,b1)
     // Subset 1: endpoints (r2,g2,b2) – (r3,g3,b3)
-    let ep_r = [[r0, r1], [r2, r3]];
-    let ep_g = [[g0, g1], [g2, g3]];
-    let ep_b = [[b0, b1], [b2, b3]];
+    let lo_sub = [[r0, g0, b0, 255], [r2, g2, b2, 255]];
+    let hi_sub = [[r1, g1, b1, 255], [r3, g3, b3, 255]];
 
     let wtab = weight_table(wt_bits);
     for t in 0..16usize {
         let s = subset_of(pattern, t);
         let wi = br.read(wt_bits) as usize;
         let w = wtab[wi];
-        write_pixel(out, t,
-            interpolate(ep_r[s][0], ep_r[s][1], w),
-            interpolate(ep_g[s][0], ep_g[s][1], w),
-            interpolate(ep_b[s][0], ep_b[s][1], w),
-            255,
-        );
+        let rgba = interpolate_rgba(lo_sub[s], hi_sub[s], w);
+        write_pixel(out, t, rgba[0], rgba[1], rgba[2], 255);
     }
 }
 
@@ -407,22 +458,16 @@ fn decode_2s_sp_rgba(
     let b3 = expand_endpoint(br.read(ep_bits), ep_bits);
     let a3 = expand_endpoint(br.read(ep_bits), ep_bits);
 
-    let ep_r = [[r0, r1], [r2, r3]];
-    let ep_g = [[g0, g1], [g2, g3]];
-    let ep_b = [[b0, b1], [b2, b3]];
-    let ep_a = [[a0, a1], [a2, a3]];
+    let lo_sub = [[r0, g0, b0, a0], [r2, g2, b2, a2]];
+    let hi_sub = [[r1, g1, b1, a1], [r3, g3, b3, a3]];
 
     let wtab = weight_table(wt_bits);
     for t in 0..16usize {
         let s = subset_of(pattern, t);
         let wi = br.read(wt_bits) as usize;
         let w = wtab[wi];
-        write_pixel(out, t,
-            interpolate(ep_r[s][0], ep_r[s][1], w),
-            interpolate(ep_g[s][0], ep_g[s][1], w),
-            interpolate(ep_b[s][0], ep_b[s][1], w),
-            interpolate(ep_a[s][0], ep_a[s][1], w),
-        );
+        let rgba = interpolate_rgba(lo_sub[s], hi_sub[s], w);
+        write_pixel(out, t, rgba[0], rgba[1], rgba[2], rgba[3]);
     }
 }
 
@@ -460,15 +505,13 @@ fn decode_mode6(br: &mut BitReader, out: &mut [u8; 64]) {
     let a = (a_raw >> 2) as u8;
 
     let wtab = &WEIGHTS4;
+    let lo = [r0, g0, b0, a];
+    let hi = [r1, g1, b1, a];
     for t in 0..16usize {
         let wi = br.read(4) as usize;
         let w = wtab[wi];
-        write_pixel(out, t,
-            interpolate(r0, r1, w),
-            interpolate(g0, g1, w),
-            interpolate(b0, b1, w),
-            a,
-        );
+        let rgba = interpolate_rgba(lo, hi, w);
+        write_pixel(out, t, rgba[0], rgba[1], rgba[2], a);
     }
 }
 
@@ -485,15 +528,13 @@ fn decode_mode9(br: &mut BitReader, out: &mut [u8; 64]) {
     let b1 = expand_endpoint(br.read(9),  9);
 
     let wtab = &WEIGHTS2;
+    let lo = [r0, g0, b0, 255];
+    let hi = [r1, g1, b1, 255];
     for t in 0..16usize {
         let wi = br.read(2) as usize;
         let w = wtab[wi];
-        write_pixel(out, t,
-            interpolate(r0, r1, w),
-            interpolate(g0, g1, w),
-            interpolate(b0, b1, w),
-            255,
-        );
+        let rgba = interpolate_rgba(lo, hi, w);
+        write_pixel(out, t, rgba[0], rgba[1], rgba[2], 255);
     }
 }
 
@@ -842,6 +883,23 @@ mod tests {
         // e0=0, e1=128, w=43 → (0*21 + 43*128 + 32) / 64 = (5504+32)/64 = 86
         let result = interpolate(0, 128, WEIGHTS2[2]);
         assert_eq!(result, 86);
+    }
+
+    /// 4-channel SIMD interpolate must match four scalar calls byte-for-byte.
+    #[test]
+    fn interpolate_rgba_simd_matches_scalar() {
+        let lo = [12u8, 200, 0, 255];
+        let hi = [240u8, 5, 128, 0];
+        for &w in &[0u8, 16, 32, 43, 64] {
+            let scalar = [
+                interpolate(lo[0], hi[0], w),
+                interpolate(lo[1], hi[1], w),
+                interpolate(lo[2], hi[2], w),
+                interpolate(lo[3], hi[3], w),
+            ];
+            let simd = interpolate_rgba(lo, hi, w);
+            assert_eq!(scalar, simd, "weight {w}: scalar={:?} simd={:?}", scalar, simd);
+        }
     }
 
     /// Partition table sanity check.
