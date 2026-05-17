@@ -97,6 +97,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         IngotSpec::Buffer {
             size: output_size,
             save_path: None,
+            extra_usage: ash::vk::BufferUsageFlags::empty(),
         },
         [1, 1, 1], // local_size_x=64 → 64 invocations cover the buffer
     ));

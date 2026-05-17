@@ -27,7 +27,7 @@ use dumpster_fire_engine::render::{
     Window, WindowId as RenderWindowId,
 };
 use dumpster_fire_engine::resource_manager::asset_manager::{
-    build_graphics_plans_with_pose_and_materials, build_skin_morph_proto,
+    build_graphics_plans_full, build_skin_morph_proto, collect_morph_output_buffers,
     forge_gltf::{GltfAsset, Pose}, load_asset, register_skin_morph_forges,
 };
 use dumpster_fire_engine::resource_manager::gltf_driver::{
@@ -241,25 +241,35 @@ impl ApplicationHandler for App {
                     let needs_rebuild = advanced || state.last_anim_time < 0.0;
                     if needs_rebuild {
                         // GPU skin/morph compute pass — dispatched per frame.
-                        // Falls through silently when the asset has no skins or morph
-                        // targets, or when the factory build itself errors (we still
-                        // want the visible draws to render either way).
-                        if let Some(compute_proto) = build_skin_morph_proto(
-                            &state.asset, &state.pose, ProtoId::new(2), 0,
-                        ) {
-                            if let Err(e) = live.renderer.build_compute_factory(
-                                live.window_handle, compute_proto,
+                        // The factory's ingots own the compute output buffers; we
+                        // harvest morph-blended vertex buffers and pass them to the
+                        // graphics-plan builder so each morphed draw rasterises the
+                        // posed vertices directly out of the compute output.
+                        let morph_buffers: std::collections::HashMap<_, _> =
+                            if let Some(compute_proto) = build_skin_morph_proto(
+                                &state.asset, &state.pose, ProtoId::new(2), 0,
                             ) {
-                                eprintln!("skin/morph compute dispatch error: {e:?}");
-                            }
-                        }
+                                match live.renderer.build_compute_factory(
+                                    live.window_handle, compute_proto,
+                                ) {
+                                    Ok(handle) => live.renderer.window(live.window_handle)
+                                        .and_then(|w| w.factory_master.get(handle))
+                                        .map(|f| collect_morph_output_buffers(&state.asset, f))
+                                        .unwrap_or_default(),
+                                    Err(e) => {
+                                        eprintln!("skin/morph compute dispatch error: {e:?}");
+                                        Default::default()
+                                    }
+                                }
+                            } else { Default::default() };
 
                         let upload_ctx = live.ctx.mesh_upload_ctx();
-                        match build_graphics_plans_with_pose_and_materials(
+                        match build_graphics_plans_full(
                             &state.asset,
                             &state.pose,
                             &upload_ctx,
                             &state.material_sets,
+                            &morph_buffers,
                         ) {
                             Ok(plans) => {
                                 let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "gltf_scene");

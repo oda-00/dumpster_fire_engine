@@ -113,6 +113,7 @@ pub fn ore_for_buffer(
         IngotSpec::Buffer {
             size: output_size,
             save_path: None,
+            extra_usage: ash::vk::BufferUsageFlags::empty(),
         },
         workgroups,
     )
@@ -148,6 +149,13 @@ pub struct GraphicsFramePlan {
     /// Optional pre-resolved material descriptor set (set 1). `None` uses
     /// whatever was last bound (typically the dummy white material).
     pub material_set: Option<vk::DescriptorSet>,
+    /// Optional alternative vertex buffer — overrides `mesh.vertex_buffer`
+    /// when present. Used to feed a compute-shader-posed vertex stream
+    /// (MorphBlend output) into the draw without re-uploading. The buffer
+    /// must outlive the recorded command buffer; typically that means it's
+    /// owned by the same FactoryMaster as the compute Ingot that produced
+    /// it, and the compute factory is rebuilt every frame in lockstep.
+    pub vertex_buffer_override: Option<vk::Buffer>,
 }
 
 impl GraphicsFramePlan {
@@ -169,6 +177,7 @@ impl GraphicsFramePlan {
             mesh: None,
             mvp:  MAT4_IDENTITY,
             material_set: None,
+            vertex_buffer_override: None,
         }
     }
 
@@ -189,12 +198,21 @@ impl GraphicsFramePlan {
             mesh: Some(mesh),
             mvp:  MAT4_IDENTITY,
             material_set: None,
+            vertex_buffer_override: None,
         }
     }
 
     /// Set the pre-resolved Vulkan descriptor set for the material (set 1).
     pub fn with_material_set(mut self, set: vk::DescriptorSet) -> Self {
         self.material_set = Some(set);
+        self
+    }
+
+    /// Override the vertex buffer bound at draw time — used to substitute
+    /// a compute-shader-posed buffer (MorphBlend output) for the rest-pose
+    /// `GpuMesh` allocation. The index buffer still comes from the mesh.
+    pub fn with_vertex_buffer_override(mut self, buffer: vk::Buffer) -> Self {
+        self.vertex_buffer_override = Some(buffer);
         self
     }
 
@@ -230,6 +248,7 @@ impl GraphicsFramePlan {
             mesh:           self.mesh,
             mvp:            self.mvp,
             material_set:   self.material_set,
+            vertex_buffer_override: self.vertex_buffer_override,
         }
     }
 }
@@ -254,4 +273,5 @@ pub struct GraphicsFrame {
     pub mesh: Option<Arc<GpuMesh>>,
     pub mvp:  [f32; 16],
     pub material_set: Option<vk::DescriptorSet>,
+    pub vertex_buffer_override: Option<vk::Buffer>,
 }

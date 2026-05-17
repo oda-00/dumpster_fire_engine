@@ -196,10 +196,25 @@ pub fn upload_to_ore(up: &PipelineUpload, output_size: vk::DeviceSize) -> Ore {
     } else {
         OreInput::Bytes(primary)
     };
+    // Compute outputs that downstream graphics draws read directly need
+    // extra buffer-usage flags so the same allocation is bindable as a
+    // vertex source or SSBO without a copy step.
+    //   MorphBlend → posed vertex buffer  → VERTEX_BUFFER
+    //   SkinPalette → joint-palette SSBO → STORAGE_BUFFER (already default,
+    //                  redundant flag is a no-op but documents intent)
+    let extra_usage = match kind {
+        OreKind::MorphBlend  => vk::BufferUsageFlags::VERTEX_BUFFER,
+        OreKind::SkinPalette => vk::BufferUsageFlags::STORAGE_BUFFER,
+        _                    => vk::BufferUsageFlags::empty(),
+    };
     let mut ore = Ore::new(
         kind,
         input,
-        IngotSpec::Buffer { size: non_zero_size(output_size), save_path: None },
+        IngotSpec::Buffer {
+            size: non_zero_size(output_size),
+            save_path: None,
+            extra_usage,
+        },
         up.workgroups,
     );
     // Override secondary_bytes via a wrapper: store on a side ore is not
@@ -341,6 +356,56 @@ pub fn register_skin_morph_forges(master: &mut ForgeMaster) -> ForgeResult<()> {
     Ok(())
 }
 
+/// Identifier for one morph-blended primitive's compute output. The
+/// `build_skin_morph_proto` function assigns these IDs in a deterministic
+/// order so callers can pull the right `vk::Buffer` out of the resulting
+/// `Factory`'s ingot list via `morph_output_frame_id(mesh_idx, prim_idx)`.
+pub fn morph_output_frame_id(asset: &GltfAsset, mesh_idx: usize, prim_idx: usize) -> Option<FrameId> {
+    // Mirror the iteration order of build_skin_morph_proto: skins first
+    // (one frame id each), then morphed primitives.
+    let mut next: i64 = 1;
+    for skin_idx in 0..asset.skins.len() {
+        // Only counts when the skin actually has joints; matches the proto.
+        if let Some(skin) = asset.skins.get(skin_idx) {
+            if !skin.joints.is_empty() { next += 1; }
+        }
+    }
+    for (mi, mesh) in asset.meshes.iter().enumerate() {
+        for (pi, prim) in mesh.primitives.iter().enumerate() {
+            if prim.morph_targets.is_empty() { continue; }
+            if mi == mesh_idx && pi == prim_idx {
+                return Some(FrameId::new(next));
+            }
+            next += 1;
+        }
+    }
+    None
+}
+
+/// Walk a compute factory built from a `build_skin_morph_proto` proto and
+/// produce a map from (mesh_idx, prim_idx) to the morph-blended posed
+/// vertex buffer. Pass the map to
+/// `build_graphics_plans_with_pose_and_materials_morphs` (next function)
+/// so each draw binds the right compute output as its vertex source.
+pub fn collect_morph_output_buffers(
+    asset:   &GltfAsset,
+    factory: &crate::render::factory_master::factory::Factory,
+) -> std::collections::HashMap<(usize, usize), vk::Buffer> {
+    let mut out = std::collections::HashMap::new();
+    for (mi, mesh) in asset.meshes.iter().enumerate() {
+        for (pi, prim) in mesh.primitives.iter().enumerate() {
+            if prim.morph_targets.is_empty() { continue; }
+            let Some(id) = morph_output_frame_id(asset, mi, pi) else { continue };
+            let Some(frame) = factory.frame_by_id(id) else { continue };
+            let Some(ingot) = frame.ingots.first() else { continue };
+            if let Some(buf) = ingot.result_buffer() {
+                out.insert((mi, pi), buf.handle);
+            }
+        }
+    }
+    out
+}
+
 /// Build a compute `Proto` that drives the SkinPalette + MorphBlend
 /// pipelines for every relevant skin/primitive in `asset` for the current
 /// `pose`. Pass it to `Renderer::build_compute_factory` each frame.
@@ -476,6 +541,24 @@ pub fn build_graphics_plans_with_pose_and_materials(
     upload_ctx:    &MeshUploadCtx,
     material_sets: &[Option<vk::DescriptorSet>],
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    build_graphics_plans_full(asset, pose, upload_ctx, material_sets, &Default::default())
+}
+
+/// Maximal-power per-frame plan builder.
+///
+/// `morph_buffers` maps `(mesh_idx, prim_idx)` → the `vk::Buffer` produced
+/// by a corresponding MorphBlend compute Ore in this frame (typically built
+/// via `collect_morph_output_buffers(asset, &compute_factory)`). When a
+/// draw's primitive carries morph targets and the map has a matching entry,
+/// the draw is recorded with `vertex_buffer_override = Some(buf)` so the
+/// rasterizer fetches the posed vertices directly out of the compute output.
+pub fn build_graphics_plans_full(
+    asset:         &GltfAsset,
+    pose:          &Pose,
+    upload_ctx:    &MeshUploadCtx,
+    material_sets: &[Option<vk::DescriptorSet>],
+    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     let mut cache: Vec<Vec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
         .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
         .collect();
@@ -502,6 +585,9 @@ pub fn build_graphics_plans_with_pose_and_materials(
             if let Some(Some(set)) = material_sets.get(mat_idx as usize) {
                 plan = plan.with_material_set(*set);
             }
+        }
+        if let Some(&buf) = morph_buffers.get(&(d.mesh as usize, d.primitive as usize)) {
+            plan = plan.with_vertex_buffer_override(buf);
         }
         plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
     }

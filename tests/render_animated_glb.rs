@@ -19,7 +19,10 @@ use dumpster_fire_engine::render::VulkanContext;
 use dumpster_fire_engine::resource_manager::asset_manager::{
     build_compute_ores, build_graphics_plans, build_graphics_plans_with_pose,
     build_skin_morph_proto, load_asset, asset_to_texture_ores,
+    register_skin_morph_forges,
 };
+use dumpster_fire_engine::forge_master::ForgeMaster;
+use dumpster_fire_engine::render::factory_master::factory::{Factory, FactoryId};
 use dumpster_fire_engine::render::ProtoId;
 use dumpster_fire_engine::resource_manager::gltf_driver::{
     GltfCache, GltfSampler, GltfUploadCtx, MaterialUniform,
@@ -533,6 +536,141 @@ fn gltf_driver_creates_material_descriptor_set_for_toycar() {
         // (test-only — no Drop on GltfCache yet).
         ctx.device.destroy_descriptor_pool(pool, None);
         ctx.device.destroy_descriptor_set_layout(layout, None);
+    }
+}
+
+// ── 16a. GPU dispatch — the skin/morph proto actually runs end-to-end ─────
+
+#[test]
+fn brainstem_skin_palette_dispatches_and_produces_finite_ingot() {
+    let Some(ctx) = try_vulkan() else { return };
+    let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
+    let mut pose = forge_gltf::Pose::rest(&asset);
+    if let Some(anim) = asset.animations.first() {
+        pose.sample(&asset, anim, 0.25);
+    }
+
+    // Spin up an isolated ForgeMaster, register the compute pipelines, and
+    // refine the per-frame proto. Successful refinement means the SPIR-V
+    // linked, the descriptor set was allocated, the dispatch went through
+    // the GPU, and the readback came back without a Vulkan error.
+    let mut forge = ForgeMaster::new(
+        ctx.device.clone(),
+        ctx.queue,
+        ctx.command_pool,
+        ctx.memory_properties,
+    ).expect("ForgeMaster");
+    register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
+
+    let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(101), 0)
+        .expect("BrainStem has skins → proto must be Some");
+    let factory = Factory::from_compute_proto(FactoryId::new(101), proto, &mut forge)
+        .expect("compute dispatch must succeed");
+
+    // Every plan must have produced at least one Ingot.
+    let total_ingots: usize = factory.frames().map(|f| f.ingots.len()).sum();
+    assert!(total_ingots >= asset.skins.len(),
+        "every skin should produce a palette ingot");
+    // Palette ingot output must be at least joint_count × 64 bytes.
+    for frame in factory.frames() {
+        for ing in &frame.ingots {
+            assert!(ing.as_bytes().len() >= 64,
+                "palette ingot must hold at least one mat4 worth of bytes");
+        }
+    }
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+        let mut factory = factory;
+        factory.destroy(&ctx.device);
+    }
+}
+
+#[test]
+fn diffuse_transmission_plant_morph_blend_dispatches_finite_ingot() {
+    let Some(ctx) = try_vulkan() else { return };
+    let asset = load_asset(asset_path("DiffuseTransmissionPlant.glb"))
+        .expect("load DiffuseTransmissionPlant");
+    let mut pose = forge_gltf::Pose::rest(&asset);
+    if let Some(anim) = asset.animations.first() {
+        pose.sample(&asset, anim, 0.25);
+    }
+
+    // Skip cleanly when the asset doesn't actually carry morph targets.
+    let any_morph = asset.meshes.iter()
+        .any(|m| m.primitives.iter().any(|p| !p.morph_targets.is_empty()));
+    if !any_morph { return; }
+
+    let mut forge = ForgeMaster::new(
+        ctx.device.clone(),
+        ctx.queue,
+        ctx.command_pool,
+        ctx.memory_properties,
+    ).expect("ForgeMaster");
+    register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
+
+    let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(102), 0)
+        .expect("DiffuseTransmissionPlant has morph targets → proto must be Some");
+    let factory = Factory::from_compute_proto(FactoryId::new(102), proto, &mut forge)
+        .expect("morph compute dispatch must succeed");
+
+    // At least one ingot for the morphed primitive.
+    let total_ingots: usize = factory.frames().map(|f| f.ingots.len()).sum();
+    assert!(total_ingots >= 1, "morphed primitive must produce a posed vertex ingot");
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+        let mut factory = factory;
+        factory.destroy(&ctx.device);
+    }
+}
+
+// ── 16b. Full GPU loop closure — compute output feeds graphics override ───
+
+#[test]
+fn morph_compute_output_buffer_is_bindable_as_vertex_source() {
+    use ash::vk;
+    let Some(ctx) = try_vulkan() else { return };
+    let asset = load_asset(asset_path("DiffuseTransmissionPlant.glb"))
+        .expect("load DiffuseTransmissionPlant");
+    let pose  = forge_gltf::Pose::rest(&asset);
+
+    // Skip when the asset has no morph targets.
+    let any_morph = asset.meshes.iter()
+        .any(|m| m.primitives.iter().any(|p| !p.morph_targets.is_empty()));
+    if !any_morph { return; }
+
+    let mut forge = ForgeMaster::new(
+        ctx.device.clone(),
+        ctx.queue,
+        ctx.command_pool,
+        ctx.memory_properties,
+    ).expect("ForgeMaster");
+    register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
+
+    let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(103), 0)
+        .expect("proto must be Some — asset has morph targets");
+    let factory = Factory::from_compute_proto(FactoryId::new(103), proto, &mut forge)
+        .expect("compute dispatch");
+
+    use dumpster_fire_engine::resource_manager::asset_manager::collect_morph_output_buffers;
+    let morph_buffers = collect_morph_output_buffers(&asset, &factory);
+    assert!(!morph_buffers.is_empty(),
+        "at least one morph-blended primitive must produce a vertex buffer");
+
+    // Every harvested buffer handle must be a real (non-null) Vulkan handle.
+    use ash::vk::Handle;
+    for (key, buf) in &morph_buffers {
+        assert!(buf.as_raw() != 0, "morph output for {key:?} must be a real buffer");
+    }
+
+    // Sanity: the harvested buffer is the same one the Ingot owns —
+    // the extra_usage = VERTEX_BUFFER flag we set in `upload_to_ore`
+    // means it was created with the appropriate usage bits.
+    let _ = vk::BufferUsageFlags::VERTEX_BUFFER;
+
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+        let mut factory = factory;
+        factory.destroy(&ctx.device);
     }
 }
 

@@ -540,9 +540,14 @@ impl Window {
                     );
                 }
                 if let Some(mesh) = &call.mesh {
+                    // Use the compute-shader-posed vertex buffer when the call
+                    // carries an override (MorphBlend output); otherwise the
+                    // rest-pose mesh buffer.
+                    let vb = call.vertex_buffer_override
+                        .unwrap_or(mesh.vertex_buffer.handle);
                     device.cmd_bind_vertex_buffers(
                         command_buffer, 0,
-                        &[mesh.vertex_buffer.handle], &[0],
+                        &[vb], &[0],
                     );
                     device.cmd_bind_index_buffer(
                         command_buffer,

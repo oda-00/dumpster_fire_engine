@@ -205,6 +205,13 @@ pub enum IngotSpec {
     Buffer {
         size: vk::DeviceSize,
         save_path: Option<PathBuf>,
+        /// Extra `vk::BufferUsageFlags` to OR into the default
+        /// `STORAGE_BUFFER | TRANSFER_SRC`. Compute pipelines whose output
+        /// is consumed directly by a graphics draw (e.g. MorphBlend posed
+        /// vertices, SkinPalette mat4[]) should pass `VERTEX_BUFFER` or
+        /// `STORAGE_BUFFER` here so the same buffer is bindable downstream
+        /// without an extra copy.
+        extra_usage: vk::BufferUsageFlags,
     },
     Image2d {
         width: u32,
