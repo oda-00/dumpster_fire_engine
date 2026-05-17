@@ -24,6 +24,7 @@ pub mod pose;
 pub mod preprocess;
 pub mod scene;
 pub mod skin;
+pub mod splat;
 pub mod texture;
 
 pub use animation::*;
@@ -39,4 +40,5 @@ pub use pose::*;
 pub use preprocess::*;
 pub use scene::*;
 pub use skin::*;
+pub use splat::*;
 pub use texture::*;

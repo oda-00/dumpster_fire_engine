@@ -83,6 +83,10 @@ pub struct GltfAsset {
     pub animations:    ThinVec<Animation>,
     pub cameras:       ThinVec<Camera>,
     pub lights:        ThinVec<Light>,
+    /// KHR_gaussian_splatting (Khronos baseline Feb 2026) — zero or more
+    /// per-node splat sets. Empty for every asset that doesn't carry the
+    /// extension, which is the vast majority today.
+    pub gaussian_splats: ThinVec<crate::splat::GaussianSplatSet>,
 }
 
 impl GltfAsset {
@@ -215,6 +219,7 @@ fn extract_asset_with_patches(
         animations:    extract_animations(doc, buffers, patches)?,
         cameras:       extract_cameras(doc),
         lights:        extract_lights(doc),
+        gaussian_splats: crate::splat::extract_splats(doc, buffers),
     })
 }
 
