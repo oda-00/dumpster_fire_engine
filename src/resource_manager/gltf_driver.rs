@@ -877,28 +877,20 @@ unsafe fn alloc_single_cmd(
     device: &ash::Device,
     pool:   vk::CommandPool,
 ) -> Result<vk::CommandBuffer, ForgeError> {
-    device.allocate_command_buffers(
-        &vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1),
-    ).map(|mut v| v.remove(0)).map_err(ForgeError::Vk)
+    unsafe {
+        device.allocate_command_buffers(
+            &vk::CommandBufferAllocateInfo::default()
+                .command_pool(pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1),
+        ).map(|mut v| v.remove(0)).map_err(ForgeError::Vk)
+    }
 }
 
-fn image_layout_barrier(
-    image:      vk::Image,
-    old_layout: vk::ImageLayout,
-    new_layout: vk::ImageLayout,
-    src_access: vk::AccessFlags,
-    dst_access: vk::AccessFlags,
-) -> vk::ImageMemoryBarrier<'static> {
-    image_layout_barrier_mips(image, old_layout, new_layout, src_access, dst_access, 0, 1)
-}
-
-/// Same as `image_layout_barrier` but for a specific mip-range. Used by
-/// the mipmap generation pipeline in `upload_texture_rgba` to flip
+/// Image-memory layout transition barrier for a specific mip range. Used
+/// by the mipmap generation pipeline in `upload_texture_rgba` to flip
 /// individual levels between TRANSFER_SRC and TRANSFER_DST while
-/// building the chain.
+/// building the chain; single-level callers pass `base_mip=0, level_count=1`.
 fn image_layout_barrier_mips(
     image:        vk::Image,
     old_layout:   vk::ImageLayout,

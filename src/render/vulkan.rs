@@ -141,8 +141,34 @@ impl VulkanContext {
         let override_idx: Option<usize> = std::env::var("DUMPSTER_VK_DEVICE_INDEX")
             .ok().and_then(|s| s.parse().ok());
 
+        // WSL detection — `/proc/version` carries "microsoft" / "WSL" on
+        // WSL1+2 kernels. Cached to a single read; missing or unreadable
+        // means "not WSL", which is fine for the diagnostic-only use.
+        let is_wsl = std::fs::read_to_string("/proc/version")
+            .map(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.contains("microsoft") || lower.contains("wsl")
+            })
+            .unwrap_or(false);
+        if is_wsl {
+            println!("vulkan: detected WSL host");
+            // Warn if the user has forced lavapipe on WSL — that's almost
+            // certainly a mistake; the dzn ICD (real D3D12-backed GPU) is
+            // what they actually want.
+            if let Ok(icds) = std::env::var("VK_ICD_FILENAMES") {
+                if icds.to_ascii_lowercase().contains("lvp_icd") {
+                    eprintln!(
+                        "vulkan: VK_ICD_FILENAMES={icds} forces lavapipe on a WSL host\n\
+                         vulkan: DZN (the real D3D12-backed GPU) will NOT be considered.\n\
+                         vulkan: unset VK_ICD_FILENAMES (or point it at dzn_icd.x86_64.json)\n\
+                         vulkan: to let the loader pick the GPU."
+                    );
+                }
+            }
+        }
+
         let mut chosen: Option<(vk::PhysicalDevice, u32)> = None;
-        let mut best_score: (u8, u64) = (0, 0);
+        let mut best_score: (u8, u64, u8) = (0, 0, 0);
 
         println!("vulkan: enumerating {} physical device(s)", physicals.len());
         for (pd_idx, pd) in physicals.into_iter().enumerate() {
@@ -181,9 +207,25 @@ impl VulkanContext {
                 .sum();
 
             let usable = qfi_opt.is_some();
+            // On WSL, the DZN driver reports the underlying physical GPU's
+            // name verbatim (e.g. "NVIDIA GeForce …", "Microsoft …",
+            // "Direct3D 12 …") rather than lavapipe's "llvmpipe …". A
+            // tertiary score component favours those when two devices
+            // share the same tier, so DZN wins over lavapipe when both
+            // surface as the loader's enumeration.
+            let dzn_pref: u8 = {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("microsoft")
+                    || lower.contains("direct3d")
+                    || lower.contains("d3d12")
+                    || lower.contains("dzn") { 2 }
+                else if lower.contains("llvmpipe")
+                    || lower.contains("swiftshader") { 0 }
+                else { 1 }
+            };
             println!(
                 "vulkan:   [{pd_idx}] {name} — {type_str} (tier {type_tier}), \
-                 {:.0} MB DEVICE_LOCAL, queue_ok={usable}",
+                 {:.0} MB DEVICE_LOCAL, queue_ok={usable}, dzn_pref={dzn_pref}",
                 vram as f64 / 1_048_576.0,
             );
             let Some(qfi) = qfi_opt else { continue };
@@ -191,13 +233,13 @@ impl VulkanContext {
             // Manual override beats heuristic.
             if Some(pd_idx) == override_idx {
                 chosen = Some((pd, qfi));
-                best_score = (u8::MAX, u64::MAX);
+                best_score = (u8::MAX, u64::MAX, u8::MAX);
                 println!("vulkan: device [{pd_idx}] forced via DUMPSTER_VK_DEVICE_INDEX");
                 continue;
             }
             if override_idx.is_some() { continue; }
 
-            let score = (type_tier, vram);
+            let score = (type_tier, vram, dzn_pref);
             if score > best_score {
                 best_score = score;
                 chosen = Some((pd, qfi));

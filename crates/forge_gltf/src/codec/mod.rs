@@ -5,6 +5,7 @@
 
 pub mod basisu_etc1s;
 pub mod basisu_uastc;
+pub mod bc;
 pub mod draco;
 pub mod extensions;
 pub mod ktx2;

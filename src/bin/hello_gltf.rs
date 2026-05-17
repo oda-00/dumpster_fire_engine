@@ -30,7 +30,7 @@ use dumpster_fire_engine::resource_manager::asset_manager::{
     build_graphics_plans_maximal_with_meshes_vp, build_skin_morph_proto,
     collect_morph_output_buffers, collect_skin_palette_buffers,
     compute_asset_aabb, view_projection_from_aabb,
-    forge_gltf::{GltfAsset, Pose}, load_asset,
+    forge_gltf::{GltfAsset, Pose},
     pack_primitive_skin_attrs, primitive_is_skinned, register_skin_morph_forges,
     upload_all_primitive_meshes, SkinningFrame,
 };

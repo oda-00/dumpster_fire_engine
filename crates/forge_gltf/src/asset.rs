@@ -1063,6 +1063,130 @@ fn decode_standard_image(
 
 /// Decode a KTX2 container to raw RGBA8 pixels.
 /// Handles BasisLZ (ETC1S) and raw (UASTC) supercompression.
+/// Decode an uncompressed KTX2 level (`SupercompressionScheme::None`)
+/// into a tightly-packed RGBA8 buffer. Dispatches on the Vulkan format
+/// enum to cover the formats glTF assets actually use — the BC-block
+/// family (BC1/2/3/4/5/7), the common UNORM/SRGB byte layouts (R8 /
+/// R8G8 / R8G8B8 / R8G8B8A8 / B8G8R8A8), and `R16G16B16A16_SFLOAT`. The
+/// special "UASTC in a vkFormat=0 wrapper" case routes through the
+/// BasisU decoder. Anything else surfaces as an explicit unsupported
+/// error rather than silent black output.
+fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -> GltfResult<Vec<u8>> {
+    use crate::codec::bc;
+    let n = (w as usize) * (h as usize);
+    Ok(match vk_format {
+        0 => crate::codec::basisu_uastc::transcode_to_rgba8(level_data, w, h).to_vec(),
+
+        // Single-channel UNORM/SRGB → splat the value into R, fill G=B=0, A=255.
+        9 | 15 => {
+            let take = level_data.len().min(n);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..take {
+                out[i * 4]     = level_data[i];
+                out[i * 4 + 3] = 255;
+            }
+            out
+        }
+
+        // Two-channel UNORM/SRGB → R, G, 0, 255.
+        16 | 22 => {
+            let take = level_data.len().min(n * 2);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..(take / 2) {
+                out[i * 4]     = level_data[i * 2];
+                out[i * 4 + 1] = level_data[i * 2 + 1];
+                out[i * 4 + 3] = 255;
+            }
+            out
+        }
+
+        // Three-channel UNORM/SRGB → R, G, B, 255.
+        23 | 29 => {
+            let take = level_data.len().min(n * 3);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..(take / 3) {
+                out[i * 4]     = level_data[i * 3];
+                out[i * 4 + 1] = level_data[i * 3 + 1];
+                out[i * 4 + 2] = level_data[i * 3 + 2];
+                out[i * 4 + 3] = 255;
+            }
+            out
+        }
+
+        // R8G8B8A8 UNORM/SRGB → direct passthrough (truncate to expected
+        // length to defend against trailing padding).
+        37 | 43 => {
+            let take = level_data.len().min(n * 4);
+            level_data[..take].to_vec()
+        }
+
+        // B8G8R8A8 UNORM/SRGB → swizzle BGRA → RGBA per texel.
+        44 | 50 => {
+            let take = level_data.len().min(n * 4);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..(take / 4) {
+                out[i * 4]     = level_data[i * 4 + 2];
+                out[i * 4 + 1] = level_data[i * 4 + 1];
+                out[i * 4 + 2] = level_data[i * 4];
+                out[i * 4 + 3] = level_data[i * 4 + 3];
+            }
+            out
+        }
+
+        // R16G16B16A16_SFLOAT — convert each half-precision lane to a
+        // clamped u8 (the LDR pipeline accepts this lossy cast for HDR
+        // sources; a future tone-mapping pass would do better).
+        97 => {
+            let take = level_data.len().min(n * 8);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..(take / 8) {
+                for c in 0..4 {
+                    let bytes = [level_data[i * 8 + c * 2], level_data[i * 8 + c * 2 + 1]];
+                    let raw = u16::from_le_bytes(bytes);
+                    out[i * 4 + c] = half_to_u8(raw);
+                }
+            }
+            out
+        }
+
+        // ── Block-compressed (BC1-BC7). VK_FORMAT_BC* enums:
+        //   131 BC1_RGB_UNORM,  132 BC1_RGB_SRGB,
+        //   133 BC1_RGBA_UNORM, 134 BC1_RGBA_SRGB,
+        //   135 BC2_UNORM, 136 BC2_SRGB, 137 BC3_UNORM, 138 BC3_SRGB,
+        //   139 BC4_UNORM, 140 BC4_SNORM, 141 BC5_UNORM, 142 BC5_SNORM,
+        //   143 BC6H_UFLOAT, 144 BC6H_SFLOAT, 145 BC7_UNORM, 146 BC7_SRGB.
+        131 | 132 | 133 | 134 => bc::decode_bc1(level_data, w, h).to_vec(),
+        135 | 136                => bc::decode_bc2(level_data, w, h).to_vec(),
+        137 | 138                => bc::decode_bc3(level_data, w, h).to_vec(),
+        139 | 140                => bc::decode_bc4(level_data, w, h).to_vec(),
+        141 | 142                => bc::decode_bc5(level_data, w, h).to_vec(),
+        145 | 146                => bc::decode_bc7(level_data, w, h).to_vec(),
+
+        other => return Err(GltfError::UnsupportedFeature(
+            format!("KTX2 uncompressed vkFormat {other}")
+        )),
+    })
+}
+
+/// IEEE-754 binary16 (half) → clamped u8. We bias to [0,1] before scaling
+/// so HDR values land at 255 rather than wrapping; sub-zero clamps to 0.
+fn half_to_u8(h: u16) -> u8 {
+    let sign = (h >> 15) & 1;
+    let exp  = ((h >> 10) & 0x1f) as i32;
+    let mant = (h & 0x3ff) as u32;
+    let f = if exp == 0 && mant == 0 { 0.0 }
+            else if exp == 0          { (mant as f32) * (1.0 / (1u32 << 24) as f32) }
+            else if exp == 0x1f       { if mant == 0 { f32::INFINITY } else { f32::NAN } }
+            else {
+                let m = (mant | 0x400) as f32;
+                m * (1u32 << (exp - 25).max(-126) as u32) as f32
+            };
+    let f = if sign == 1 { -f } else { f };
+    if !f.is_finite() || f <= 0.0 { 0 }
+    else if f >= 1.0              { 255 }
+    else                           { (f * 255.0 + 0.5) as u8 }
+}
+
 fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
     use crate::codec::ktx2::{Ktx2, SupercompressionScheme};
 
@@ -1074,20 +1198,7 @@ fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
         .ok_or(GltfError::InvalidAccessor("KTX2 has no level 0 data"))?;
 
     let rgba: Vec<u8> = match ktx.supercompression {
-        SupercompressionScheme::None => {
-            // vkFormat == 0 (VK_FORMAT_UNDEFINED) → UASTC 4×4 blocks.
-            // Any other format we attempt raw R8G8B8A8 passthrough.
-            if ktx.vk_format == 0 {
-                crate::codec::basisu_uastc::transcode_to_rgba8(level_data, w, h).to_vec()
-            } else if ktx.vk_format == 37 {
-                // VK_FORMAT_R8G8B8A8_UNORM — already decoded.
-                level_data.to_vec()
-            } else {
-                return Err(GltfError::UnsupportedFeature(
-                    format!("KTX2 uncompressed vkFormat {}", ktx.vk_format),
-                ));
-            }
-        }
+        SupercompressionScheme::None => decode_ktx2_uncompressed(ktx.vk_format, level_data, w, h)?,
         SupercompressionScheme::BasisLZ => {
             // ETC1S via BasisLZ supercompression.
             crate::codec::basisu_etc1s::transcode_to_rgba8(
