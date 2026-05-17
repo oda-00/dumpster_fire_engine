@@ -49,8 +49,20 @@ pub struct GraphicsState {
 
     // One depth image per swapchain image. Per-image (not per-frame) so we
     // never race a depth write against a draw still reading from the
-    // previous frame's same image-index.
+    // previous frame's same image-index. Depth-stencil format + MSAA
+    // sample count matches the render pass's depth attachment.
     pub depth_images: ThinVec<ForgeImage>,
+
+    /// Per-image MSAA colour attachment. Empty when `msaa_samples == TYPE_1`
+    /// (lavapipe / D3D12 software path); populated otherwise so the
+    /// rasterizer writes into a multi-sample image that gets resolved to
+    /// the swapchain image at end-of-subpass.
+    pub msaa_color_images: ThinVec<ForgeImage>,
+
+    /// Render-pass sample count this swapchain was built against. The
+    /// pipeline's `rasterization_samples` and every framebuffer attachment
+    /// have to match.
+    pub msaa_samples: vk::SampleCountFlags,
 
     // pipeline + framebuffers
     pub mold: GraphicsMold,
@@ -103,6 +115,7 @@ impl Window {
     }
 
     /// Fully initialised graphics window (winit + Vulkan).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_surface(
         id: WindowId,
         name: impl Into<Arc<str>>,
@@ -114,6 +127,7 @@ impl Window {
         graphics_queue_family: u32,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
         depth_format: vk::Format,
+        msaa_samples: vk::SampleCountFlags,
         entry: &ash::Entry,
         forge: &GraphicsForge,
     ) -> ForgeResult<Self> {
@@ -152,7 +166,7 @@ impl Window {
 
         // Compile the pipeline. Uses dynamic viewport/scissor so we don't
         // need to recompile on resize.
-        let mold = forge.compile(device, swapchain_format, depth_format)?;
+        let mold = forge.compile(device, swapchain_format, depth_format, msaa_samples)?;
 
         // Build the swapchain + per-image resources via the shared helper.
         let (
@@ -161,6 +175,7 @@ impl Window {
             swapchain_image_views,
             swapchain_extent,
             depth_images,
+            msaa_color_images,
             framebuffers,
             render_finished_semaphores,
         ) = create_swapchain_resources(
@@ -173,6 +188,7 @@ impl Window {
             memory_properties,
             depth_format,
             swapchain_format,
+            msaa_samples,
             mold.render_pass,
             width,
             height,
@@ -238,6 +254,8 @@ impl Window {
                 swapchain_format,
                 swapchain_loader,
                 depth_images,
+                msaa_color_images,
+                msaa_samples,
                 mold,
                 skinned_mold: None,
                 framebuffers,
@@ -270,7 +288,7 @@ impl Window {
     ) -> ForgeResult<()> {
         let gfx = self.graphics.as_mut()
             .expect("attach_skinned_forge requires a graphics window");
-        let mold = forge.compile(device, gfx.swapchain_format, gfx.depth_format)?;
+        let mold = forge.compile(device, gfx.swapchain_format, gfx.depth_format, gfx.msaa_samples)?;
         gfx.skinned_mold = Some(mold);
         Ok(())
     }
@@ -349,6 +367,10 @@ impl Window {
                     img.destroy(device);
                 }
                 gfx.depth_images.clear();
+                for img in gfx.msaa_color_images.iter_mut() {
+                    img.destroy(device);
+                }
+                gfx.msaa_color_images.clear();
                 for iv in gfx.swapchain_image_views.iter() {
                     if *iv != vk::ImageView::null() {
                         device.destroy_image_view(*iv, None);
@@ -399,6 +421,10 @@ impl Window {
                 img.destroy(device);
             }
             gfx.depth_images.clear();
+            for img in gfx.msaa_color_images.iter_mut() {
+                img.destroy(device);
+            }
+            gfx.msaa_color_images.clear();
             for iv in gfx.swapchain_image_views.iter() {
                 if *iv != vk::ImageView::null() {
                     device.destroy_image_view(*iv, None);
@@ -416,6 +442,7 @@ impl Window {
             swapchain_image_views,
             swapchain_extent,
             depth_images,
+            msaa_color_images,
             framebuffers,
             render_finished_semaphores,
         ) = create_swapchain_resources(
@@ -428,6 +455,7 @@ impl Window {
             &gfx.memory_properties,
             gfx.depth_format,
             gfx.swapchain_format,
+            gfx.msaa_samples,
             gfx.mold.render_pass,
             size.width,
             size.height,
@@ -446,6 +474,7 @@ impl Window {
         gfx.swapchain_image_views = swapchain_image_views;
         gfx.swapchain_extent = swapchain_extent;
         gfx.depth_images = depth_images;
+        gfx.msaa_color_images = msaa_color_images;
         gfx.framebuffers = framebuffers;
         gfx.render_finished_semaphores = render_finished_semaphores;
         gfx.needs_resize = false;
@@ -751,6 +780,7 @@ fn create_swapchain_resources(
     memory_properties: &vk::PhysicalDeviceMemoryProperties,
     depth_format: vk::Format,
     swapchain_format: vk::Format,
+    msaa_samples: vk::SampleCountFlags,
     render_pass: vk::RenderPass,
     width: u32,
     height: u32,
@@ -760,6 +790,7 @@ fn create_swapchain_resources(
     ThinVec<vk::Image>,
     ThinVec<vk::ImageView>,
     vk::Extent2D,
+    ThinVec<ForgeImage>,
     ThinVec<ForgeImage>,
     ThinVec<vk::Framebuffer>,
     ThinVec<vk::Semaphore>,
@@ -845,10 +876,10 @@ fn create_swapchain_resources(
         .collect::<Result<ThinVec<_>, _>>()
         .map_err(ForgeError::Vk)?;
 
-    // One depth image per swapchain image.
+    // Depth image per swapchain image, MSAA-sized to match the render pass.
     let mut depth_images: ThinVec<ForgeImage> = ThinVec::with_capacity(swapchain_images.len());
     for _ in 0..swapchain_images.len() {
-        let img = ForgeImage::create_2d(
+        let img = ForgeImage::create_2d_msaa(
             device,
             memory_properties,
             swapchain_extent.width,
@@ -856,20 +887,55 @@ fn create_swapchain_resources(
             depth_format,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            msaa_samples,
         )?;
         depth_images.push(img);
     }
 
+    // MSAA colour image per swapchain image — only allocated when the
+    // render pass actually rasterises into a multi-sample target.
+    let msaa_color_images: ThinVec<ForgeImage> = if msaa_samples != vk::SampleCountFlags::TYPE_1 {
+        let mut v = ThinVec::with_capacity(swapchain_images.len());
+        for _ in 0..swapchain_images.len() {
+            let img = ForgeImage::create_2d_msaa(
+                device,
+                memory_properties,
+                swapchain_extent.width,
+                swapchain_extent.height,
+                swapchain_format,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                msaa_samples,
+            )?;
+            v.push(img);
+        }
+        v
+    } else {
+        ThinVec::new()
+    };
+
+    // Framebuffer attachment order matches the render-pass attachment list.
+    // Sync1 path: when MSAA is off → [swapchain_color, depth].
+    // MSAA path:                    → [msaa_color, depth, swapchain_resolve].
     let framebuffers: ThinVec<vk::Framebuffer> = swapchain_image_views
         .iter()
-        .zip(depth_images.iter())
-        .map(|(&color_view, depth)| {
-            let attachments = [color_view, depth.view];
+        .enumerate()
+        .map(|(i, &color_view)| {
+            let depth = depth_images[i].view;
+            let mut atts: Vec<vk::ImageView> = Vec::with_capacity(3);
+            if msaa_samples != vk::SampleCountFlags::TYPE_1 {
+                atts.push(msaa_color_images[i].view);
+                atts.push(depth);
+                atts.push(color_view);
+            } else {
+                atts.push(color_view);
+                atts.push(depth);
+            }
             unsafe {
                 device.create_framebuffer(
                     &vk::FramebufferCreateInfo::default()
                         .render_pass(render_pass)
-                        .attachments(&attachments)
+                        .attachments(&atts)
                         .width(swapchain_extent.width)
                         .height(swapchain_extent.height)
                         .layers(1),
@@ -897,6 +963,7 @@ fn create_swapchain_resources(
         swapchain_image_views,
         swapchain_extent,
         depth_images,
+        msaa_color_images,
         framebuffers,
         render_finished_semaphores,
     ))

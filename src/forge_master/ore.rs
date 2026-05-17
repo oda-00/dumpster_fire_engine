@@ -573,6 +573,57 @@ impl ForgeImage {
         })
     }
 
+    /// Same as `create_2d` but with a caller-chosen sample count. When
+    /// `samples == TYPE_1` this is identical to `create_2d`; otherwise the
+    /// resulting image is multi-sampled (no mips, one array layer). Used
+    /// for MSAA colour + depth render-pass attachments.
+    pub fn create_2d_msaa(
+        device: &ash::Device,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        properties: vk::MemoryPropertyFlags,
+        samples: vk::SampleCountFlags,
+    ) -> ForgeResult<Self> {
+        let extent = vk::Extent3D { width: width.max(1), height: height.max(1), depth: 1 };
+        let info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(extent)
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(samples)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let handle = unsafe { device.create_image(&info, None)? };
+        let req = unsafe { device.get_image_memory_requirements(handle) };
+        let memory_type_index = find_memory_type(memory_properties, req.memory_type_bits, properties)?;
+        let alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { device.allocate_memory(&alloc, None)? };
+        unsafe { device.bind_image_memory(handle, memory, 0)? };
+        let aspect_mask = aspect_mask_for_format(format);
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(handle)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect_mask)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+        Ok(Self { handle, view, memory, format, extent, mip_levels: 1 })
+    }
+
     /// Same as `create_2d` but allocates the full mip chain
     /// (`1 + floor(log2(max(w,h)))` levels). The image view covers every
     /// level so the sampler can blend across them when `max_lod` permits.

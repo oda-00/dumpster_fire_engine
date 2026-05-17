@@ -338,38 +338,68 @@ impl GraphicsForge {
         device: &ash::Device,
         color_format: vk::Format,
         depth_format: vk::Format,
+        sample_count: vk::SampleCountFlags,
     ) -> ForgeResult<GraphicsMold> {
-        // Render pass — color + depth attachments, clear → present.
-        let attachments = [
+        // Render pass layout — depends on whether MSAA is active:
+        //   TYPE_1: [color (swapchain, presented), depth]
+        //   MSAA:   [msaa_color, depth, swapchain_resolve]
+        // The MSAA path writes the rasterised samples to msaa_color and
+        // resolves to the swapchain image at end-of-subpass, which is the
+        // standard Vulkan idiom for cheap MSAA.
+        let is_msaa = sample_count != vk::SampleCountFlags::TYPE_1;
+        let mut attachments: Vec<vk::AttachmentDescription> = Vec::with_capacity(3);
+        attachments.push(
             vk::AttachmentDescription::default()
                 .format(color_format)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(sample_count)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
+                .store_op(if is_msaa { vk::AttachmentStoreOp::DONT_CARE } else { vk::AttachmentStoreOp::STORE })
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR),
+                .final_layout(if is_msaa { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL } else { vk::ImageLayout::PRESENT_SRC_KHR }),
+        );
+        attachments.push(
             vk::AttachmentDescription::default()
                 .format(depth_format)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(sample_count)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-        ];
+        );
+        if is_msaa {
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(color_format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED)
+                    .final_layout(vk::ImageLayout::PRESENT_SRC_KHR),
+            );
+        }
         let color_refs = [vk::AttachmentReference::default()
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
         let depth_ref = vk::AttachmentReference::default()
             .attachment(1)
             .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        let subpasses = [vk::SubpassDescription::default()
+        let resolve_refs = [vk::AttachmentReference::default()
+            .attachment(2)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+        let mut subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_refs)
-            .depth_stencil_attachment(&depth_ref)];
+            .depth_stencil_attachment(&depth_ref);
+        if is_msaa {
+            subpass = subpass.resolve_attachments(&resolve_refs);
+        }
+        let subpasses = [subpass];
         let dependencies = [vk::SubpassDependency::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
             .dst_subpass(0)
@@ -625,7 +655,7 @@ impl GraphicsForge {
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::CLOCKWISE);
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(sample_count);
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
             .blend_enable(false)];
