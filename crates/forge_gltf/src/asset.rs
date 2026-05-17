@@ -1264,9 +1264,17 @@ fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
                 &ktx.sgd, level_data, w, h,
             )?.to_vec()
         }
-        _ => {
+        SupercompressionScheme::Zstd => {
+            // Run the hand-rolled ZSTD decoder over the level payload to
+            // get the raw uncompressed bytes, then dispatch those bytes
+            // through `decode_ktx2_uncompressed` — KTX2 ZSTD always
+            // wraps a non-supercompressed vkFormat underneath.
+            let raw = crate::codec::zstd::decompress(level_data)?;
+            decode_ktx2_uncompressed(ktx.vk_format, &raw, w, h)?
+        }
+        other => {
             return Err(GltfError::UnsupportedFeature(
-                format!("KTX2 supercompression scheme {:?}", ktx.supercompression),
+                format!("KTX2 supercompression scheme {other:?}")
             ));
         }
     };

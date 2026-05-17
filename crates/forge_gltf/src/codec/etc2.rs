@@ -129,7 +129,11 @@ const INTEN_TABLE: [[i16; 4]; 8] = [
     [-183,-47,  47, 183],
 ];
 
-/// ETC2 "T" mode distance table.
+/// ETC2 "T" mode distance table — published per the Khronos ETC2 spec
+/// table 3.17.5. Currently unused by our gracefully-degraded T/H/Planar
+/// fallback path; kept under cfg(test) so the spec reference stays in
+/// source for the day the full T/H decoders land.
+#[cfg(test)]
 const T_DISTANCE: [u16; 8] = [3, 6, 11, 16, 23, 32, 41, 64];
 
 /// EAC 8-bit alpha modifier table per intensity index. 16 entries × 8 rows.

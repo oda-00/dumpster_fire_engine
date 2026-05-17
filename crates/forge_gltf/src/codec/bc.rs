@@ -10,7 +10,8 @@
 //! but the outer scatter loop is identical, so we factor it via the
 //! `transcode_blocks` driver.
 
-use crate::error::{GltfError, GltfResult};
+// (BC decoders are infallible — they never produce error values; only
+// the dispatcher in asset.rs needs the GltfError types.)
 use thin_vec::ThinVec;
 
 /// Decode a buffer of BC1-format blocks (`VK_FORMAT_BC1_RGB_UNORM_BLOCK`

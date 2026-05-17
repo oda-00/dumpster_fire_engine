@@ -14,3 +14,4 @@ pub mod meshopt;
 pub mod mikktspace;
 pub mod sparse;
 pub mod webp;
+pub mod zstd;
