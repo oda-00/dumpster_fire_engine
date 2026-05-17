@@ -16,13 +16,14 @@ use thin_vec::ThinVec;
 use forge_gltf::{
     GltfAsset, PipelineParams, PipelineUpload, Pose,
     build_all_compute_uploads, build_graphics_draws, build_graphics_draws_with_matrices,
-    build_ui_draws,
+    build_morph_blend_input, build_skin_palette_input, build_ui_draws,
 };
 
 use crate::forge_master::forge::ForgeId;
-use crate::forge_master::frame::GraphicsFramePlan;
+use crate::forge_master::frame::{FrameId, FramePlan, GraphicsFramePlan};
 use crate::forge_master::ingot::Ingot;
 use crate::forge_master::master::{ForgeMaster, ForgeResult};
+use crate::render::factory_master::proto::{ComputeTag, Proto, ProtoId};
 use crate::forge_master::ore::{
     ForgeVertex, GpuMesh, GraphicsOreKind, IngotSpec, MeshOre, MeshUploadCtx, Ore, OreInput,
     OreKind, TextureOre,
@@ -338,6 +339,66 @@ pub fn register_skin_morph_forges(master: &mut ForgeMaster) -> ForgeResult<()> {
         MORPH_BLEND_SPV,
     )?;
     Ok(())
+}
+
+/// Build a compute `Proto` that drives the SkinPalette + MorphBlend
+/// pipelines for every relevant skin/primitive in `asset` for the current
+/// `pose`. Pass it to `Renderer::build_compute_factory` each frame.
+///
+/// Returns `None` when the asset has no skins or morph targets — there's
+/// nothing to dispatch, so the caller can skip the factory build entirely.
+///
+/// `output_size` is the per-Ore output-buffer size in bytes (round up via
+/// `non_zero_size`); pass `0` to let the helper choose a 4-byte minimum.
+pub fn build_skin_morph_proto(
+    asset:       &GltfAsset,
+    pose:        &Pose,
+    proto_id:    ProtoId,
+    output_size: vk::DeviceSize,
+) -> Option<Proto<ComputeTag>> {
+    let mut proto = Proto::<ComputeTag>::new(proto_id, "skin_morph_frame");
+    let mut next_id: i64 = 1;
+
+    // SkinPalette: one plan per skin.
+    for skin_idx in 0..asset.skins.len() {
+        if let Some(upload) = build_skin_palette_input(asset, pose, skin_idx) {
+            let palette_bytes = (upload.element_count as vk::DeviceSize) * 64;
+            let ore = upload_to_ore(&upload, output_size.max(palette_bytes));
+            let mut plan = FramePlan::new(
+                FrameId::new(next_id),
+                format!("skin_palette_{skin_idx}"),
+            );
+            plan.push(ore);
+            proto.push_plan(plan);
+            next_id += 1;
+        }
+    }
+
+    // MorphBlend: one plan per morphed primitive. We need a node index to
+    // resolve per-instance weight overrides; pick the first node that
+    // references the mesh (every other node will share the same weights at
+    // this granularity since the pose only stores per-node overrides).
+    for (mesh_idx, mesh) in asset.meshes.iter().enumerate() {
+        let node_idx = asset.nodes.iter()
+            .position(|n| n.mesh == Some(mesh_idx as u32))
+            .unwrap_or(0);
+        for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
+            if prim.morph_targets.is_empty() { continue; }
+            if let Some(upload) = build_morph_blend_input(asset, mesh_idx, prim_idx, pose, node_idx) {
+                let posed_bytes = (upload.primary_bytes.len()) as vk::DeviceSize;
+                let ore = upload_to_ore(&upload, output_size.max(posed_bytes));
+                let mut plan = FramePlan::new(
+                    FrameId::new(next_id),
+                    format!("morph_blend_m{mesh_idx}_p{prim_idx}"),
+                );
+                plan.push(ore);
+                proto.push_plan(plan);
+                next_id += 1;
+            }
+        }
+    }
+
+    if proto.is_empty() { None } else { Some(proto) }
 }
 
 /// Upload every glTF primitive as a `GpuMesh` and emit one

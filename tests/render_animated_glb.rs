@@ -18,8 +18,9 @@ use dumpster_fire_engine::forge_master::FrameId;
 use dumpster_fire_engine::render::VulkanContext;
 use dumpster_fire_engine::resource_manager::asset_manager::{
     build_compute_ores, build_graphics_plans, build_graphics_plans_with_pose,
-    load_asset, asset_to_texture_ores,
+    build_skin_morph_proto, load_asset, asset_to_texture_ores,
 };
+use dumpster_fire_engine::render::ProtoId;
 use dumpster_fire_engine::resource_manager::gltf_driver::{
     GltfCache, GltfSampler, GltfUploadCtx, MaterialUniform,
     create_material, create_material_pool, upload_texture_rgba, TEXTURE_SLOT_COUNT,
@@ -533,6 +534,28 @@ fn gltf_driver_creates_material_descriptor_set_for_toycar() {
         ctx.device.destroy_descriptor_pool(pool, None);
         ctx.device.destroy_descriptor_set_layout(layout, None);
     }
+}
+
+// ── 16. Per-frame skin/morph compute proto (CPU-side build) ────────────────
+
+#[test]
+fn skin_morph_proto_produces_one_plan_per_skin_for_brainstem() {
+    let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
+    let pose  = forge_gltf::Pose::rest(&asset);
+    let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(99), 0)
+        .expect("BrainStem is skinned — proto must be Some");
+    // BrainStem has exactly 1 skin and no morph targets.
+    assert!(!proto.is_empty(), "proto must contain SkinPalette plan(s)");
+    assert!(proto.len() >= asset.skins.len());
+}
+
+#[test]
+fn skin_morph_proto_is_none_for_unskinned_unmorphed_asset() {
+    let asset = load_asset(asset_path("Box.glb")).expect("load Box");
+    let pose  = forge_gltf::Pose::rest(&asset);
+    let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(99), 0);
+    assert!(proto.is_none(),
+        "Box has no skins and no morph targets — nothing to dispatch");
 }
 
 #[test]
