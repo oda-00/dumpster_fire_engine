@@ -660,18 +660,22 @@ pub fn transcode_to_rgba8(blocks: &[u8], width: u32, height: u32) -> thin_vec::T
     let bh = ((height + 3) / 4) as usize; // blocks per column
     let total_blocks = bw * bh;
 
-    let out_len = (width as usize) * (height as usize) * 4;
+    let w_us = width as usize;
+    let h_us = height as usize;
+    let row_pitch = w_us * 4;
+    let out_len = row_pitch * h_us;
     let mut out: thin_vec::ThinVec<u8> = thin_vec::ThinVec::with_capacity(out_len);
-    // SAFETY: we zero-initialize then write every byte we expose.
+    // Skip the zero-fill when the image is exactly tiled — the fast-path
+    // below writes every byte itself. Saves a full memset of the output.
+    let aligned = (width % 4 == 0) && (height % 4 == 0);
     unsafe {
         out.set_len(out_len);
-        // zero-fill so border texels (when width/height not multiples of 4) are black.
-        core::ptr::write_bytes(out.as_mut_ptr(), 0, out_len);
+        if !aligned {
+            core::ptr::write_bytes(out.as_mut_ptr(), 0, out_len);
+        }
     }
 
-    // Each block in the input must be exactly 16 bytes.
-    let block_count = blocks.len() / 16;
-    let block_count = block_count.min(total_blocks);
+    let block_count = (blocks.len() / 16).min(total_blocks);
 
     for bi in 0..block_count {
         // SAFETY: bi * 16 + 16 <= blocks.len(), guaranteed by block_count above.
@@ -681,28 +685,43 @@ pub fn transcode_to_rgba8(blocks: &[u8], width: u32, height: u32) -> thin_vec::T
 
         let decoded = decode_block(block);
 
-        // Block coordinates in the grid.
         let bx = bi % bw;
         let by = bi / bw;
+        let img_x0 = bx * 4;
+        let img_y0 = by * 4;
 
-        // Copy decoded 4×4 texels into the output image.
-        for row in 0..4usize {
-            let img_y = by * 4 + row;
-            if img_y >= height as usize {
-                break;
-            }
-            for col in 0..4usize {
-                let img_x = bx * 4 + col;
-                if img_x >= width as usize {
-                    break;
+        // Fast path: full 4×4 block fits cleanly inside the image. Four
+        // 16-byte rowwise memcpys instead of sixteen 4-byte texel copies,
+        // with no per-texel bounds check.
+        if img_x0 + 4 <= w_us && img_y0 + 4 <= h_us {
+            unsafe {
+                let sp = decoded.as_ptr();
+                let dp_base = out.as_mut_ptr().add(img_y0 * row_pitch + img_x0 * 4);
+                for row in 0..4 {
+                    core::ptr::copy_nonoverlapping(
+                        sp.add(row * 16),
+                        dp_base.add(row * row_pitch),
+                        16,
+                    );
                 }
-                let src = (row * 4 + col) * 4;
-                let dst = (img_y * width as usize + img_x) * 4;
-                // SAFETY: src+3 < 64 (decoded), dst+3 < out_len (bounds checked above).
-                unsafe {
-                    let sp = decoded.as_ptr().add(src);
-                    let dp = out.as_mut_ptr().add(dst);
-                    core::ptr::copy_nonoverlapping(sp, dp, 4);
+            }
+        } else {
+            // Slow path: block straddles the right/bottom edge — clip per texel.
+            for row in 0..4usize {
+                let img_y = img_y0 + row;
+                if img_y >= h_us { break; }
+                for col in 0..4usize {
+                    let img_x = img_x0 + col;
+                    if img_x >= w_us { break; }
+                    let src = (row * 4 + col) * 4;
+                    let dst = (img_y * w_us + img_x) * 4;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            decoded.as_ptr().add(src),
+                            out.as_mut_ptr().add(dst),
+                            4,
+                        );
+                    }
                 }
             }
         }

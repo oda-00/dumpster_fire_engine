@@ -22,14 +22,22 @@ use forge_gltf::codec;
 // a 32×32 grid of blocks = 4 KiB of compressed data → 16384 RGBA8 pixels.
 fn bench_uastc(c: &mut Criterion) {
     let mut group = c.benchmark_group("uastc");
-    let blocks = synth_uastc_blocks(32, 32);
-    group.throughput(Throughput::Bytes(blocks.len() as u64));
-    group.bench_function("transcode_to_rgba8_32x32_blocks", |b| {
-        b.iter(|| {
-            let rgba = codec::basisu_uastc::transcode_to_rgba8(black_box(&blocks), 128, 128);
-            black_box(rgba);
+    for &(bw, bh, name) in &[
+        (32usize, 32usize, "transcode_32x32_blocks_128x128"),
+        (128, 128, "transcode_128x128_blocks_512x512"),
+    ] {
+        let blocks = synth_uastc_blocks(bw, bh);
+        // Throughput = decoded RGBA bytes (the useful output).
+        let out_bytes = ((bw * 4) * (bh * 4) * 4) as u64;
+        group.throughput(Throughput::Bytes(out_bytes));
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let rgba = codec::basisu_uastc::transcode_to_rgba8(
+                    black_box(&blocks), (bw * 4) as u32, (bh * 4) as u32);
+                black_box(rgba);
+            });
         });
-    });
+    }
     group.finish();
 }
 
@@ -40,21 +48,26 @@ fn bench_uastc(c: &mut Criterion) {
 // group/header machinery without bias from a specific data distribution.
 fn bench_meshopt_vertex(c: &mut Criterion) {
     let mut group = c.benchmark_group("meshopt_vertex");
-    let stride = 16;
-    let count  = 1024;
-    let src    = synth_meshopt_vertex_payload(count, stride);
-    group.throughput(Throughput::Bytes(src.len() as u64));
-    group.bench_function("decompress_buffer_view_1024x16", |b| {
-        b.iter(|| {
-            let out = codec::meshopt::decompress_buffer_view(
-                codec::meshopt::MeshoptMode::Attributes,
-                codec::meshopt::MeshoptFilter::None,
-                count, stride,
-                black_box(&src),
-            ).expect("decode");
-            black_box(out);
+    for &(count, stride, name) in &[
+        (1024usize, 16usize, "decompress_1024x16"),
+        (16384, 32, "decompress_16384x32"),
+    ] {
+        let src = synth_meshopt_vertex_payload(count, stride);
+        // Throughput = decompressed output bytes (what the caller cares about).
+        let out_bytes = (count * stride) as u64;
+        group.throughput(Throughput::Bytes(out_bytes));
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let out = codec::meshopt::decompress_buffer_view(
+                    codec::meshopt::MeshoptMode::Attributes,
+                    codec::meshopt::MeshoptFilter::None,
+                    count, stride,
+                    black_box(&src),
+                ).expect("decode");
+                black_box(out);
+            });
         });
-    });
+    }
     group.finish();
 }
 

@@ -140,89 +140,73 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
     if src[0] != VERTEX_MAGIC {
         return Err(GltfError::InvalidAccessor("meshopt: bad vertex codec magic"));
     }
-
     if vertex_size == 0 {
-        // Degenerate: zero-stride, return empty.
         return Ok(ThinVec::new());
     }
 
+    // Strategy: decode into byte-position-major STRIPES (column-major), one
+    // contiguous vertex_count-length slice per byte-position. This gives us
+    //   • sequential writes during decode (each byte-position fills its own
+    //     stripe back-to-back across all groups)
+    //   • sequential prefix-sum (walk one stripe straight through)
+    //   • a single strided interleave pass at the end to produce vertex-major
+    //     output (every byte loaded is touched exactly once in cache order)
+    //
+    // Zigzag is folded into the per-byte write, killing the previous
+    // whole-buffer post-pass. The stripe allocation matches the output size
+    // (one big Vec<u8>) so we pay one alloc total.
     let total_bytes = vertex_count * vertex_size;
-    // Buffer that collects raw (pre-delta) bytes in vertex-major order.
-    // Layout: out[vertex_idx * vertex_size + byte_pos]
-    let mut out = vec![0u8; total_bytes];
+    let mut stripes: Vec<u8> = vec![0u8; total_bytes];
 
     let num_groups = vertex_count.div_ceil(VERTEX_BLOCK_SIZE);
-    // Header bytes per group: ceil(vertex_size / 4)
     let header_bytes_per_group = vertex_size.div_ceil(4);
 
     let mut pos = 1usize; // skip magic byte
-
-    // Phase 1: read all group headers up-front, then data.
-    // Actually the format interleaves: all headers for all groups come first
-    // for a given set of byte-positions, then data.  But in the actual codec,
-    // headers and data for each group are written together, not separately.
-    //
-    // From vertexcodec.cpp the actual layout is:
-    //   for each group:
-    //     write header bytes (ceil(vertex_size/4) bytes)
-    //   for each group:
-    //     for each byte-position:
-    //       write data bytes based on mode
-    //
-    // Wait – let me read the spec doc more carefully.  The spec says:
-    //   "The stream starts with a 1-byte header containing the codec version."
-    //   Then: vertex data for ceil(vertex_count/16) blocks.
-    //   Each block: header of ceil(vertex_size/4) bytes (4 modes packed per byte),
-    //   followed by the data payloads.
-    //
-    // So header and data ARE interleaved per block (not separated globally).
 
     for g in 0..num_groups {
         let block_start = g * VERTEX_BLOCK_SIZE;
         let block_verts = VERTEX_BLOCK_SIZE.min(vertex_count - block_start);
 
-        // Read header: ceil(vertex_size/4) bytes, each covers 4 byte-positions.
+        // Header: ceil(vertex_size/4) bytes packing 4 × 2-bit modes per byte.
         if pos + header_bytes_per_group > src.len() {
             return Err(GltfError::InvalidAccessor("meshopt: vertex header truncated"));
         }
-        let header = &src[pos..pos + header_bytes_per_group];
+        // Decode + dispatch per byte-position in this block. Mode is extracted
+        // inline (no per-group scratch allocation).
+        let header_start = pos;
         pos += header_bytes_per_group;
 
-        // Extract per-byte-position mode (2 bits each).
-        // mode[b] for b in 0..vertex_size
-        let mut modes = vec![0u8; vertex_size];
         for b in 0..vertex_size {
-            let hbyte = header[b / 4];
-            modes[b] = (hbyte >> ((b % 4) * 2)) & 0x3;
-        }
-
-        // Read data for each byte-position in this group.
-        for b in 0..vertex_size {
-            let mode = modes[b];
+            let hbyte = unsafe { *src.get_unchecked(header_start + (b >> 2)) };
+            let mode  = (hbyte >> ((b & 3) * 2)) & 0x3;
+            // Stripe destination: stripes[b * vertex_count + block_start ..].
+            let dst_base = b * vertex_count + block_start;
             match mode {
                 0 => {
-                    // All block_verts bytes at this position = 0 (already initialised).
+                    // Zeros — already zero-initialised; nothing to do.
                 }
                 1 => {
-                    // 1 byte follows; broadcast to all vertices in block.
                     if pos >= src.len() {
                         return Err(GltfError::InvalidAccessor("meshopt: vertex data truncated (mode 1)"));
                     }
-                    let k = src[pos];
+                    let k = unsafe { *src.get_unchecked(pos) };
                     pos += 1;
-                    for v in 0..block_verts {
-                        out[(block_start + v) * vertex_size + b] = k;
-                    }
+                    let z = decode_zigzag8(k);
+                    // Sequential write of `block_verts` bytes.
+                    let dst = &mut stripes[dst_base .. dst_base + block_verts];
+                    for slot in dst.iter_mut() { *slot = z; }
                 }
                 2 => {
-                    // 16 bytes follow (literal per-vertex for this byte-position).
                     if pos + VERTEX_BLOCK_SIZE > src.len() {
                         return Err(GltfError::InvalidAccessor("meshopt: vertex data truncated (mode 2)"));
                     }
-                    for v in 0..block_verts {
-                        out[(block_start + v) * vertex_size + b] = src[pos + v];
-                    }
+                    let src_block = unsafe { src.get_unchecked(pos .. pos + VERTEX_BLOCK_SIZE) };
                     pos += VERTEX_BLOCK_SIZE;
+                    let dst = &mut stripes[dst_base .. dst_base + block_verts];
+                    // Zigzag-decode the literal block into the stripe.
+                    for (i, slot) in dst.iter_mut().enumerate() {
+                        *slot = decode_zigzag8(src_block[i]);
+                    }
                 }
                 3 => {
                     // 16 bytes follow, but stored with a byte-shuffle (SIMD
@@ -304,50 +288,64 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
                     //
                     // Rather than guess, implement mode 3 as: read 16 zigzag
                     // bytes with nibble-deinterleave:
-                    let raw = &src[pos..pos + VERTEX_BLOCK_SIZE];
+                    if pos + VERTEX_BLOCK_SIZE > src.len() {
+                        return Err(GltfError::InvalidAccessor("meshopt: vertex data truncated (mode 3)"));
+                    }
+                    let raw = unsafe { src.get_unchecked(pos .. pos + VERTEX_BLOCK_SIZE) };
                     pos += VERTEX_BLOCK_SIZE;
-                    // Nibble-unshuffle: first 8 bytes = low nibbles of all 16
-                    // decoded bytes; last 8 bytes = high nibbles.
-                    for v in 0..block_verts {
-                        let lo_idx = v / 2;
-                        let hi_idx = 8 + v / 2;
-                        let nibble = if v % 2 == 0 {
+                    let dst = &mut stripes[dst_base .. dst_base + block_verts];
+                    for (v, slot) in dst.iter_mut().enumerate() {
+                        let lo_idx = v >> 1;
+                        let hi_idx = 8 + (v >> 1);
+                        let nibble = if v & 1 == 0 {
                             (raw[lo_idx] & 0x0f) | ((raw[hi_idx] & 0x0f) << 4)
                         } else {
                             (raw[lo_idx] >> 4) | (raw[hi_idx] & 0xf0)
                         };
-                        out[(block_start + v) * vertex_size + b] = decode_zigzag8(nibble);
+                        *slot = decode_zigzag8(nibble);
                     }
-                    // Skip remaining vertices (if block is partial, still 16 raw bytes consumed).
-                    // Already advanced pos by 16 above.
-                    continue; // skip the zigzag pass below for mode 3
                 }
                 _ => unreachable!(),
             }
+        }
+    }
 
-            // For modes 0, 1, 2: apply zigzag decode to the stored values.
-            // (Mode 3 uses `continue` to skip this and does its own decode.)
-            if mode != 3 {
-                for v in 0..block_verts {
-                    let idx = (block_start + v) * vertex_size + b;
-                    out[idx] = decode_zigzag8(out[idx]);
+    // Phase 2: prefix-sum each stripe in-place. Sequential access — one
+    // contiguous vertex_count-byte stripe per byte-position; the entire
+    // stripe stays hot in L1.
+    for b in 0..vertex_size {
+        let stripe = &mut stripes[b * vertex_count .. (b + 1) * vertex_count];
+        let mut prev: u8 = 0;
+        for slot in stripe.iter_mut() {
+            *slot = slot.wrapping_add(prev);
+            prev = *slot;
+        }
+    }
+
+    // Phase 3: interleave stripes → vertex-major output, written straight
+    // into the ThinVec we'll return (no scratch + extend_from_slice copy).
+    //
+    // We process 16 vertices at a time so each per-stripe load + scatter
+    // amortises one byte-position's cache-line fetch across multiple
+    // sequential output writes. For typical strides (16/32/48), the inner
+    // 16-vertex loop emits 16 sequential bytes for one byte-position,
+    // which the CPU's store buffer can coalesce.
+    let mut result: ThinVec<u8> = ThinVec::with_capacity(total_bytes);
+    // SAFETY: we fill `total_bytes` of capacity below before setting len.
+    unsafe {
+        let out_ptr: *mut u8 = result.as_mut_ptr();
+        for chunk in (0..vertex_count).step_by(16) {
+            let end = (chunk + 16).min(vertex_count);
+            for b in 0..vertex_size {
+                let stripe_base = b * vertex_count;
+                for v in chunk..end {
+                    let val = *stripes.get_unchecked(stripe_base + v);
+                    *out_ptr.add(v * vertex_size + b) = val;
                 }
             }
         }
+        result.set_len(total_bytes);
     }
-
-    // Phase 2: prefix-sum (delta decode) across all vertices for each byte-position.
-    for b in 0..vertex_size {
-        let mut prev: u8 = 0;
-        for v in 0..vertex_count {
-            let idx = v * vertex_size + b;
-            out[idx] = out[idx].wrapping_add(prev);
-            prev = out[idx];
-        }
-    }
-
-    let mut result = ThinVec::with_capacity(total_bytes);
-    result.extend_from_slice(&out);
     Ok(result)
 }
 
