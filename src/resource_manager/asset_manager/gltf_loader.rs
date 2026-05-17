@@ -1,8 +1,46 @@
-use std::path::Path;
+//! Engine-side bridge over the hand-rolled `forge_gltf` crate.
+//!
+//! Keeps the legacy entry points (`load_first_mesh`, `load_all_meshes`,
+//! `load_first_mesh_from_slice`, `load_all_meshes_from_slice`, `GltfError`,
+//! `build_test_glb`) working so existing call sites and benches don't need
+//! to change. New code that wants the full document tree, multi-pipeline
+//! adapters, materials, textures, lights, animations, etc. should reach
+//! straight for `forge_gltf::GltfAsset`.
 
+use std::path::Path;
+use std::sync::Arc;
+
+use ash::vk;
 use thin_vec::ThinVec;
 
-use crate::forge_master::ore::{ForgeVertex, MeshOre};
+use forge_gltf::{
+    GltfAsset, PipelineParams, PipelineUpload, Pose,
+    build_all_compute_uploads, build_graphics_draws, build_graphics_draws_with_matrices,
+    build_morph_blend_input, build_skin_palette_input, build_ui_draws,
+};
+
+use crate::forge_master::forge::ForgeId;
+use crate::forge_master::frame::{FrameId, FramePlan, GraphicsFramePlan};
+use crate::forge_master::ingot::Ingot;
+use crate::forge_master::master::{ForgeMaster, ForgeResult};
+use crate::render::factory_master::proto::{ComputeTag, Proto, ProtoId};
+use crate::forge_master::ore::{
+    ForgeVertex, GpuMesh, GraphicsOreKind, IngotSpec, MeshOre, MeshUploadCtx, Ore, OreInput,
+    OreKind, TextureOre,
+};
+
+// Pre-compiled SPIR-V for the two skinning/morph compute shaders.
+const SKIN_PALETTE_SPV: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/shaders/skin_palette.comp.glsl.spv"
+));
+const MORPH_BLEND_SPV: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/shaders/morph_blend.comp.glsl.spv"
+));
+
+// Re-export the test helper for benches that already pull it from here.
+pub use forge_gltf::build_test_glb;
 
 // ── Error ──────────────────────────────────────────────────────────────────
 
@@ -11,6 +49,7 @@ pub enum GltfError {
     Io(gltf::Error),
     NoPrimitives,
     NoPositions,
+    Other(String),
 }
 
 impl std::fmt::Display for GltfError {
@@ -19,6 +58,7 @@ impl std::fmt::Display for GltfError {
             GltfError::Io(e)        => write!(f, "gltf I/O error: {e}"),
             GltfError::NoPrimitives => write!(f, "glTF file has no mesh primitives"),
             GltfError::NoPositions  => write!(f, "glTF primitive has no POSITION accessor"),
+            GltfError::Other(s)     => write!(f, "gltf error: {s}"),
         }
     }
 }
@@ -36,215 +76,669 @@ impl From<gltf::Error> for GltfError {
     fn from(e: gltf::Error) -> Self { GltfError::Io(e) }
 }
 
-// ── Public loaders ─────────────────────────────────────────────────────────
-
-/// Load the first mesh primitive from a `.glb` / `.gltf` file.
-pub fn load_first_mesh(path: impl AsRef<Path>) -> Result<MeshOre, GltfError> {
-    let (doc, buffers, _) = gltf::import(path)?;
-    extract_first(&doc, &buffers)
-}
-
-/// Load every mesh primitive from a `.glb` / `.gltf` file.
-pub fn load_all_meshes(path: impl AsRef<Path>) -> Result<ThinVec<MeshOre>, GltfError> {
-    let (doc, buffers, _) = gltf::import(path)?;
-    extract_all(&doc, &buffers)
-}
-
-/// Load the first mesh primitive from an in-memory GLB/glTF blob.
-pub fn load_first_mesh_from_slice(bytes: &[u8]) -> Result<MeshOre, GltfError> {
-    let (doc, buffers, _) = gltf::import_slice(bytes)?;
-    extract_first(&doc, &buffers)
-}
-
-/// Load every mesh primitive from an in-memory GLB/glTF blob.
-pub fn load_all_meshes_from_slice(bytes: &[u8]) -> Result<ThinVec<MeshOre>, GltfError> {
-    let (doc, buffers, _) = gltf::import_slice(bytes)?;
-    extract_all(&doc, &buffers)
-}
-
-// ── Extraction (shared by file and slice paths) ────────────────────────────
-
-fn extract_first(
-    doc:     &gltf::Document,
-    buffers: &[gltf::buffer::Data],
-) -> Result<MeshOre, GltfError> {
-    let mut all = extract_all(doc, buffers)?;
-    if all.is_empty() { Err(GltfError::NoPrimitives) } else { Ok(all.swap_remove(0)) }
-}
-
-fn extract_all(
-    doc:     &gltf::Document,
-    buffers: &[gltf::buffer::Data],
-) -> Result<ThinVec<MeshOre>, GltfError> {
-    let mut out = ThinVec::new();
-    for mesh in doc.meshes() {
-        for prim in mesh.primitives() {
-            out.push(extract_primitive(&prim, buffers)?);
+impl From<forge_gltf::GltfError> for GltfError {
+    fn from(e: forge_gltf::GltfError) -> Self {
+        match e {
+            forge_gltf::GltfError::Io(inner)              => GltfError::Io(inner),
+            forge_gltf::GltfError::NoPrimitives           => GltfError::NoPrimitives,
+            forge_gltf::GltfError::NoPositions            => GltfError::NoPositions,
+            forge_gltf::GltfError::InvalidAccessor(s)     => GltfError::Other(format!("invalid accessor: {s}")),
+            forge_gltf::GltfError::UnsupportedComponent(s) => GltfError::Other(format!("unsupported component: {s}")),
+            forge_gltf::GltfError::UnsupportedVersion(s)  => GltfError::Other(format!("unsupported version: {s}")),
+            forge_gltf::GltfError::UnsupportedExtension(s) => GltfError::Other(format!("unsupported extension: {s}")),
+            forge_gltf::GltfError::SpecViolation(s)       => GltfError::Other(format!("spec violation: {s}")),
+            forge_gltf::GltfError::UnsupportedFeature(s)  => GltfError::Other(format!("unsupported feature: {s}")),
         }
     }
+}
+
+// ── Legacy mesh extraction (kept stable for existing callers) ──────────────
+
+pub fn load_first_mesh(path: impl AsRef<Path>) -> Result<MeshOre, GltfError> {
+    let asset = GltfAsset::load(path)?;
+    first_mesh_from_asset(&asset)
+}
+
+pub fn load_all_meshes(path: impl AsRef<Path>) -> Result<ThinVec<MeshOre>, GltfError> {
+    let asset = GltfAsset::load(path)?;
+    Ok(all_meshes_from_asset(&asset))
+}
+
+pub fn load_first_mesh_from_slice(bytes: &[u8]) -> Result<MeshOre, GltfError> {
+    let asset = GltfAsset::load_slice(bytes)?;
+    first_mesh_from_asset(&asset)
+}
+
+pub fn load_all_meshes_from_slice(bytes: &[u8]) -> Result<ThinVec<MeshOre>, GltfError> {
+    let asset = GltfAsset::load_slice(bytes)?;
+    Ok(all_meshes_from_asset(&asset))
+}
+
+fn first_mesh_from_asset(asset: &GltfAsset) -> Result<MeshOre, GltfError> {
+    let mut meshes = all_meshes_from_asset(asset);
+    if meshes.is_empty() { Err(GltfError::NoPrimitives) } else { Ok(meshes.swap_remove(0)) }
+}
+
+fn all_meshes_from_asset(asset: &GltfAsset) -> ThinVec<MeshOre> {
+    let mut out = ThinVec::new();
+    for mesh in &asset.meshes {
+        for prim in &mesh.primitives {
+            let n = prim.streams.positions.len();
+            let uv0 = prim.streams.uv_sets.first();
+            let vertices: ThinVec<ForgeVertex> = (0..n)
+                .map(|i| ForgeVertex::new(
+                    prim.streams.positions[i],
+                    prim.streams.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                    prim.streams.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                    uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]),
+                ))
+                .collect();
+            out.push(MeshOre::new(vertices, prim.indices.clone()));
+        }
+    }
+    out
+}
+
+// ── New full-fidelity entry points ─────────────────────────────────────────
+//
+// The bridge layer that adapts the full `GltfAsset` into engine types every
+// pipeline cares about. These don't replace the legacy mesh loaders — they
+// sit alongside them so callers can pick the level of detail they want.
+
+/// Load a glTF file and parse the entire document. Re-exposes the same
+/// `forge_gltf::GltfAsset` so callers can walk scenes, nodes, materials,
+/// textures, skins, animations and lights directly.
+pub fn load_asset(path: impl AsRef<Path>) -> Result<GltfAsset, GltfError> {
+    Ok(GltfAsset::load(path)?)
+}
+
+pub fn load_asset_from_slice(bytes: &[u8]) -> Result<GltfAsset, GltfError> {
+    Ok(GltfAsset::load_slice(bytes)?)
+}
+
+/// Translate an in-memory glTF asset into the engine's `MeshOre`. One per
+/// primitive, in document order — identical packing to `load_all_meshes`
+/// but driven off an already-parsed `GltfAsset`.
+pub fn asset_to_mesh_ores(asset: &GltfAsset) -> ThinVec<MeshOre> {
+    all_meshes_from_asset(asset)
+}
+
+/// Translate the asset into one `TextureOre` per image. Pixel data is
+/// already decoded to tightly packed RGBA8 by the loader; we pick the
+/// vk format based on `ImageFormatHint`.
+pub fn asset_to_texture_ores(asset: &GltfAsset) -> ThinVec<TextureOre> {
+    asset
+        .images
+        .iter()
+        .map(|img| {
+            let format = match img.format {
+                forge_gltf::ImageFormatHint::Srgb   => vk::Format::R8G8B8A8_SRGB,
+                forge_gltf::ImageFormatHint::Linear => vk::Format::R8G8B8A8_UNORM,
+            };
+            TextureOre::new(img.width, img.height, format, img.rgba.clone())
+        })
+        .collect()
+}
+
+/// Bridge a `forge_gltf::PipelineUpload` into an engine `Ore`. The mapping
+/// follows the one-to-one enum correspondence between the two crates'
+/// pipeline-kind enums.
+pub fn upload_to_ore(up: &PipelineUpload, output_size: vk::DeviceSize) -> Ore {
+    let kind = pipeline_kind_to_ore(up.kind);
+    let primary: ThinVec<u8> = up.primary_bytes.clone();
+    let secondary: ThinVec<u8> = up.secondary_bytes.clone();
+    let input = if up.is_mesh && !primary.is_empty() {
+        // Re-wrap as raw bytes; the engine's Ore::primary_bytes/secondary_bytes
+        // already handles arbitrary byte payloads regardless of OreInput tag.
+        OreInput::Bytes(primary)
+    } else if primary.is_empty() {
+        OreInput::Empty
+    } else {
+        OreInput::Bytes(primary)
+    };
+    // Compute outputs that downstream graphics draws read directly need
+    // extra buffer-usage flags so the same allocation is bindable as a
+    // vertex source or SSBO without a copy step.
+    //   MorphBlend → posed vertex buffer  → VERTEX_BUFFER
+    //   SkinPalette → joint-palette SSBO → STORAGE_BUFFER (already default,
+    //                  redundant flag is a no-op but documents intent)
+    let extra_usage = match kind {
+        OreKind::MorphBlend  => vk::BufferUsageFlags::VERTEX_BUFFER,
+        OreKind::SkinPalette => vk::BufferUsageFlags::STORAGE_BUFFER,
+        _                    => vk::BufferUsageFlags::empty(),
+    };
+    let mut ore = Ore::new(
+        kind,
+        input,
+        IngotSpec::Buffer {
+            size: non_zero_size(output_size),
+            save_path: None,
+            extra_usage,
+        },
+        up.workgroups,
+    );
+    // Override secondary_bytes via a wrapper: store on a side ore is not
+    // necessary — we instead use the secondary buffer directly by pushing it
+    // through a "twin" ore when present. For now the engine's compute path
+    // sees secondary bytes via Ore::secondary_bytes (mesh case) — if the
+    // PipelineUpload carries a secondary buffer, drop it into a Mesh-shaped
+    // OreInput so the existing Ore::secondary_bytes returns it.
+    if !secondary.is_empty() {
+        let vertex_stride = std::mem::size_of::<ForgeVertex>();
+        let n_vertices = if up.element_stride == vertex_stride as u32 {
+            (up.primary_bytes.len() / vertex_stride) as u32
+        } else {
+            up.element_count
+        };
+        ore.input = OreInput::Mesh(MeshOre::new(
+            // Vertices are bytes-cast: we already encoded them in the
+            // ForgeVertex layout in `pack_primitive_vertices`, but we don't
+            // need to reconstruct the typed view — the staging path only
+            // reads `vertices_as_bytes`, so an empty vec works when the
+            // primary buffer was non-vertex. We keep the typed mirror only
+            // for mesh-shaped uploads (is_mesh = true).
+            if up.is_mesh { unpack_forge_vertices(&up.primary_bytes, n_vertices as usize) }
+                else      { ThinVec::new() },
+            unpack_u32(&secondary),
+        ));
+    }
+    ore
+}
+
+fn unpack_forge_vertices(bytes: &[u8], n: usize) -> ThinVec<ForgeVertex> {
+    let stride = std::mem::size_of::<ForgeVertex>();
+    let mut out = ThinVec::with_capacity(n);
+    for i in 0..n {
+        let s = i * stride;
+        let position = [
+            f32_le(&bytes[s..]),         f32_le(&bytes[s+4..]),   f32_le(&bytes[s+8..]),
+        ];
+        let normal = [
+            f32_le(&bytes[s+12..]),      f32_le(&bytes[s+16..]),  f32_le(&bytes[s+20..]),
+        ];
+        let tangent = [
+            f32_le(&bytes[s+24..]),      f32_le(&bytes[s+28..]),  f32_le(&bytes[s+32..]),  f32_le(&bytes[s+36..]),
+        ];
+        let uv = [
+            f32_le(&bytes[s+40..]),      f32_le(&bytes[s+44..]),
+        ];
+        out.push(ForgeVertex { position, normal, tangent, uv });
+    }
+    out
+}
+
+fn unpack_u32(bytes: &[u8]) -> ThinVec<u32> {
+    let n = bytes.len() / 4;
+    let mut out = ThinVec::with_capacity(n);
+    for i in 0..n {
+        out.push(u32::from_le_bytes([
+            bytes[i*4], bytes[i*4+1], bytes[i*4+2], bytes[i*4+3],
+        ]));
+    }
+    out
+}
+
+fn f32_le(b: &[u8]) -> f32 { f32::from_le_bytes([b[0], b[1], b[2], b[3]]) }
+
+fn non_zero_size(size: vk::DeviceSize) -> vk::DeviceSize { size.max(1) }
+
+fn pipeline_kind_to_ore(kind: forge_gltf::GltfPipelineKind) -> OreKind {
+    use forge_gltf::GltfGraphicsKind as G;
+    use forge_gltf::GltfPipelineKind as K;
+    match kind {
+        K::RayTrace            => OreKind::RayTrace,
+        K::Denoise             => OreKind::Denoise,
+        K::SignedDistanceField => OreKind::SignedDistanceField,
+        K::SdfVoxelization     => OreKind::SdfVoxelization,
+        K::LightClustering     => OreKind::LightClustering,
+        K::OcclusionCulling    => OreKind::OcclusionCulling,
+        K::MaterialFlattening  => OreKind::MaterialFlattening,
+        K::AmbientOcclusion    => OreKind::AmbientOcclusion,
+        K::VisibilityPass      => OreKind::VisibilityPass,
+        K::SkinPalette         => OreKind::SkinPalette,
+        K::MorphBlend          => OreKind::MorphBlend,
+        K::Graphics(G::ForwardLit) => OreKind::Graphics(GraphicsOreKind::ForwardLit),
+        K::Graphics(G::Ui)         => OreKind::Graphics(GraphicsOreKind::Ui),
+    }
+}
+
+fn graphics_kind_to_ore(kind: forge_gltf::GltfGraphicsKind) -> GraphicsOreKind {
+    match kind {
+        forge_gltf::GltfGraphicsKind::ForwardLit => GraphicsOreKind::ForwardLit,
+        forge_gltf::GltfGraphicsKind::Ui         => GraphicsOreKind::Ui,
+    }
+}
+
+// ── End-to-end pipeline plumbing ───────────────────────────────────────────
+
+/// Build one engine `Ore` per compute pipeline kind from a single glTF asset.
+/// The caller supplies an output buffer size used for every compute pipeline;
+/// pass `0` to let the engine pick the minimum (`non_zero_size` rounds up).
+pub fn build_compute_ores(
+    asset: &GltfAsset,
+    params: PipelineParams,
+    output_size: vk::DeviceSize,
+) -> ThinVec<Ore> {
+    build_all_compute_uploads(asset, params)
+        .iter()
+        .map(|up| upload_to_ore(up, output_size))
+        .collect()
+}
+
+/// Refine every compute pipeline through a live `ForgeMaster` — dispatches
+/// the compute work for each kind. Returns one `Ingot` per pipeline kind, in
+/// the same order as `forge_gltf::build_all_compute_uploads`.
+pub fn refine_all_compute(
+    asset:       &GltfAsset,
+    params:      PipelineParams,
+    master:      &mut ForgeMaster,
+    output_size: vk::DeviceSize,
+) -> ForgeResult<ThinVec<Ingot>> {
+    let ores = build_compute_ores(asset, params, output_size);
+    let mut out = ThinVec::with_capacity(ores.len());
+    for ore in ores { out.push(master.refine(ore)?); }
     Ok(out)
 }
 
-fn extract_primitive(
-    prim:    &gltf::Primitive<'_>,
-    buffers: &[gltf::buffer::Data],
-) -> Result<MeshOre, GltfError> {
-    let reader = prim.reader(|buf| Some(&*buffers[buf.index()]));
-
-    let positions: Vec<[f32; 3]> = reader
-        .read_positions()
-        .ok_or(GltfError::NoPositions)?
-        .collect();
-    let n = positions.len();
-
-    let normals: Vec<[f32; 3]> = reader.read_normals()
-        .map(|it| it.collect())
-        .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; n]);
-
-    let tangents: Vec<[f32; 4]> = reader.read_tangents()
-        .map(|it| it.collect())
-        .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; n]);
-
-    let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0)
-        .map(|tc| tc.into_f32().collect())
-        .unwrap_or_else(|| vec![[0.0, 0.0]; n]);
-
-    let vertices: ThinVec<ForgeVertex> = (0..n)
-        .map(|i| ForgeVertex::new(positions[i], normals[i], tangents[i], uvs[i]))
-        .collect();
-
-    let indices: ThinVec<u32> = match reader.read_indices() {
-        Some(it) => it.into_u32().collect(),
-        None     => (0..n as u32).collect(),
-    };
-
-    Ok(MeshOre::new(vertices, indices))
+/// Register the SkinPalette and MorphBlend compute forges with a live
+/// `ForgeMaster`. Call once at startup before the first per-frame dispatch.
+pub fn register_skin_morph_forges(master: &mut ForgeMaster) -> ForgeResult<()> {
+    master.add_forge_from_spirv_bytes(
+        ForgeId::new(OreKind::SkinPalette.index() as i64),
+        OreKind::SkinPalette,
+        SKIN_PALETTE_SPV,
+    )?;
+    master.add_forge_from_spirv_bytes(
+        ForgeId::new(OreKind::MorphBlend.index() as i64),
+        OreKind::MorphBlend,
+        MORPH_BLEND_SPV,
+    )?;
+    Ok(())
 }
 
-// ── Test helpers ───────────────────────────────────────────────────────────
-
-/// Build a minimal GLB 2.0 byte blob from raw mesh data.
-///
-/// Exposed as `pub(crate)` so the bench file can reuse it without touching disk.
-pub fn build_test_glb(
-    positions: &[[f32; 3]],
-    normals:   Option<&[[f32; 3]]>,
-    uvs:       Option<&[[f32; 2]]>,
-    indices:   Option<&[u32]>,
-) -> Vec<u8> {
-    // ── BIN section ──────────────────────────────────────────────────────
-    // Append each attribute run to one flat buffer, 4-byte aligned.
-
-    let mut bin: Vec<u8> = Vec::new();
-
-    // Returns (byte_offset, byte_length) of the appended block.
-    fn append_f32s(bin: &mut Vec<u8>, floats: &[f32]) -> (usize, usize) {
-        while bin.len() % 4 != 0 { bin.push(0); }
-        let off = bin.len();
-        for &f in floats { bin.extend_from_slice(&f.to_le_bytes()); }
-        (off, bin.len() - off)
-    }
-    fn append_u32s(bin: &mut Vec<u8>, ints: &[u32]) -> (usize, usize) {
-        while bin.len() % 4 != 0 { bin.push(0); }
-        let off = bin.len();
-        for &v in ints { bin.extend_from_slice(&v.to_le_bytes()); }
-        (off, bin.len() - off)
-    }
-
-    // Flatten each slice-of-arrays into a flat f32 slice before appending.
-    let pos_flat: Vec<f32> = positions.iter().flat_map(|p| p.iter().copied()).collect();
-    let (pos_off, pos_len) = append_f32s(&mut bin, &pos_flat);
-
-    let norm_bv = normals.map(|ns| {
-        let flat: Vec<f32> = ns.iter().flat_map(|n| n.iter().copied()).collect();
-        append_f32s(&mut bin, &flat)
-    });
-    let uv_bv = uvs.map(|us| {
-        let flat: Vec<f32> = us.iter().flat_map(|u| u.iter().copied()).collect();
-        append_f32s(&mut bin, &flat)
-    });
-    let idx_bv = indices.map(|ids| append_u32s(&mut bin, ids));
-
-    while bin.len() % 4 != 0 { bin.push(0); }
-    let bin_total = bin.len();
-
-    // ── JSON section ─────────────────────────────────────────────────────
-    // Each buffer view and accessor is pushed in the same order as the BIN
-    // appends above. Indices are tracked as plain usizes.
-
-    let mut bvs:  Vec<String> = Vec::new();
-    let mut accs: Vec<String> = Vec::new();
-
-    // pos  → bv 0, acc 0  (POSITION requires min/max per glTF spec)
-    let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
-    for p in positions {
-        for i in 0..3 {
-            mn[i] = mn[i].min(p[i]);
-            mx[i] = mx[i].max(p[i]);
+/// Identifier for one morph-blended primitive's compute output. The
+/// `build_skin_morph_proto` function assigns these IDs in a deterministic
+/// order so callers can pull the right `vk::Buffer` out of the resulting
+/// `Factory`'s ingot list via `morph_output_frame_id(mesh_idx, prim_idx)`.
+pub fn morph_output_frame_id(asset: &GltfAsset, mesh_idx: usize, prim_idx: usize) -> Option<FrameId> {
+    // Mirror the iteration order of build_skin_morph_proto: skins first
+    // (one frame id each), then morphed primitives.
+    let mut next: i64 = 1;
+    for skin_idx in 0..asset.skins.len() {
+        // Only counts when the skin actually has joints; matches the proto.
+        if let Some(skin) = asset.skins.get(skin_idx) {
+            if !skin.joints.is_empty() { next += 1; }
         }
     }
-    bvs.push(format!(r#"{{"buffer":0,"byteOffset":{pos_off},"byteLength":{pos_len}}}"#));
-    accs.push(format!(
-        r#"{{"bufferView":0,"componentType":5126,"count":{cnt},"type":"VEC3","min":[{},{},{}],"max":[{},{},{}]}}"#,
-        mn[0], mn[1], mn[2], mx[0], mx[1], mx[2], cnt = positions.len()
-    ));
+    for (mi, mesh) in asset.meshes.iter().enumerate() {
+        for (pi, prim) in mesh.primitives.iter().enumerate() {
+            if prim.morph_targets.is_empty() { continue; }
+            if mi == mesh_idx && pi == prim_idx {
+                return Some(FrameId::new(next));
+            }
+            next += 1;
+        }
+    }
+    None
+}
 
-    let norm_acc: Option<usize> = norm_bv.map(|(off, len)| {
-        let bv = bvs.len();
-        bvs.push(format!(r#"{{"buffer":0,"byteOffset":{off},"byteLength":{len}}}"#));
-        let ac = accs.len();
-        accs.push(format!(r#"{{"bufferView":{bv},"componentType":5126,"count":{cnt},"type":"VEC3"}}"#,
-            cnt = normals.unwrap().len()));
-        ac
-    });
+/// Walk a compute factory built from a `build_skin_morph_proto` proto and
+/// produce a map from (mesh_idx, prim_idx) to the morph-blended posed
+/// vertex buffer. Pass the map to
+/// `build_graphics_plans_with_pose_and_materials_morphs` (next function)
+/// so each draw binds the right compute output as its vertex source.
+pub fn collect_morph_output_buffers(
+    asset:   &GltfAsset,
+    factory: &crate::render::factory_master::factory::Factory,
+) -> std::collections::HashMap<(usize, usize), vk::Buffer> {
+    let mut out = std::collections::HashMap::new();
+    for (mi, mesh) in asset.meshes.iter().enumerate() {
+        for (pi, prim) in mesh.primitives.iter().enumerate() {
+            if prim.morph_targets.is_empty() { continue; }
+            let Some(id) = morph_output_frame_id(asset, mi, pi) else { continue };
+            let Some(frame) = factory.frame_by_id(id) else { continue };
+            let Some(ingot) = frame.ingots.first() else { continue };
+            if let Some(buf) = ingot.result_buffer() {
+                out.insert((mi, pi), buf.handle);
+            }
+        }
+    }
+    out
+}
 
-    let uv_acc: Option<usize> = uv_bv.map(|(off, len)| {
-        let bv = bvs.len();
-        bvs.push(format!(r#"{{"buffer":0,"byteOffset":{off},"byteLength":{len}}}"#));
-        let ac = accs.len();
-        accs.push(format!(r#"{{"bufferView":{bv},"componentType":5126,"count":{cnt},"type":"VEC2"}}"#,
-            cnt = uvs.unwrap().len()));
-        ac
-    });
+/// Build a compute `Proto` that drives the SkinPalette + MorphBlend
+/// pipelines for every relevant skin/primitive in `asset` for the current
+/// `pose`. Pass it to `Renderer::build_compute_factory` each frame.
+///
+/// Returns `None` when the asset has no skins or morph targets — there's
+/// nothing to dispatch, so the caller can skip the factory build entirely.
+///
+/// `output_size` is the per-Ore output-buffer size in bytes (round up via
+/// `non_zero_size`); pass `0` to let the helper choose a 4-byte minimum.
+pub fn build_skin_morph_proto(
+    asset:       &GltfAsset,
+    pose:        &Pose,
+    proto_id:    ProtoId,
+    output_size: vk::DeviceSize,
+) -> Option<Proto<ComputeTag>> {
+    let mut proto = Proto::<ComputeTag>::new(proto_id, "skin_morph_frame");
+    let mut next_id: i64 = 1;
 
-    let idx_acc: Option<usize> = idx_bv.map(|(off, len)| {
-        let bv = bvs.len();
-        bvs.push(format!(r#"{{"buffer":0,"byteOffset":{off},"byteLength":{len}}}"#));
-        let ac = accs.len();
-        accs.push(format!(r#"{{"bufferView":{bv},"componentType":5125,"count":{cnt},"type":"SCALAR"}}"#,
-            cnt = indices.unwrap().len()));
-        ac
-    });
+    // SkinPalette: one plan per skin.
+    for skin_idx in 0..asset.skins.len() {
+        if let Some(upload) = build_skin_palette_input(asset, pose, skin_idx) {
+            let palette_bytes = (upload.element_count as vk::DeviceSize) * 64;
+            let ore = upload_to_ore(&upload, output_size.max(palette_bytes));
+            let mut plan = FramePlan::new(
+                FrameId::new(next_id),
+                format!("skin_palette_{skin_idx}"),
+            );
+            plan.push(ore);
+            proto.push_plan(plan);
+            next_id += 1;
+        }
+    }
 
-    let mut attrs = format!(r#""POSITION":0"#);
-    if let Some(i) = norm_acc { attrs.push_str(&format!(r#","NORMAL":{i}"#)); }
-    if let Some(i) = uv_acc   { attrs.push_str(&format!(r#","TEXCOORD_0":{i}"#)); }
-    let prim_idx = match idx_acc {
-        Some(i) => format!(r#","indices":{i}"#),
-        None    => String::new(),
-    };
+    // MorphBlend: one plan per morphed primitive. We need a node index to
+    // resolve per-instance weight overrides; pick the first node that
+    // references the mesh (every other node will share the same weights at
+    // this granularity since the pose only stores per-node overrides).
+    for (mesh_idx, mesh) in asset.meshes.iter().enumerate() {
+        let node_idx = asset.nodes.iter()
+            .position(|n| n.mesh == Some(mesh_idx as u32))
+            .unwrap_or(0);
+        for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
+            if prim.morph_targets.is_empty() { continue; }
+            if let Some(upload) = build_morph_blend_input(asset, mesh_idx, prim_idx, pose, node_idx) {
+                let posed_bytes = (upload.primary_bytes.len()) as vk::DeviceSize;
+                let ore = upload_to_ore(&upload, output_size.max(posed_bytes));
+                let mut plan = FramePlan::new(
+                    FrameId::new(next_id),
+                    format!("morph_blend_m{mesh_idx}_p{prim_idx}"),
+                );
+                plan.push(ore);
+                proto.push_plan(plan);
+                next_id += 1;
+            }
+        }
+    }
 
-    let json = format!(
-        r#"{{"asset":{{"version":"2.0"}},"meshes":[{{"primitives":[{{"attributes":{{{attrs}}}{prim_idx}}}]}}],"accessors":[{accs}],"bufferViews":[{bvs}],"buffers":[{{"byteLength":{bin_total}}}]}}"#,
-        accs = accs.join(","), bvs = bvs.join(",")
-    );
-    let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 { json_bytes.push(b' '); }
+    if proto.is_empty() { None } else { Some(proto) }
+}
 
-    // ── GLB assembly ──────────────────────────────────────────────────────
-    let total = 12 + 8 + json_bytes.len() + 8 + bin_total;
-    let mut glb: Vec<u8> = Vec::with_capacity(total);
-    let p = |g: &mut Vec<u8>, v: u32| g.extend_from_slice(&v.to_le_bytes());
-    p(&mut glb, 0x46546C67); // magic
-    p(&mut glb, 2);           // version
-    p(&mut glb, total as u32);
-    p(&mut glb, json_bytes.len() as u32);
-    p(&mut glb, 0x4E4F534A); // "JSON"
-    glb.extend_from_slice(&json_bytes);
-    p(&mut glb, bin_total as u32);
-    p(&mut glb, 0x004E4942); // "BIN\0"
-    glb.extend_from_slice(&bin);
-    glb
+/// Upload every glTF primitive as a `GpuMesh` and emit one
+/// `GraphicsFramePlan` per node-primitive draw. The `MeshUploadCtx` is
+/// borrowed only for the duration of the upload — meshes outlive it inside
+/// the returned `Arc<GpuMesh>` handles.
+pub fn build_graphics_plans(
+    asset:      &GltfAsset,
+    upload_ctx: &MeshUploadCtx,
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    // Cache one Arc<GpuMesh> per (mesh, primitive) pair so multiple draws
+    // referencing the same primitive share GPU memory.
+    let mut cache: Vec<Vec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
+        .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
+        .collect();
+
+    let draws = build_graphics_draws(asset);
+    let mut plans = ThinVec::with_capacity(draws.len());
+    for (i, d) in draws.iter().enumerate() {
+        let mesh_slot = &mut cache[d.mesh as usize][d.primitive as usize];
+        if mesh_slot.is_none() {
+            let ore = primitive_to_mesh_ore(asset, d.mesh, d.primitive);
+            let gpu = GpuMesh::upload(upload_ctx, &ore)?;
+            *mesh_slot = Some(Arc::new(gpu));
+        }
+        let mesh = mesh_slot.as_ref().unwrap().clone();
+        let plan = GraphicsFramePlan::new_mesh(
+            crate::forge_master::frame::FrameId::new((i + 1) as i64),
+            d.material
+                .map(|m| format!("primitive_{}_mat_{m}", i))
+                .unwrap_or_else(|| format!("primitive_{i}")),
+            mesh,
+        )
+        .with_mvp(d.world_matrix);
+        plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
+    }
+    Ok(plans)
+}
+
+/// Same as `build_graphics_plans` but tags every plan as the UI pipeline.
+/// Useful when the caller wants the glTF tree rendered as UI overlays.
+pub fn build_ui_plans(
+    asset:      &GltfAsset,
+    upload_ctx: &MeshUploadCtx,
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    let mut plans = build_graphics_plans(asset, upload_ctx)?;
+    for p in plans.iter_mut() {
+        p.kind = GraphicsOreKind::Ui;
+    }
+    // Touch the helper so the compiler keeps it warm (and so the dependency
+    // graph between build_ui_draws and the bridge stays explicit).
+    let _ = build_ui_draws(asset).len();
+    Ok(plans)
+}
+
+/// Build draw plans against a pre-sampled `Pose`. Same upload semantics as
+/// `build_graphics_plans`: meshes are uploaded once per (mesh, primitive)
+/// and shared across draws; only the per-draw world matrix changes between
+/// frames. Call once after each `Pose::sample` to get the frame's draw list.
+pub fn build_graphics_plans_with_pose(
+    asset:      &GltfAsset,
+    pose:       &Pose,
+    upload_ctx: &MeshUploadCtx,
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    build_graphics_plans_with_pose_and_materials(asset, pose, upload_ctx, &[])
+}
+
+/// Variant of `build_graphics_plans_with_pose` that attaches a pre-resolved
+/// material descriptor set to each plan. `material_sets` is indexed by the
+/// asset's material index; entries that are `None` (or out of range) leave
+/// the plan's `material_set` unset (caller falls back to dummy bindings).
+pub fn build_graphics_plans_with_pose_and_materials(
+    asset:         &GltfAsset,
+    pose:          &Pose,
+    upload_ctx:    &MeshUploadCtx,
+    material_sets: &[Option<vk::DescriptorSet>],
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    build_graphics_plans_full(asset, pose, upload_ctx, material_sets, &Default::default())
+}
+
+/// Bundle of per-frame resources for skinned-draw routing — output of
+/// the compute pass plus the device-side buffers/sets the graphics pass
+/// will bind.
+#[derive(Default)]
+pub struct SkinningFrame {
+    /// (mesh_idx, prim_idx) → the per-vertex joints+weights buffer
+    /// uploaded once per primitive via `GpuSkinBuffer::upload`. Owned by
+    /// the caller (typically cached for the asset's lifetime).
+    pub skin_vertex_buffers: std::collections::HashMap<(usize, usize), vk::Buffer>,
+    /// `node_idx` → the skin-palette descriptor set bound at set 2.
+    /// Allocated per frame from a recyclable descriptor pool.
+    pub palette_sets_by_node: std::collections::HashMap<usize, vk::DescriptorSet>,
+}
+
+/// Maximal-power per-frame plan builder.
+///
+/// `morph_buffers` maps `(mesh_idx, prim_idx)` → the `vk::Buffer` produced
+/// by a corresponding MorphBlend compute Ore in this frame (typically built
+/// via `collect_morph_output_buffers(asset, &compute_factory)`). When a
+/// draw's primitive carries morph targets and the map has a matching entry,
+/// the draw is recorded with `vertex_buffer_override = Some(buf)` so the
+/// rasterizer fetches the posed vertices directly out of the compute output.
+pub fn build_graphics_plans_full(
+    asset:         &GltfAsset,
+    pose:          &Pose,
+    upload_ctx:    &MeshUploadCtx,
+    material_sets: &[Option<vk::DescriptorSet>],
+    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    build_graphics_plans_maximal(
+        asset, pose, upload_ctx, material_sets, morph_buffers, &SkinningFrame::default(),
+    )
+}
+
+/// The final per-frame plan builder. Beyond `_full`, this also routes
+/// skinned primitives to the `SkinnedForwardLit` pipeline, attaches the
+/// per-vertex joints/weights buffer at vertex binding 1, and binds the
+/// SkinPalette descriptor set at descriptor set 2.
+pub fn build_graphics_plans_maximal(
+    asset:         &GltfAsset,
+    pose:          &Pose,
+    upload_ctx:    &MeshUploadCtx,
+    material_sets: &[Option<vk::DescriptorSet>],
+    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    skinning:      &SkinningFrame,
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    let mut cache: Vec<Vec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
+        .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
+        .collect();
+
+    let draws = build_graphics_draws_with_matrices(asset, &pose.world);
+    let mut plans = ThinVec::with_capacity(draws.len());
+    for (i, d) in draws.iter().enumerate() {
+        let mesh_slot = &mut cache[d.mesh as usize][d.primitive as usize];
+        if mesh_slot.is_none() {
+            let ore = primitive_to_mesh_ore(asset, d.mesh, d.primitive);
+            let gpu = GpuMesh::upload(upload_ctx, &ore)?;
+            *mesh_slot = Some(Arc::new(gpu));
+        }
+        let mesh = mesh_slot.as_ref().unwrap().clone();
+
+        // Skinned primitives need three things in lockstep:
+        //   1. the per-vertex JOINTS_0 + WEIGHTS_0 buffer at vertex binding 1
+        //   2. the SkinPalette descriptor set at set 2 (one per node-with-skin)
+        //   3. the SkinnedForwardLit pipeline (kind override)
+        // Falls back to plain ForwardLit when any of those pieces is missing.
+        let node = &asset.nodes[d.node as usize];
+        let is_skinned = node.skin.is_some() && primitive_is_skinned(asset, d.mesh, d.primitive);
+        let skin_vb = if is_skinned {
+            skinning.skin_vertex_buffers.get(&(d.mesh as usize, d.primitive as usize)).copied()
+        } else { None };
+        let palette_set = if is_skinned {
+            skinning.palette_sets_by_node.get(&(d.node as usize)).copied()
+        } else { None };
+
+        let mut plan = GraphicsFramePlan::new_mesh(
+            crate::forge_master::frame::FrameId::new((i + 1) as i64),
+            d.material
+                .map(|m| format!("animated_prim_{i}_mat_{m}"))
+                .unwrap_or_else(|| format!("animated_prim_{i}")),
+            mesh,
+        )
+        .with_mvp(d.world_matrix);
+        if let Some(mat_idx) = d.material {
+            if let Some(Some(set)) = material_sets.get(mat_idx as usize) {
+                plan = plan.with_material_set(*set);
+            }
+        }
+        if let Some(&buf) = morph_buffers.get(&(d.mesh as usize, d.primitive as usize)) {
+            plan = plan.with_vertex_buffer_override(buf);
+        }
+        // Promote to the skinned pipeline only when the full triplet is wired.
+        if is_skinned && skin_vb.is_some() && palette_set.is_some() {
+            plan = plan
+                .with_kind(GraphicsOreKind::SkinnedForwardLit)
+                .with_skin_vertex_buffer(skin_vb.unwrap())
+                .with_skin_palette_set(palette_set.unwrap());
+            plans.push(plan);
+        } else {
+            plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
+        }
+    }
+    Ok(plans)
+}
+
+/// Pack one primitive's `JOINTS_0` + `WEIGHTS_0` streams into the
+/// 24-byte-per-vertex layout expected by `skinned_forward_lit.vert` at
+/// binding 1 — `uvec2 joints_packed` (4 × u16) + `vec4 weights` (4 × f32).
+///
+/// Primitives that don't carry joint/weight streams (i.e. unskinned) get a
+/// zero-byte vector — callers should not upload a SkinVertex buffer for
+/// them and should leave the draw on the regular ForwardLit pipeline.
+pub fn pack_primitive_skin_attrs(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> Vec<u8> {
+    let prim = &asset.meshes[mesh_idx as usize].primitives[prim_idx as usize];
+    let n = prim.streams.positions.len();
+    let joints0  = prim.streams.joints.first();
+    let weights0 = prim.streams.weights.first();
+    if joints0.is_none() || weights0.is_none() { return Vec::new(); }
+    let joints  = joints0.unwrap();
+    let weights = weights0.unwrap();
+
+    let mut out = Vec::with_capacity(n * 24);
+    for i in 0..n {
+        let j = joints.get(i).copied().unwrap_or([0; 4]);
+        let w = weights.get(i).copied().unwrap_or([0.0; 4]);
+        // Pack 4 × u16 into uvec2 (low halves into .x, high halves into .y).
+        let xy0 = (j[0] as u32) | ((j[1] as u32) << 16);
+        let xy1 = (j[2] as u32) | ((j[3] as u32) << 16);
+        out.extend_from_slice(&xy0.to_le_bytes());
+        out.extend_from_slice(&xy1.to_le_bytes());
+        for v in w { out.extend_from_slice(&v.to_le_bytes()); }
+    }
+    out
+}
+
+/// Returns true when primitive `prim_idx` of mesh `mesh_idx` carries any
+/// non-empty JOINTS_0 / WEIGHTS_0 streams — i.e. it's a skinned primitive
+/// that should be routed through the SkinnedForwardLit pipeline.
+pub fn primitive_is_skinned(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> bool {
+    let prim = &asset.meshes[mesh_idx as usize].primitives[prim_idx as usize];
+    prim.streams.joints.first().is_some_and(|s| !s.is_empty())
+        && prim.streams.weights.first().is_some_and(|s| !s.is_empty())
+}
+
+/// Identifier for a per-skin SkinPalette compute output, matching the
+/// iteration order that `build_skin_morph_proto` uses.
+pub fn skin_palette_frame_id(asset: &GltfAsset, skin_idx: usize) -> Option<FrameId> {
+    let mut next: i64 = 1;
+    for si in 0..asset.skins.len() {
+        if asset.skins.get(si).is_some_and(|s| !s.joints.is_empty()) {
+            if si == skin_idx { return Some(FrameId::new(next)); }
+            next += 1;
+        }
+    }
+    None
+}
+
+/// Walk a compute factory built from `build_skin_morph_proto` and produce
+/// a map from skin index → the SkinPalette mat4[] buffer the compute Ore
+/// just wrote, ready to be bound as set 2 binding 0 on the
+/// `SkinnedForwardLit` pipeline.
+pub fn collect_skin_palette_buffers(
+    asset:   &GltfAsset,
+    factory: &crate::render::factory_master::factory::Factory,
+) -> std::collections::HashMap<usize, vk::Buffer> {
+    let mut out = std::collections::HashMap::new();
+    for si in 0..asset.skins.len() {
+        let Some(id) = skin_palette_frame_id(asset, si) else { continue };
+        let Some(frame) = factory.frame_by_id(id) else { continue };
+        let Some(ingot) = frame.ingots.first() else { continue };
+        if let Some(buf) = ingot.result_buffer() {
+            out.insert(si, buf.handle);
+        }
+    }
+    out
+}
+
+fn primitive_to_mesh_ore(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> MeshOre {
+    let prim = &asset.meshes[mesh_idx as usize].primitives[prim_idx as usize];
+    let n = prim.streams.positions.len();
+    let uv0 = prim.streams.uv_sets.first();
+    let vertices: ThinVec<ForgeVertex> = (0..n)
+        .map(|i| ForgeVertex::new(
+            prim.streams.positions[i],
+            prim.streams.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+            prim.streams.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
+            uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]),
+        ))
+        .collect();
+    MeshOre::new(vertices, prim.indices.clone())
+}
+
+fn plan_with_kind(mut plan: GraphicsFramePlan, kind: GraphicsOreKind) -> GraphicsFramePlan {
+    plan.kind = kind;
+    plan
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -327,16 +821,7 @@ mod tests {
 
     #[test]
     fn empty_document_returns_no_primitives_error() {
-        // Build a valid GLB that contains no meshes.
-        let json = br#"{"asset":{"version":"2.0"}}"#;
-        let mut jp = json.to_vec();
-        while jp.len() % 4 != 0 { jp.push(b' '); }
-        let total = (12 + 8 + jp.len()) as u32;
-        let mut glb: Vec<u8> = Vec::new();
-        for v in [0x46546C67u32, 2, total, jp.len() as u32, 0x4E4F534A] {
-            glb.extend_from_slice(&v.to_le_bytes());
-        }
-        glb.extend_from_slice(&jp);
+        let glb = forge_gltf::build_empty_glb();
         assert!(matches!(
             load_first_mesh_from_slice(&glb),
             Err(GltfError::NoPrimitives)
@@ -345,16 +830,46 @@ mod tests {
 
     #[test]
     fn all_meshes_from_slice_returns_empty_for_no_meshes() {
-        let json = br#"{"asset":{"version":"2.0"}}"#;
-        let mut jp = json.to_vec();
-        while jp.len() % 4 != 0 { jp.push(b' '); }
-        let total = (12 + 8 + jp.len()) as u32;
-        let mut glb: Vec<u8> = Vec::new();
-        for v in [0x46546C67u32, 2, total, jp.len() as u32, 0x4E4F534A] {
-            glb.extend_from_slice(&v.to_le_bytes());
-        }
-        glb.extend_from_slice(&jp);
+        let glb = forge_gltf::build_empty_glb();
         let result = load_all_meshes_from_slice(&glb).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn load_asset_exposes_full_document() {
+        let glb = build_test_glb(&triangle_pos(), None, None, None);
+        let asset = load_asset_from_slice(&glb).unwrap();
+        assert_eq!(asset.meshes.len(), 1);
+        let ores = asset_to_mesh_ores(&asset);
+        assert_eq!(ores.len(), 1);
+        assert_eq!(ores[0].vertices.len(), 3);
+    }
+
+    #[test]
+    fn compute_ores_produced_for_every_kind() {
+        let glb = build_test_glb(&triangle_pos(), None, None, None);
+        let asset = load_asset_from_slice(&glb).unwrap();
+        let ores = build_compute_ores(&asset, PipelineParams::default(), 1024);
+        assert_eq!(ores.len(), 9);
+        let kinds: Vec<OreKind> = ores.iter().map(|o| o.kind).collect();
+        assert!(kinds.contains(&OreKind::RayTrace));
+        assert!(kinds.contains(&OreKind::Denoise));
+        assert!(kinds.contains(&OreKind::SignedDistanceField));
+        assert!(kinds.contains(&OreKind::SdfVoxelization));
+        assert!(kinds.contains(&OreKind::LightClustering));
+        assert!(kinds.contains(&OreKind::OcclusionCulling));
+        assert!(kinds.contains(&OreKind::MaterialFlattening));
+        assert!(kinds.contains(&OreKind::AmbientOcclusion));
+        assert!(kinds.contains(&OreKind::VisibilityPass));
+    }
+
+    #[test]
+    fn texture_ores_decode_from_asset() {
+        // The test GLB has no images so this should be empty — exercises
+        // the empty path without needing the `image` crate.
+        let glb = build_test_glb(&triangle_pos(), None, None, None);
+        let asset = load_asset_from_slice(&glb).unwrap();
+        let texs = asset_to_texture_ores(&asset);
+        assert!(texs.is_empty());
     }
 }

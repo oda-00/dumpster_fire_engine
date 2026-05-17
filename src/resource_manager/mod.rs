@@ -1,5 +1,6 @@
 pub mod asset_manager;
 pub mod component;
+pub mod gltf_driver;
 pub mod manager;
 pub mod world_manager;
 pub mod event_manager;

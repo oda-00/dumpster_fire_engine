@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/forge_gltf",
     "crates/lang_frontend",
     "tools/langc",
     "tools/langcd",
@@ -38,6 +39,7 @@ gltf = { version = "1.4", default-features = false, features = [
 ] }
 mikktspace = "0.3"
 object     = { version = "0.36", default-features = false, features = ["read", "std"] }
+forge_gltf = { path = "crates/forge_gltf" }
 
 [target.'cfg(unix)'.dependencies]
 # Used for UnixStream ancillary-fd transport (SCM_RIGHTS) when the engine

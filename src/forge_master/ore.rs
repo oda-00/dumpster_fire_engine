@@ -17,13 +17,19 @@ use super::master::{ForgeError, ForgeResult};
 pub enum GraphicsOreKind {
     /// Opaque geometry rendered with the forward-lit pipeline.
     ForwardLit,
+    /// Skinned variant of ForwardLit — same fragment shader, but the
+    /// vertex shader reads JOINTS_0 / WEIGHTS_0 from a second vertex
+    /// binding and a `mat4[]` skin palette from set 2 binding 0 (SSBO,
+    /// fed by the SkinPalette compute Ore).
+    SkinnedForwardLit,
     /// Immediate-mode UI overlay rendered on top of the scene.
     Ui,
 }
 
 impl GraphicsOreKind {
-    pub const ALL: [GraphicsOreKind; 2] = [
+    pub const ALL: [GraphicsOreKind; 3] = [
         GraphicsOreKind::ForwardLit,
+        GraphicsOreKind::SkinnedForwardLit,
         GraphicsOreKind::Ui,
     ];
 
@@ -56,6 +62,12 @@ pub enum OreKind {
     AmbientOcclusion,
     VisibilityPass,
 
+    // Skinning / morph-blend (compute; run before graphics draws each frame).
+    /// Builds a per-joint `[world × IBM]` palette from per-frame world matrices.
+    SkinPalette,
+    /// Applies weighted morph-target deltas to a rest-pose vertex buffer.
+    MorphBlend,
+
     // Rasterization — sub-kind selects the draw pipeline.
     Graphics(GraphicsOreKind),
 }
@@ -63,7 +75,7 @@ pub enum OreKind {
 impl OreKind {
     /// Compute-only kinds, in `index()` order. Use this to size the compute
     /// forge cache — graphics variants live in their own arena.
-    pub const COMPUTE_ALL: [OreKind; 9] = [
+    pub const COMPUTE_ALL: [OreKind; 11] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -73,12 +85,14 @@ impl OreKind {
         OreKind::MaterialFlattening,
         OreKind::AmbientOcclusion,
         OreKind::VisibilityPass,
+        OreKind::SkinPalette,
+        OreKind::MorphBlend,
     ];
 
     pub const COMPUTE_COUNT: usize = Self::COMPUTE_ALL.len();
 
     /// Every kind, compute + every graphics sub-kind, in `index()` order.
-    pub const ALL: [OreKind; 11] = [
+    pub const ALL: [OreKind; 14] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -88,7 +102,10 @@ impl OreKind {
         OreKind::MaterialFlattening,
         OreKind::AmbientOcclusion,
         OreKind::VisibilityPass,
+        OreKind::SkinPalette,
+        OreKind::MorphBlend,
         OreKind::Graphics(GraphicsOreKind::ForwardLit),
+        OreKind::Graphics(GraphicsOreKind::SkinnedForwardLit),
         OreKind::Graphics(GraphicsOreKind::Ui),
     ];
 
@@ -98,16 +115,18 @@ impl OreKind {
     /// `0..COMPUTE_COUNT`; graphics sub-kinds extend the range past that.
     pub const fn index(self) -> usize {
         match self {
-            OreKind::RayTrace => 0,
-            OreKind::Denoise => 1,
+            OreKind::RayTrace            => 0,
+            OreKind::Denoise             => 1,
             OreKind::SignedDistanceField => 2,
-            OreKind::SdfVoxelization => 3,
-            OreKind::LightClustering => 4,
-            OreKind::OcclusionCulling => 5,
-            OreKind::MaterialFlattening => 6,
-            OreKind::AmbientOcclusion => 7,
-            OreKind::VisibilityPass => 8,
-            OreKind::Graphics(g) => Self::COMPUTE_COUNT + g.index(),
+            OreKind::SdfVoxelization     => 3,
+            OreKind::LightClustering     => 4,
+            OreKind::OcclusionCulling    => 5,
+            OreKind::MaterialFlattening  => 6,
+            OreKind::AmbientOcclusion    => 7,
+            OreKind::VisibilityPass      => 8,
+            OreKind::SkinPalette         => 9,
+            OreKind::MorphBlend          => 10,
+            OreKind::Graphics(g)         => Self::COMPUTE_COUNT + g.index(),
         }
     }
 
@@ -193,6 +212,13 @@ pub enum IngotSpec {
     Buffer {
         size: vk::DeviceSize,
         save_path: Option<PathBuf>,
+        /// Extra `vk::BufferUsageFlags` to OR into the default
+        /// `STORAGE_BUFFER | TRANSFER_SRC`. Compute pipelines whose output
+        /// is consumed directly by a graphics draw (e.g. MorphBlend posed
+        /// vertices, SkinPalette mat4[]) should pass `VERTEX_BUFFER` or
+        /// `STORAGE_BUFFER` here so the same buffer is bindable downstream
+        /// without an extra copy.
+        extra_usage: vk::BufferUsageFlags,
     },
     Image2d {
         width: u32,
@@ -805,6 +831,76 @@ impl GpuMesh {
             self.vertex_buffer.destroy(device);
             self.index_buffer.destroy(device);
         }
+    }
+}
+
+/// Per-vertex skinning attributes uploaded as binding 1 on the
+/// SkinnedForwardLit pipeline. Stride matches `SKIN_VERTEX_STRIDE` (24 B):
+/// 4 × u16 joint indices packed into a uvec2, followed by 4 × f32 weights.
+#[derive(Debug)]
+pub struct GpuSkinBuffer {
+    pub buffer:       ForgeBuffer,
+    pub vertex_count: u32,
+}
+
+impl GpuSkinBuffer {
+    /// `bytes` must be exactly `vertex_count * 24` bytes laid out as
+    /// described above. The buffer is created with `VERTEX_BUFFER |
+    /// TRANSFER_DST` usage and DEVICE_LOCAL memory; bytes are staged through
+    /// a HOST_VISIBLE buffer and copied via a one-shot transfer cmd.
+    pub fn upload(
+        ctx:          &MeshUploadCtx,
+        bytes:        &[u8],
+        vertex_count: u32,
+    ) -> ForgeResult<Self> {
+        let size = bytes.len() as vk::DeviceSize;
+        let size = if size == 0 { 24 } else { size };
+
+        let mut staging = ForgeBuffer::create(
+            ctx.device, ctx.memory_properties, size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        if !bytes.is_empty() {
+            staging.write_bytes(ctx.device, bytes)?;
+        }
+        let buffer = ForgeBuffer::create(
+            ctx.device, ctx.memory_properties, size,
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
+
+        unsafe {
+            let info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(ctx.transfer_command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            let cbs = ctx.device.allocate_command_buffers(&info)
+                .map_err(ForgeError::Vk)?;
+            let cb = cbs[0];
+            ctx.device.begin_command_buffer(cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            ).map_err(ForgeError::Vk)?;
+            let copy = vk::BufferCopy::default().src_offset(0).dst_offset(0).size(size);
+            ctx.device.cmd_copy_buffer(cb, staging.handle, buffer.handle, &[copy]);
+            ctx.device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
+            let fence = ctx.device.create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(ForgeError::Vk)?;
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            ctx.device.queue_submit(ctx.transfer_queue, &[submit], fence)
+                .map_err(ForgeError::Vk)?;
+            ctx.device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+            ctx.device.destroy_fence(fence, None);
+            ctx.device.free_command_buffers(ctx.transfer_command_pool, &cbs);
+            staging.destroy(ctx.device);
+        }
+
+        Ok(Self { buffer, vertex_count })
+    }
+
+    pub unsafe fn destroy(&mut self, device: &ash::Device) {
+        unsafe { self.buffer.destroy(device); }
     }
 }
 

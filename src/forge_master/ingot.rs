@@ -43,13 +43,16 @@ impl Ingot {
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
     ) -> ForgeResult<Self> {
         match spec {
-            IngotSpec::Buffer { size, save_path } => {
+            IngotSpec::Buffer { size, save_path, extra_usage } => {
                 let size = non_zero_size(*size);
+                let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_SRC
+                    | *extra_usage;
                 let result = ForgeBuffer::create(
                     device,
                     memory_properties,
                     size,
-                    vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+                    usage,
                     vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 )?;
                 let readback = ForgeBuffer::create(
