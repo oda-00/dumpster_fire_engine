@@ -1133,12 +1133,18 @@ mod tests {
         assert_eq!(ore.indices.as_slice(), &[2u32, 1, 0]);
     }
 
+    /// Per glTF spec §3.7.2.1, when `NORMAL` is absent the client MUST
+    /// generate flat (per-face) normals. For the test triangle
+    /// `(-1,-1,0), (1,-1,0), (0,1,0)` CCW the face normal is
+    /// `cross(p2-p1, p3-p1)` = `cross((2,0,0), (1,2,0))` = `(0,0,4)`,
+    /// which normalises to `(0,0,1)`. The old `(0,1,0)` "default-up"
+    /// fallback was spec-incorrect and got replaced.
     #[test]
-    fn missing_normals_default_to_up() {
+    fn missing_normals_compute_spec_flat_normal() {
         let glb = build_test_glb(&triangle_pos(), None, None, None);
         let ore = load_first_mesh_from_slice(&glb).unwrap();
         for v in &ore.vertices {
-            assert_eq!(v.normal, [0.0, 1.0, 0.0]);
+            assert_eq!(v.normal, [0.0, 0.0, 1.0]);
         }
     }
 
@@ -1230,5 +1236,67 @@ mod tests {
         let asset = load_asset_from_slice(&glb).unwrap();
         let texs = asset_to_texture_ores(&asset);
         assert!(texs.is_empty());
+    }
+
+    /// SSE2 packer must produce byte-identical output to the scalar
+    /// reference. This both validates correctness and prevents the
+    /// scalar fallback from going dead on x86_64 hosts.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn pack_skin_attrs_simd_matches_scalar() {
+        let joints = vec![
+            [0u16, 1, 2, 3],
+            [10, 20, 30, 40],
+            [u16::MAX, 0, 5, 7],
+        ];
+        let weights = vec![
+            [0.25_f32, 0.25, 0.25, 0.25],
+            [0.7, 0.1, 0.15, 0.05],
+            [1.0, 0.0, 0.0, 0.0],
+        ];
+        let scalar = pack_skin_attrs_scalar(joints.len(), &joints, &weights);
+        let simd = unsafe { pack_skin_attrs_sse2(joints.len(), &joints, &weights) };
+        assert_eq!(scalar, simd, "SIMD packer must match scalar packer byte-for-byte");
+    }
+
+    /// AABB SIMD path must match the scalar reference. Builds the draws
+    /// list from a real GLB plus a non-identity world matrix so the
+    /// matrix-vector kernel is fully exercised.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn compute_asset_aabb_simd_matches_scalar() {
+        let glb = build_test_glb(&triangle_pos(), None, None, None);
+        let asset = load_asset_from_slice(&glb).unwrap();
+        let pose = forge_gltf::Pose::rest(&asset);
+        let mut draws = build_graphics_draws_with_matrices(&asset, &pose.world);
+        // The synthesised test asset may produce zero draws if the scene
+        // root layout doesn't match; force a known draw with a non-trivial
+        // world matrix so the SIMD vs scalar paths get real work to do.
+        if draws.is_empty() && !asset.meshes.is_empty() && !asset.meshes[0].primitives.is_empty() {
+            draws.push(forge_gltf::GraphicsDraw {
+                kind:         forge_gltf::GltfGraphicsKind::ForwardLit,
+                mesh:         0,
+                primitive:    0,
+                node:         0,
+                world_matrix: [
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    10.0, 20.0, 30.0, 1.0,
+                ],
+                topology:     forge_gltf::PrimitiveTopology::Triangles,
+                material:     None,
+                vertex_count: asset.meshes[0].primitives[0].streams.positions.len() as u32,
+                index_count:  asset.meshes[0].primitives[0].indices.len() as u32,
+            });
+        }
+        let (mn_s, mx_s) = compute_asset_aabb_scalar(&asset, &draws);
+        let (mn_v, mx_v) = unsafe { compute_asset_aabb_sse2(&asset, &draws) };
+        for i in 0..3 {
+            assert!(mn_s[i].is_finite() && mn_v[i].is_finite(),
+                    "AABB went to infinity — no draws executed");
+            assert!((mn_s[i] - mn_v[i]).abs() < 1e-5, "min[{i}]: scalar={} simd={}", mn_s[i], mn_v[i]);
+            assert!((mx_s[i] - mx_v[i]).abs() < 1e-5, "max[{i}]: scalar={} simd={}", mx_s[i], mx_v[i]);
+        }
     }
 }

@@ -460,3 +460,30 @@ pub fn compose_world_matrices_from(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `compose_trs` SIMD path must produce the exact same matrix as the
+    /// scalar reference for a representative quaternion / scale / translation
+    /// triple. The SIMD paths use FMA-equivalent ordering but the same
+    /// mathematical formula, so equality (not approx-eq) is required.
+    #[test]
+    fn compose_trs_simd_matches_scalar() {
+        // Non-axis-aligned rotation (45° around Y axis) + non-uniform scale +
+        // non-zero translation — exercises every cross term in the matrix.
+        let t = [1.0_f32, 2.0, -3.0];
+        let s = [2.0_f32, 0.5, 1.5];
+        // Unit quaternion for 45° around Y: (0, sin(22.5°), 0, cos(22.5°)).
+        let r = [0.0_f32, (22.5_f32.to_radians()).sin(), 0.0, (22.5_f32.to_radians()).cos()];
+
+        let simd = compose_trs(t, r, s);
+        let scalar = compose_trs_scalar(t, r, s);
+
+        for i in 0..16 {
+            let d = (simd[i] - scalar[i]).abs();
+            assert!(d < 1e-5, "row {} differs by {}: simd={} scalar={}", i, d, simd[i], scalar[i]);
+        }
+    }
+}

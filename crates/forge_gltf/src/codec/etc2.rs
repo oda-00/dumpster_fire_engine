@@ -129,11 +129,10 @@ const INTEN_TABLE: [[i16; 4]; 8] = [
     [-183,-47,  47, 183],
 ];
 
-/// ETC2 "T" mode distance table — published per the Khronos ETC2 spec
-/// table 3.17.5. Currently unused by our gracefully-degraded T/H/Planar
-/// fallback path; kept under cfg(test) so the spec reference stays in
-/// source for the day the full T/H decoders land.
-#[cfg(test)]
+/// ETC2 "T" mode distance table — Khronos ETC2 spec table 3.17.5.
+/// The T mode uses two 4-bit RGB base colours plus a distance picked
+/// from this table; each texel's 2-bit selector decodes to one of
+/// {c0, c0+d, c1, c1-d}. Same table is reused by H mode.
 const T_DISTANCE: [u16; 8] = [3, 6, 11, 16, 23, 32, 41, 64];
 
 /// EAC 8-bit alpha modifier table per intensity index. 16 entries × 8 rows.
@@ -231,24 +230,19 @@ fn decode_etc2_rgb_into(block: &[u8], out: &mut [u8; 64], default_alpha: u8, pun
     let b5_b = (b5_a as i16 + db as i16) as i16;
 
     // ETC2 mode selection per the spec: when the differential add
-    // overflows the 5-bit range, T/H/Planar take over.
+    // overflows the 5-bit range, T/H/Planar take over. The branching
+    // order is fixed by the spec — R overflow → T, G overflow → H,
+    // B overflow → Planar.
     if r5_b < 0 || r5_b > 31 {
-        // T mode (no full implementation — fall back to ETC1 subblock 1's
-        // colour for every texel; acceptable as a degraded-graceful path).
-        let c = [extend5to8(r5_a), extend5to8(g5_a), extend5to8(b5_a)];
-        fill_solid(out, c, default_alpha);
+        decode_etc2_t_mode(block, out, default_alpha);
         return;
     }
     if g5_b < 0 || g5_b > 31 {
-        // H mode placeholder — same fallback as T.
-        let c = [extend5to8(r5_a), extend5to8(g5_a), extend5to8(b5_a)];
-        fill_solid(out, c, default_alpha);
+        decode_etc2_h_mode(block, out, default_alpha);
         return;
     }
     if b5_b < 0 || b5_b > 31 {
-        // Planar mode placeholder.
-        let c = [extend5to8(r5_a), extend5to8(g5_a), extend5to8(b5_a)];
-        fill_solid(out, c, default_alpha);
+        decode_etc2_planar_mode(block, out, default_alpha);
         return;
     }
 
@@ -294,13 +288,179 @@ fn decode_etc1_subblocks(
     }
 }
 
-fn fill_solid(out: &mut [u8; 64], rgb: [u8; 3], a: u8) {
-    for i in 0..16 {
-        let d = i * 4;
-        out[d]     = rgb[0];
-        out[d + 1] = rgb[1];
-        out[d + 2] = rgb[2];
-        out[d + 3] = a;
+/// Decode the per-texel selector bit pattern that ETC1/ETC2 uses.
+/// Returns the 2-bit selector for texel index `tx` (column-major:
+/// `tx = x * 4 + y`). `pixels` is the u32 of bytes 4..8.
+#[inline]
+fn etc2_selector(pixels: u32, tx: usize) -> u8 {
+    let lsb = ((pixels >> tx) & 1) as u8;
+    let msb = ((pixels >> (tx + 16)) & 1) as u8;
+    (msb << 1) | lsb
+}
+
+/// Scatter a column-major texel index `tx` to its row-major byte offset
+/// in the 16-texel × 4-byte output block.
+#[inline]
+fn etc2_dst_offset(tx: usize) -> usize {
+    let x = tx >> 2;
+    let y = tx & 3;
+    (y * 4 + x) * 4
+}
+
+/// ETC2 T-mode decode. Per Khronos ETC2 spec table 3.17.5: two 4-bit
+/// base colours + a 3-bit distance index. Each texel's 2-bit selector
+/// picks one of {c0, c0+d, c1, c1-d} (the second variant is c0 plus
+/// the distance, the fourth is c1 minus the distance).
+///
+/// Header bit layout in bytes b0..b3 (bit numbering with bit 63 = MSB
+/// of b0, i.e. high bit on disk):
+/// - R0[3..2] = b0[4..3]      (bits 60..59 in the 64-bit stream)
+/// - R0[1..0] = b0[1..0]      (bits 56 minus the gap layout: byte 0 low 2)
+/// - G0[3..0] = b1[7..4]
+/// - B0[3..0] = b1[3..0]
+/// - R1[3..0] = b2[7..4]
+/// - G1[3..0] = b2[3..0]
+/// - B1[3..0] = b3[7..4]
+/// - da[1..0] = b3[3..2]       (high 2 bits of distance index)
+/// - db        = b3[0]          (low bit of distance index)
+fn decode_etc2_t_mode(block: &[u8], out: &mut [u8; 64], default_alpha: u8) {
+    let r0 = ((block[0] >> 1) & 0x0C) | (block[0] & 0x03);
+    let g0 = block[1] >> 4;
+    let b0 = block[1] & 0x0F;
+    let r1 = block[2] >> 4;
+    let g1 = block[2] & 0x0F;
+    let b1 = block[3] >> 4;
+    let d_idx = (((block[3] >> 1) & 0x6) | (block[3] & 0x1)) as usize;
+    let d = T_DISTANCE[d_idx] as i32;
+
+    let c0 = [extend4to8(r0), extend4to8(g0), extend4to8(b0)];
+    let c1 = [extend4to8(r1), extend4to8(g1), extend4to8(b1)];
+
+    let pixels = u32::from_be_bytes([block[4], block[5], block[6], block[7]]);
+    for tx in 0..16 {
+        let sel = etc2_selector(pixels, tx);
+        let rgb = match sel {
+            0 => c0,
+            1 => [clamp_u8(c0[0] as i32 + d), clamp_u8(c0[1] as i32 + d), clamp_u8(c0[2] as i32 + d)],
+            2 => c1,
+            _ => [clamp_u8(c1[0] as i32 - d), clamp_u8(c1[1] as i32 - d), clamp_u8(c1[2] as i32 - d)],
+        };
+        let dst = etc2_dst_offset(tx);
+        out[dst]     = rgb[0];
+        out[dst + 1] = rgb[1];
+        out[dst + 2] = rgb[2];
+        out[dst + 3] = default_alpha;
+    }
+}
+
+/// ETC2 H-mode decode. Per Khronos ETC2 spec table 3.17.6: same shape as
+/// T-mode but the distance is added/subtracted to both endpoints. Per
+/// texel: selector 0 → c0+d, 1 → c0-d, 2 → c1+d, 3 → c1-d. The
+/// distance-table index includes one extra bit derived from comparing
+/// the colour pair, breaking ties consistently with the encoder.
+fn decode_etc2_h_mode(block: &[u8], out: &mut [u8; 64], default_alpha: u8) {
+    // Header packing (per spec):
+    // R0[3..0] = b0[6..3]
+    // G0[3..1] = b0[2..0], G0[0] = b1[7]
+    // B0[3]    = b1[6], B0[2..0] = b1[4..2]
+    // R1[3..0] = (b1[1..0] << 2) | (b2[7..6])
+    // G1[3..0] = b2[5..2]
+    // B1[3..0] = (b2[1..0] << 2) | (b3[7..6])
+    // da[1..0] = b3[5..4]; db = b3[2]; bit-0 of distance is encoder-dependent
+    let r0 = (block[0] >> 3) & 0x0F;
+    let g0 = ((block[0] & 0x07) << 1) | (block[1] >> 7);
+    let b0 = ((block[1] >> 6) & 0x01) << 3 | ((block[1] >> 2) & 0x07);
+    let r1 = ((block[1] & 0x03) << 2) | (block[2] >> 6);
+    let g1 = (block[2] >> 2) & 0x0F;
+    let b1 = ((block[2] & 0x03) << 2) | (block[3] >> 6);
+    let da = (block[3] >> 5) & 0x02 | (block[3] >> 4) & 0x01;
+    // The low bit of the distance index is `(c0 >= c1)` per the spec's
+    // tiebreak rule: pack colours into 12-bit ints and compare.
+    let c0_packed = ((r0 as u32) << 8) | ((g0 as u32) << 4) | (b0 as u32);
+    let c1_packed = ((r1 as u32) << 8) | ((g1 as u32) << 4) | (b1 as u32);
+    let db = if c0_packed >= c1_packed { 1 } else { 0 };
+    let d_idx = ((da << 1) | db) as usize & 0x7;
+    let d = T_DISTANCE[d_idx] as i32;
+
+    let c0 = [extend4to8(r0), extend4to8(g0), extend4to8(b0)];
+    let c1 = [extend4to8(r1), extend4to8(g1), extend4to8(b1)];
+
+    let pixels = u32::from_be_bytes([block[4], block[5], block[6], block[7]]);
+    for tx in 0..16 {
+        let sel = etc2_selector(pixels, tx);
+        let (base, sign) = match sel {
+            0 => (c0,  1),
+            1 => (c0, -1),
+            2 => (c1,  1),
+            _ => (c1, -1),
+        };
+        let r = clamp_u8(base[0] as i32 + sign * d);
+        let g = clamp_u8(base[1] as i32 + sign * d);
+        let b = clamp_u8(base[2] as i32 + sign * d);
+        let dst = etc2_dst_offset(tx);
+        out[dst]     = r;
+        out[dst + 1] = g;
+        out[dst + 2] = b;
+        out[dst + 3] = default_alpha;
+    }
+}
+
+/// ETC2 Planar mode decode. Per Khronos ETC2 spec table 3.17.7: three
+/// 6-bit colours `O`, `H`, `V` (origin, horizontal endpoint, vertical
+/// endpoint), each extended via the 6→8 bit replication. Output colour
+/// at texel (x, y) is `(x*(H-O) + y*(V-O))/4 + O` per channel, clamped.
+fn decode_etc2_planar_mode(block: &[u8], out: &mut [u8; 64], default_alpha: u8) {
+    // Header bit layout (per spec):
+    // RO[5..1] = b0[6..2]; RO[0]   = b0[0]
+    // GO[6..1] = (b0[1] << 6) | (b1[7..3])   ; GO[0] = b1[2]
+    // BO[5..0] = (b1[1..0] << 4) | (b2[7..4])
+    // (Note: GO is 7-bit; we use top 6 bits for the spec formula.)
+    // RH[5..1] = b2[3..0] << 1 | b3[7]      ; RH[0]  = b3[6]
+    // GH[6..1] = b3[5..0] << 0               ; GH[0] = b4[7]
+    // BH[5..0] = b4[6..1]
+    // RV[5..0] = (b4[0] << 5) | (b5[7..3])
+    // GV[6..1] = (b5[2..0] << 4) | (b6[7..5]); GV[0] = b6[4]
+    // BV[5..0] = b6[3..0] << 2 | b7[7..6]    (then bits 5..0 used)
+    let r_o6 = ((block[0] >> 1) & 0x3E) | ((block[0] >> 0) & 0x01);
+    let g_o6_full = (((block[0] & 0x01) as u32) << 6) | (((block[1] >> 1) & 0x7F) as u32);
+    let g_o6 = (g_o6_full >> 1) as u8 & 0x3F;
+    let b_o6 = (((block[1] & 0x03) as u32) << 4) | (((block[2] >> 4) & 0x0F) as u32);
+    let b_o6 = b_o6 as u8 & 0x3F;
+
+    let r_h6 = (((block[2] & 0x0F) as u32) << 2) | (((block[3] >> 6) & 0x03) as u32);
+    let r_h6 = r_h6 as u8 & 0x3F;
+    let g_h6 = (((block[3] & 0x3F) as u32) << 1) | (((block[4] >> 7) & 0x01) as u32);
+    let g_h6 = g_h6 as u8 & 0x3F;
+    let b_h6 = ((block[4] >> 1) & 0x3F) as u8;
+
+    let r_v6 = (((block[4] & 0x01) as u32) << 5) | (((block[5] >> 3) & 0x1F) as u32);
+    let r_v6 = r_v6 as u8 & 0x3F;
+    let g_v6_full = (((block[5] & 0x07) as u32) << 4) | (((block[6] >> 4) & 0x0F) as u32);
+    let g_v6 = g_v6_full as u8 & 0x3F;
+    let b_v6 = (((block[6] & 0x0F) as u32) << 2) | (((block[7] >> 6) & 0x03) as u32);
+    let b_v6 = b_v6 as u8 & 0x3F;
+
+    let ro = ((r_o6 as i32) << 2) | ((r_o6 as i32) >> 4);
+    let go = ((g_o6 as i32) << 2) | ((g_o6 as i32) >> 4);
+    let bo = ((b_o6 as i32) << 2) | ((b_o6 as i32) >> 4);
+    let rh = ((r_h6 as i32) << 2) | ((r_h6 as i32) >> 4);
+    let gh = ((g_h6 as i32) << 2) | ((g_h6 as i32) >> 4);
+    let bh = ((b_h6 as i32) << 2) | ((b_h6 as i32) >> 4);
+    let rv = ((r_v6 as i32) << 2) | ((r_v6 as i32) >> 4);
+    let gv = ((g_v6 as i32) << 2) | ((g_v6 as i32) >> 4);
+    let bv = ((b_v6 as i32) << 2) | ((b_v6 as i32) >> 4);
+
+    for y in 0..4_i32 {
+        for x in 0..4_i32 {
+            let r = (x * (rh - ro) + y * (rv - ro) + 4 * ro + 2) >> 2;
+            let g = (x * (gh - go) + y * (gv - go) + 4 * go + 2) >> 2;
+            let b = (x * (bh - bo) + y * (bv - bo) + 4 * bo + 2) >> 2;
+            let dst = ((y as usize) * 4 + (x as usize)) * 4;
+            out[dst]     = r.clamp(0, 255) as u8;
+            out[dst + 1] = g.clamp(0, 255) as u8;
+            out[dst + 2] = b.clamp(0, 255) as u8;
+            out[dst + 3] = default_alpha;
+        }
     }
 }
 

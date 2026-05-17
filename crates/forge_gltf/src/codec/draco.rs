@@ -1235,7 +1235,7 @@ mod tests {
 
     #[test]
     fn decode_bad_magic_returns_error() {
-        let mut bytes = vec![0u8; 64];
+        let bytes = vec![0u8; 64];
         let result = decode(&bytes);
         assert!(result.is_err());
     }
@@ -1289,5 +1289,29 @@ mod tests {
         // Edge (indices[2],indices[0])=(2,0) and edge (indices[3],indices[5])=(1,2)?
         // Let's just check the table built without panicking.
         let _ = ct.opposite(0);
+    }
+
+    /// Corner-table modular arithmetic for `left`/`right`/`prev`/`next`
+    /// rotations must match the Draco spec convention:
+    ///   left(c)  = same face, (c + 1) % 3 offset
+    ///   right(c) = same face, (c + 2) % 3 offset
+    ///   prev/next aliases.
+    /// This exercises the four helpers — without this test, they'd be
+    /// dead code on every non-test build.
+    #[test]
+    fn corner_table_local_rotation_indices() {
+        let indices: ThinVec<u32> = [0, 1, 2, 1, 3, 2].into_iter().collect();
+        let ct = CornerTable::from_indices(4, &indices);
+        // Face 0 corners are 0, 1, 2; face 1 are 3, 4, 5.
+        // For corner 0 (face 0, offset 0): left = 1, right = 2.
+        assert_eq!(ct.left(0),  1);
+        assert_eq!(ct.right(0), 2);
+        assert_eq!(ct.next(0),  1);
+        assert_eq!(ct.prev(0),  2);
+        // For corner 4 (face 1, offset 1): left = 5, right = 3.
+        assert_eq!(ct.left(4),  5);
+        assert_eq!(ct.right(4), 3);
+        assert_eq!(ct.next(4),  5);
+        assert_eq!(ct.prev(4),  3);
     }
 }

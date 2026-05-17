@@ -163,7 +163,7 @@ fn synth_vp8l_2x2_black() -> Vec<u8> {
     let mut buf: u64 = 0;
     let mut nbits: u32 = 0;
     let mut bits: Vec<u8> = Vec::new();
-    let mut put = |val: u64, n: u32, buf: &mut u64, nbits: &mut u32, out: &mut Vec<u8>| {
+    let put = |val: u64, n: u32, buf: &mut u64, nbits: &mut u32, out: &mut Vec<u8>| {
         *buf |= (val & ((1u64 << n) - 1)) << *nbits;
         *nbits += n;
         while *nbits >= 8 {

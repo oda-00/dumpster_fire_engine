@@ -1221,6 +1221,22 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
         153 | 154 => crate::codec::etc2::decode_eac_r11(level_data, w, h).to_vec(),
         155 | 156 => crate::codec::etc2::decode_eac_r11g11(level_data, w, h).to_vec(),
 
+        // ASTC LDR: vkFormats 157..=184 cover 14 block sizes × {UNORM, SRGB}.
+        157 | 158 => crate::codec::astc::decode_astc(level_data, w, h, 4,  4 ).to_vec(),
+        159 | 160 => crate::codec::astc::decode_astc(level_data, w, h, 5,  4 ).to_vec(),
+        161 | 162 => crate::codec::astc::decode_astc(level_data, w, h, 5,  5 ).to_vec(),
+        163 | 164 => crate::codec::astc::decode_astc(level_data, w, h, 6,  5 ).to_vec(),
+        165 | 166 => crate::codec::astc::decode_astc(level_data, w, h, 6,  6 ).to_vec(),
+        167 | 168 => crate::codec::astc::decode_astc(level_data, w, h, 8,  5 ).to_vec(),
+        169 | 170 => crate::codec::astc::decode_astc(level_data, w, h, 8,  6 ).to_vec(),
+        171 | 172 => crate::codec::astc::decode_astc(level_data, w, h, 8,  8 ).to_vec(),
+        173 | 174 => crate::codec::astc::decode_astc(level_data, w, h, 10, 5 ).to_vec(),
+        175 | 176 => crate::codec::astc::decode_astc(level_data, w, h, 10, 6 ).to_vec(),
+        177 | 178 => crate::codec::astc::decode_astc(level_data, w, h, 10, 8 ).to_vec(),
+        179 | 180 => crate::codec::astc::decode_astc(level_data, w, h, 10, 10).to_vec(),
+        181 | 182 => crate::codec::astc::decode_astc(level_data, w, h, 12, 10).to_vec(),
+        183 | 184 => crate::codec::astc::decode_astc(level_data, w, h, 12, 12).to_vec(),
+
         other => return Err(GltfError::UnsupportedFeature(
             format!("KTX2 uncompressed vkFormat {other}")
         )),

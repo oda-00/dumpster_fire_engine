@@ -3,6 +3,7 @@
 //!
 //! No external crate for any of these: see `Cargo.toml` for the policy.
 
+pub mod astc;
 pub mod basisu_etc1s;
 pub mod basisu_uastc;
 pub mod bc;

@@ -1056,4 +1056,29 @@ mod tests {
         let px = transcode_to_rgba8(&sgd, &level, 5, 3).unwrap();
         assert_eq!(px.len(), 5 * 3 * 4, "expected 60 bytes for 5×3 RGBA8");
     }
+
+    /// SSE2 block decoder must produce byte-identical output to the
+    /// scalar reference across a representative spread of endpoint
+    /// colours, intensity-table indices, and selector patterns.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn block_decode_simd_matches_scalar() {
+        let cases: [(u8, u8, u8, u8); 5] = [
+            (0, 0, 0, 0),
+            (31, 31, 31, 7),
+            (16, 8, 24, 3),
+            (5, 17, 23, 5),
+            (12, 12, 12, 6),
+        ];
+        let patterns: [[u8; 4]; 4] = [[0, 1, 2, 3], [3, 3, 3, 3], [0, 0, 0, 0], [1, 2, 1, 2]];
+        for &(r, g, b, t) in &cases {
+            for &pat in &patterns {
+                let sel = SelectorEntry { selectors: [pat, pat, pat, pat] };
+                let endpoint = ep(r, g, b, t);
+                let scalar = decode_etc1s_block_scalar(&endpoint, &sel);
+                let simd = unsafe { decode_etc1s_block_sse2(&endpoint, &sel) };
+                assert_eq!(scalar, simd, "SIMD vs scalar mismatch for ep ({r},{g},{b},{t}) pat {pat:?}");
+            }
+        }
+    }
 }
