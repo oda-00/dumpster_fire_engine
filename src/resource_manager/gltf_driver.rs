@@ -216,6 +216,64 @@ pub fn create_material_set_layout(
     unsafe { device.create_descriptor_set_layout(&info, None).map_err(ForgeError::Vk) }
 }
 
+/// Single-binding descriptor set layout for the skin palette (set 2 on
+/// the `SkinnedForwardLit` pipeline). Mirrors what `forge.rs` builds, so
+/// callers that allocate sets from a pool can use either source — the
+/// layouts compare structurally equal.
+pub fn create_skin_palette_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout, ForgeError> {
+    let bindings = [vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)];
+    let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    unsafe { device.create_descriptor_set_layout(&info, None).map_err(ForgeError::Vk) }
+}
+
+/// Descriptor pool sized for `max_palettes` per-frame skin palette sets.
+/// Created with `FREE_DESCRIPTOR_SET` so the per-frame churn doesn't leak
+/// — call `vkResetDescriptorPool` at the top of each frame to recycle.
+pub fn create_skin_palette_pool(
+    device:       &ash::Device,
+    max_palettes: u32,
+) -> Result<vk::DescriptorPool, ForgeError> {
+    let pool_sizes = [vk::DescriptorPoolSize::default()
+        .ty(vk::DescriptorType::STORAGE_BUFFER)
+        .descriptor_count(max_palettes)];
+    let info = vk::DescriptorPoolCreateInfo::default()
+        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+        .max_sets(max_palettes)
+        .pool_sizes(&pool_sizes);
+    unsafe { device.create_descriptor_pool(&info, None).map_err(ForgeError::Vk) }
+}
+
+/// Allocate + write one skin-palette descriptor set pointing at `buffer`.
+/// Caller owns the returned set; reset the pool to free it.
+pub fn allocate_skin_palette_set(
+    device:  &ash::Device,
+    pool:    vk::DescriptorPool,
+    layout:  vk::DescriptorSetLayout,
+    buffer:  vk::Buffer,
+    range:   vk::DeviceSize,
+) -> Result<vk::DescriptorSet, ForgeError> {
+    let info = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(pool)
+        .set_layouts(std::slice::from_ref(&layout));
+    let set = unsafe {
+        device.allocate_descriptor_sets(&info).map_err(ForgeError::Vk)?.remove(0)
+    };
+    let buf_info = [vk::DescriptorBufferInfo::default()
+        .buffer(buffer).offset(0).range(range)];
+    let writes = [vk::WriteDescriptorSet::default()
+        .dst_set(set).dst_binding(0)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .buffer_info(&buf_info)];
+    unsafe { device.update_descriptor_sets(&writes, &[]); }
+    Ok(set)
+}
+
 /// Create a descriptor pool sized for `max_materials` material slots.
 /// Each slot consumes 1 uniform-buffer descriptor + `TEXTURE_SLOT_COUNT`
 /// combined-image-sampler descriptors. `FREE_DESCRIPTOR_SET_BIT` is enabled

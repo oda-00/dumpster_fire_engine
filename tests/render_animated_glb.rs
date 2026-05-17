@@ -19,6 +19,7 @@ use dumpster_fire_engine::render::VulkanContext;
 use dumpster_fire_engine::resource_manager::asset_manager::{
     build_compute_ores, build_graphics_plans, build_graphics_plans_with_pose,
     build_skin_morph_proto, load_asset, asset_to_texture_ores,
+    collect_skin_palette_buffers, pack_primitive_skin_attrs, primitive_is_skinned,
     register_skin_morph_forges,
 };
 use dumpster_fire_engine::forge_master::ForgeMaster;
@@ -621,6 +622,75 @@ fn diffuse_transmission_plant_morph_blend_dispatches_finite_ingot() {
         let mut factory = factory;
         factory.destroy(&ctx.device);
     }
+}
+
+// ── 16c. Full GPU loop closure for skinning — palette feeds vertex shader ─
+
+#[test]
+fn brainstem_skin_palette_buffer_is_bindable_as_storage_buffer() {
+    use ash::vk::Handle;
+    let Some(ctx) = try_vulkan() else { return };
+    let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
+    let pose  = forge_gltf::Pose::rest(&asset);
+
+    let mut forge = ForgeMaster::new(
+        ctx.device.clone(),
+        ctx.queue,
+        ctx.command_pool,
+        ctx.memory_properties,
+    ).expect("ForgeMaster");
+    register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
+
+    let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(104), 0)
+        .expect("BrainStem has skins → proto must be Some");
+    let factory = Factory::from_compute_proto(FactoryId::new(104), proto, &mut forge)
+        .expect("compute dispatch");
+
+    let palette_buffers = collect_skin_palette_buffers(&asset, &factory);
+    assert!(!palette_buffers.is_empty(),
+        "at least one skin palette buffer must be harvested");
+
+    for (skin_idx, buf) in &palette_buffers {
+        assert!(buf.as_raw() != 0,
+            "skin palette buffer for skin {skin_idx} must be a real Vulkan handle");
+    }
+
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+        let mut factory = factory;
+        factory.destroy(&ctx.device);
+    }
+}
+
+#[test]
+fn brainstem_skin_vertex_attrs_pack_correctly() {
+    let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
+    // BrainStem's mesh 0 primitive 0 is skinned.
+    assert!(primitive_is_skinned(&asset, 0, 0));
+    let bytes = pack_primitive_skin_attrs(&asset, 0, 0);
+    // 24 bytes per vertex; non-empty for a skinned primitive.
+    assert!(!bytes.is_empty(), "skin attrs must produce bytes for skinned primitive");
+    assert_eq!(bytes.len() % 24, 0, "stride must be 24 bytes per vertex");
+
+    let n_verts = bytes.len() / 24;
+    let n_pos = asset.meshes[0].primitives[0].streams.positions.len();
+    assert_eq!(n_verts, n_pos, "one skin record per vertex");
+
+    // Spot-check vertex 0: weights should sum near 1.0 for any real glTF skin.
+    let w0 = f32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let w1 = f32::from_le_bytes(bytes[12..16].try_into().unwrap());
+    let w2 = f32::from_le_bytes(bytes[16..20].try_into().unwrap());
+    let w3 = f32::from_le_bytes(bytes[20..24].try_into().unwrap());
+    let sum = w0 + w1 + w2 + w3;
+    assert!((sum - 1.0).abs() < 1e-3, "weights sum should be ~1.0, got {sum}");
+}
+
+#[test]
+fn unskinned_box_skin_attrs_are_empty() {
+    let asset = load_asset(asset_path("Box.glb")).expect("load Box");
+    assert!(!primitive_is_skinned(&asset, 0, 0));
+    let bytes = pack_primitive_skin_attrs(&asset, 0, 0);
+    assert!(bytes.is_empty(), "unskinned primitive must produce zero skin bytes");
 }
 
 // ── 16b. Full GPU loop closure — compute output feeds graphics override ───

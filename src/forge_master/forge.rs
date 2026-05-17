@@ -237,6 +237,12 @@ fn layout_binding(binding: u32, ty: vk::DescriptorType) -> vk::DescriptorSetLayo
 
 // ── Graphics forge ─────────────────────────────────────────────────────────
 //
+/// Byte stride of one per-vertex skin record (binding 1 on the
+/// SkinnedForwardLit pipeline). Layout matches the GLSL declaration in
+/// `skinned_forward_lit.vert`: `uvec2 joints_packed` (4×u16 in 8 B) plus
+/// `vec4 weights` (16 B).
+pub const SKIN_VERTEX_STRIDE: u32 = 24;
+
 // GraphicsForge is the rasterization analog of Forge: a `kind` (drives the
 // descriptor-binding shape) plus owned vert/frag SPIR-V words. It does NOT
 // own device-side pipeline objects — those live in `GraphicsMold`, produced
@@ -263,9 +269,12 @@ pub struct GraphicsForge {
 pub struct GraphicsMold {
     pub render_pass: vk::RenderPass,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
-    /// Set 1 layout (material UBO + 5 texture samplers) for ForwardLit.
-    /// `null()` for non-ForwardLit kinds.
+    /// Set 1 layout (material UBO + 5 texture samplers) for ForwardLit /
+    /// SkinnedForwardLit. `null()` for non-ForwardLit kinds.
     pub material_set_layout: vk::DescriptorSetLayout,
+    /// Set 2 layout (single STORAGE_BUFFER for the skin palette) — only
+    /// populated on SkinnedForwardLit; `null()` everywhere else.
+    pub skin_set_layout: vk::DescriptorSetLayout,
     pub pipeline_layout: vk::PipelineLayout,
     pub pipeline: vk::Pipeline,
 }
@@ -309,7 +318,7 @@ impl GraphicsForge {
     /// path, which baked positions into the shader).
     pub fn descriptor_bindings(&self) -> ThinVec<vk::DescriptorSetLayoutBinding<'static>> {
         match self.kind {
-            GraphicsOreKind::ForwardLit => {
+            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit => {
                 let mut v = ThinVec::with_capacity(2);
                 v.push(
                     vk::DescriptorSetLayoutBinding::default()
@@ -409,9 +418,11 @@ impl GraphicsForge {
             }
         };
 
-        // Set 1 — material descriptor layout (ForwardLit only):
-        //   binding 0 = UNIFORM_BUFFER (fragment), binding 1-5 = COMBINED_IMAGE_SAMPLER (fragment).
-        let material_set_layout = if matches!(self.kind, GraphicsOreKind::ForwardLit) {
+        // Set 1 — material descriptor layout (ForwardLit + SkinnedForwardLit).
+        let material_set_layout = if matches!(
+            self.kind,
+            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit,
+        ) {
             match crate::resource_manager::gltf_driver::create_material_set_layout(device) {
                 Ok(l) => l,
                 Err(e) => {
@@ -426,19 +437,49 @@ impl GraphicsForge {
             vk::DescriptorSetLayout::null()
         };
 
-        // Pipeline layout — ForwardLit exposes a mat4 push constant (MVP) and two sets.
+        // Set 2 — skin palette SSBO (SkinnedForwardLit only):
+        //   binding 0 = STORAGE_BUFFER (vertex), one mat4[] per joint.
+        let skin_set_layout = if matches!(self.kind, GraphicsOreKind::SkinnedForwardLit) {
+            let bindings = [vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)];
+            let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+            match unsafe { device.create_descriptor_set_layout(&info, None) } {
+                Ok(l) => l,
+                Err(e) => {
+                    unsafe {
+                        if material_set_layout != vk::DescriptorSetLayout::null() {
+                            device.destroy_descriptor_set_layout(material_set_layout, None);
+                        }
+                        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                        device.destroy_render_pass(render_pass, None);
+                    }
+                    return Err(ForgeError::Vk(e));
+                }
+            }
+        } else {
+            vk::DescriptorSetLayout::null()
+        };
+
+        // Pipeline layout — ForwardLit / SkinnedForwardLit expose a mat4 push constant (MVP).
         let push_ranges: &[vk::PushConstantRange] = match self.kind {
-            GraphicsOreKind::ForwardLit => &[vk::PushConstantRange::default()
-                .stage_flags(vk::ShaderStageFlags::VERTEX)
-                .offset(0)
-                .size(64)], // sizeof(mat4)
+            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit =>
+                &[vk::PushConstantRange::default()
+                    .stage_flags(vk::ShaderStageFlags::VERTEX)
+                    .offset(0)
+                    .size(64)], // sizeof(mat4)
             GraphicsOreKind::Ui => &[],
         };
-        // Build set_layouts slice dynamically (one or two entries).
+        // Build set_layouts slice — 1/2/3 entries depending on the kind.
+        let set_layouts_three = [descriptor_set_layout, material_set_layout, skin_set_layout];
         let set_layouts_two   = [descriptor_set_layout, material_set_layout];
         let set_layouts_one   = [descriptor_set_layout];
         let set_layouts_ref: &[vk::DescriptorSetLayout] =
-            if material_set_layout != vk::DescriptorSetLayout::null() {
+            if skin_set_layout != vk::DescriptorSetLayout::null() {
+                &set_layouts_three
+            } else if material_set_layout != vk::DescriptorSetLayout::null() {
                 &set_layouts_two
             } else {
                 &set_layouts_one
@@ -452,6 +493,9 @@ impl GraphicsForge {
             Ok(l) => l,
             Err(e) => {
                 unsafe {
+                    if skin_set_layout != vk::DescriptorSetLayout::null() {
+                        device.destroy_descriptor_set_layout(skin_set_layout, None);
+                    }
                     if material_set_layout != vk::DescriptorSetLayout::null() {
                         device.destroy_descriptor_set_layout(material_set_layout, None);
                     }
@@ -464,6 +508,9 @@ impl GraphicsForge {
 
         // Shader modules — destroyed before returning regardless of outcome.
         let destroy_layouts = |device: &ash::Device| unsafe {
+            if skin_set_layout != vk::DescriptorSetLayout::null() {
+                device.destroy_descriptor_set_layout(skin_set_layout, None);
+            }
             if material_set_layout != vk::DescriptorSetLayout::null() {
                 device.destroy_descriptor_set_layout(material_set_layout, None);
             }
@@ -508,31 +555,68 @@ impl GraphicsForge {
         ];
 
         // Vertex input — ForwardLit reads ForgeVertex from binding 0;
+        // SkinnedForwardLit adds a second binding with packed joint indices
+        // (uvec2: 4×u16) + per-vertex f32 weights (vec4) = 24-byte stride.
         // Ui generates verts from gl_VertexIndex (no buffer needed).
-        let binding_descs: &[vk::VertexInputBindingDescription] = match self.kind {
-            GraphicsOreKind::ForwardLit => &[vk::VertexInputBindingDescription::default()
+        let bd_forward = [vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(size_of::<ForgeVertex>() as u32) // 48 bytes
+            .input_rate(vk::VertexInputRate::VERTEX)];
+        let bd_skinned = [
+            vk::VertexInputBindingDescription::default()
                 .binding(0)
-                .stride(size_of::<ForgeVertex>() as u32) // 48 bytes
-                .input_rate(vk::VertexInputRate::VERTEX)],
-            GraphicsOreKind::Ui => &[],
+                .stride(size_of::<ForgeVertex>() as u32)
+                .input_rate(vk::VertexInputRate::VERTEX),
+            vk::VertexInputBindingDescription::default()
+                .binding(1)
+                .stride(SKIN_VERTEX_STRIDE)
+                .input_rate(vk::VertexInputRate::VERTEX),
+        ];
+        let binding_descs: &[vk::VertexInputBindingDescription] = match self.kind {
+            GraphicsOreKind::ForwardLit        => &bd_forward,
+            GraphicsOreKind::SkinnedForwardLit => &bd_skinned,
+            GraphicsOreKind::Ui                => &[],
         };
         // ForgeVertex layout: position[0..12], normal[12..24], tangent[24..40], uv[40..48]
+        // SkinVertex   layout: joints_packed[0..8 = uvec2 = 4×u16], weights[8..24 = vec4]
+        let ad_forward = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0).binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT).offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1).binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT).offset(12),
+            vk::VertexInputAttributeDescription::default()
+                .location(2).binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT).offset(24),
+            vk::VertexInputAttributeDescription::default()
+                .location(3).binding(0)
+                .format(vk::Format::R32G32_SFLOAT).offset(40),
+        ];
+        let ad_skinned = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0).binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT).offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1).binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT).offset(12),
+            vk::VertexInputAttributeDescription::default()
+                .location(2).binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT).offset(24),
+            vk::VertexInputAttributeDescription::default()
+                .location(3).binding(0)
+                .format(vk::Format::R32G32_SFLOAT).offset(40),
+            vk::VertexInputAttributeDescription::default()
+                .location(4).binding(1)
+                .format(vk::Format::R32G32_UINT).offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(5).binding(1)
+                .format(vk::Format::R32G32B32A32_SFLOAT).offset(8),
+        ];
         let attr_descs: &[vk::VertexInputAttributeDescription] = match self.kind {
-            GraphicsOreKind::ForwardLit => &[
-                vk::VertexInputAttributeDescription::default()
-                    .location(0).binding(0)
-                    .format(vk::Format::R32G32B32_SFLOAT).offset(0),
-                vk::VertexInputAttributeDescription::default()
-                    .location(1).binding(0)
-                    .format(vk::Format::R32G32B32_SFLOAT).offset(12),
-                vk::VertexInputAttributeDescription::default()
-                    .location(2).binding(0)
-                    .format(vk::Format::R32G32B32A32_SFLOAT).offset(24),
-                vk::VertexInputAttributeDescription::default()
-                    .location(3).binding(0)
-                    .format(vk::Format::R32G32_SFLOAT).offset(40),
-            ],
-            GraphicsOreKind::Ui => &[],
+            GraphicsOreKind::ForwardLit        => &ad_forward,
+            GraphicsOreKind::SkinnedForwardLit => &ad_skinned,
+            GraphicsOreKind::Ui                => &[],
         };
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(binding_descs)
@@ -560,14 +644,15 @@ impl GraphicsForge {
         let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(&color_blend_attachments);
 
-        // Depth-stencil: enabled for ForwardLit, disabled for Ui.
+        // Depth-stencil: enabled for ForwardLit / SkinnedForwardLit, disabled for Ui.
         let depth_stencil = match self.kind {
-            GraphicsOreKind::ForwardLit => vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(true)
-                .depth_write_enable(true)
-                .depth_compare_op(vk::CompareOp::LESS)
-                .depth_bounds_test_enable(false)
-                .stencil_test_enable(false),
+            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit =>
+                vk::PipelineDepthStencilStateCreateInfo::default()
+                    .depth_test_enable(true)
+                    .depth_write_enable(true)
+                    .depth_compare_op(vk::CompareOp::LESS)
+                    .depth_bounds_test_enable(false)
+                    .stencil_test_enable(false),
             GraphicsOreKind::Ui => vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(false)
                 .depth_write_enable(false)
@@ -620,6 +705,7 @@ impl GraphicsForge {
             render_pass,
             descriptor_set_layout,
             material_set_layout,
+            skin_set_layout,
             pipeline_layout,
             pipeline,
         })
@@ -636,6 +722,10 @@ impl GraphicsMold {
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 device.destroy_pipeline_layout(self.pipeline_layout, None);
                 self.pipeline_layout = vk::PipelineLayout::null();
+            }
+            if self.skin_set_layout != vk::DescriptorSetLayout::null() {
+                device.destroy_descriptor_set_layout(self.skin_set_layout, None);
+                self.skin_set_layout = vk::DescriptorSetLayout::null();
             }
             if self.material_set_layout != vk::DescriptorSetLayout::null() {
                 device.destroy_descriptor_set_layout(self.material_set_layout, None);

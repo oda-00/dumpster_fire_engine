@@ -156,6 +156,12 @@ pub struct GraphicsFramePlan {
     /// owned by the same FactoryMaster as the compute Ingot that produced
     /// it, and the compute factory is rebuilt every frame in lockstep.
     pub vertex_buffer_override: Option<vk::Buffer>,
+    /// Optional per-vertex skin attributes (joints + weights) — only used
+    /// by `SkinnedForwardLit` draws, bound at vertex binding 1.
+    pub skin_vertex_buffer: Option<vk::Buffer>,
+    /// Optional skin-palette descriptor set (set 2). Resolved from the
+    /// SkinPalette compute Ingot's buffer each frame.
+    pub skin_palette_set: Option<vk::DescriptorSet>,
 }
 
 impl GraphicsFramePlan {
@@ -178,6 +184,8 @@ impl GraphicsFramePlan {
             mvp:  MAT4_IDENTITY,
             material_set: None,
             vertex_buffer_override: None,
+            skin_vertex_buffer: None,
+            skin_palette_set: None,
         }
     }
 
@@ -199,7 +207,17 @@ impl GraphicsFramePlan {
             mvp:  MAT4_IDENTITY,
             material_set: None,
             vertex_buffer_override: None,
+            skin_vertex_buffer: None,
+            skin_palette_set: None,
         }
+    }
+
+    /// Promote a mesh draw to the SkinnedForwardLit pipeline. The caller
+    /// must also attach the per-vertex skin buffer + palette descriptor
+    /// via the dedicated builders below.
+    pub fn with_kind(mut self, kind: GraphicsOreKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Set the pre-resolved Vulkan descriptor set for the material (set 1).
@@ -213,6 +231,21 @@ impl GraphicsFramePlan {
     /// `GpuMesh` allocation. The index buffer still comes from the mesh.
     pub fn with_vertex_buffer_override(mut self, buffer: vk::Buffer) -> Self {
         self.vertex_buffer_override = Some(buffer);
+        self
+    }
+
+    /// Bind a per-vertex skin attribute buffer at vertex binding 1
+    /// (joints + weights — only consumed by SkinnedForwardLit).
+    pub fn with_skin_vertex_buffer(mut self, buffer: vk::Buffer) -> Self {
+        self.skin_vertex_buffer = Some(buffer);
+        self
+    }
+
+    /// Bind the skin-palette descriptor set at set 2 (only consumed by
+    /// SkinnedForwardLit). Typically created on-demand per frame from a
+    /// SkinPalette compute Ingot's `result_buffer()`.
+    pub fn with_skin_palette_set(mut self, set: vk::DescriptorSet) -> Self {
+        self.skin_palette_set = Some(set);
         self
     }
 
@@ -249,6 +282,8 @@ impl GraphicsFramePlan {
             mvp:            self.mvp,
             material_set:   self.material_set,
             vertex_buffer_override: self.vertex_buffer_override,
+            skin_vertex_buffer:     self.skin_vertex_buffer,
+            skin_palette_set:       self.skin_palette_set,
         }
     }
 }
@@ -274,4 +309,6 @@ pub struct GraphicsFrame {
     pub mvp:  [f32; 16],
     pub material_set: Option<vk::DescriptorSet>,
     pub vertex_buffer_override: Option<vk::Buffer>,
+    pub skin_vertex_buffer:     Option<vk::Buffer>,
+    pub skin_palette_set:       Option<vk::DescriptorSet>,
 }

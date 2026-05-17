@@ -4,6 +4,7 @@ use ash::vk;
 use thin_vec::ThinVec;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::forge_master::{ForgeError, ForgeMaster, ForgeResult, ForgeImage, GraphicsForge, GraphicsMold};
+use crate::forge_master::ore::GraphicsOreKind;
 use crate::resource_manager::manager::{Handle as ResourceHandle, Id};
 
 use super::factory_master::{ComputeTag, FactoryHandle, FactoryMaster, GraphicsTag, Proto};
@@ -53,6 +54,10 @@ pub struct GraphicsState {
 
     // pipeline + framebuffers
     pub mold: GraphicsMold,
+    /// Optional second pipeline for SkinnedForwardLit draws — compiled from
+    /// a separate `GraphicsForge` via `Window::attach_skinned_forge` after
+    /// construction. Stays `None` until the caller opts in.
+    pub skinned_mold: Option<GraphicsMold>,
     pub framebuffers: ThinVec<vk::Framebuffer>,
 
     // command recording — FRAMES_IN_FLIGHT primary buffers
@@ -234,6 +239,7 @@ impl Window {
                 swapchain_loader,
                 depth_images,
                 mold,
+                skinned_mold: None,
                 framebuffers,
                 command_pool,
                 command_buffers,
@@ -252,6 +258,21 @@ impl Window {
         if let Some(gfx) = &mut self.graphics {
             gfx.needs_resize = true;
         }
+    }
+
+    /// Compile a second graphics forge (typically `SkinnedForwardLit`) into
+    /// its own `GraphicsMold` and store it on this Window. Call once after
+    /// `Window::new_with_surface` and before issuing any skinned draws.
+    pub fn attach_skinned_forge(
+        &mut self,
+        device:    &ash::Device,
+        forge:     &GraphicsForge,
+    ) -> ForgeResult<()> {
+        let gfx = self.graphics.as_mut()
+            .expect("attach_skinned_forge requires a graphics window");
+        let mold = forge.compile(device, gfx.swapchain_format, gfx.depth_format)?;
+        gfx.skinned_mold = Some(mold);
+        Ok(())
     }
 
     pub fn build_compute_factory(
@@ -301,6 +322,9 @@ impl Window {
                 }
                 gfx.framebuffers.clear();
                 gfx.mold.destroy(device);
+                if let Some(m) = gfx.skinned_mold.as_mut() {
+                    m.destroy(device);
+                }
                 for img in gfx.depth_images.iter_mut() {
                     img.destroy(device);
                 }
@@ -505,11 +529,6 @@ impl Window {
             device.begin_command_buffer(command_buffer, &begin_info)
                 .map_err(ForgeError::Vk)?;
             device.cmd_begin_render_pass(command_buffer, &rp_begin, vk::SubpassContents::INLINE);
-            device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                gfx.mold.pipeline,
-            );
 
             // Dynamic viewport/scissor — pipeline is extent-agnostic, set here.
             let viewports = [vk::Viewport {
@@ -527,28 +546,77 @@ impl Window {
             device.cmd_set_viewport(command_buffer, 0, &viewports);
             device.cmd_set_scissor(command_buffer, 0, &scissors);
 
+            // Bind the default pipeline once at the start; the inner loop
+            // re-binds only when the kind changes.
+            let mut current_kind: Option<GraphicsOreKind> = None;
             for call in &calls {
+                // Pick the mold for this call's kind. Skinned draws need the
+                // skinned mold; everything else uses the default ForwardLit.
+                let mold: &GraphicsMold = match (call.kind, gfx.skinned_mold.as_ref()) {
+                    (GraphicsOreKind::SkinnedForwardLit, Some(sm)) => sm,
+                    _ => &gfx.mold,
+                };
+                if current_kind != Some(call.kind) {
+                    device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        mold.pipeline,
+                    );
+                    current_kind = Some(call.kind);
+                }
+
                 // Bind material descriptor set (set 1) when present.
                 if let Some(mat_set) = call.material_set {
                     device.cmd_bind_descriptor_sets(
                         command_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
-                        gfx.mold.pipeline_layout,
+                        mold.pipeline_layout,
                         1,
                         &[mat_set],
                         &[],
                     );
                 }
+                // Bind skin palette descriptor set (set 2) for skinned draws.
+                if call.kind == GraphicsOreKind::SkinnedForwardLit {
+                    if let Some(skin_set) = call.skin_palette_set {
+                        device.cmd_bind_descriptor_sets(
+                            command_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            mold.pipeline_layout,
+                            2,
+                            &[skin_set],
+                            &[],
+                        );
+                    }
+                }
+
                 if let Some(mesh) = &call.mesh {
                     // Use the compute-shader-posed vertex buffer when the call
                     // carries an override (MorphBlend output); otherwise the
                     // rest-pose mesh buffer.
                     let vb = call.vertex_buffer_override
                         .unwrap_or(mesh.vertex_buffer.handle);
-                    device.cmd_bind_vertex_buffers(
-                        command_buffer, 0,
-                        &[vb], &[0],
-                    );
+                    // Skinned pipeline needs the per-vertex joints/weights buffer at binding 1.
+                    if call.kind == GraphicsOreKind::SkinnedForwardLit {
+                        if let Some(skin_vb) = call.skin_vertex_buffer {
+                            device.cmd_bind_vertex_buffers(
+                                command_buffer, 0,
+                                &[vb, skin_vb], &[0, 0],
+                            );
+                        } else {
+                            // No skin buffer — fall back to single binding so the
+                            // draw still records (visual will be wrong but no crash).
+                            device.cmd_bind_vertex_buffers(
+                                command_buffer, 0,
+                                &[vb], &[0],
+                            );
+                        }
+                    } else {
+                        device.cmd_bind_vertex_buffers(
+                            command_buffer, 0,
+                            &[vb], &[0],
+                        );
+                    }
                     device.cmd_bind_index_buffer(
                         command_buffer,
                         mesh.index_buffer.handle,
@@ -559,7 +627,7 @@ impl Window {
                         std::slice::from_raw_parts(call.mvp.as_ptr().cast(), 64);
                     device.cmd_push_constants(
                         command_buffer,
-                        gfx.mold.pipeline_layout,
+                        mold.pipeline_layout,
                         vk::ShaderStageFlags::VERTEX,
                         0,
                         mvp_bytes,

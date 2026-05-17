@@ -27,12 +27,17 @@ use dumpster_fire_engine::render::{
     Window, WindowId as RenderWindowId,
 };
 use dumpster_fire_engine::resource_manager::asset_manager::{
-    build_graphics_plans_full, build_skin_morph_proto, collect_morph_output_buffers,
-    forge_gltf::{GltfAsset, Pose}, load_asset, register_skin_morph_forges,
+    build_graphics_plans_maximal, build_skin_morph_proto, collect_morph_output_buffers,
+    collect_skin_palette_buffers, forge_gltf::{GltfAsset, Pose}, load_asset,
+    pack_primitive_skin_attrs, primitive_is_skinned, register_skin_morph_forges,
+    SkinningFrame,
 };
+use dumpster_fire_engine::forge_master::ore::GpuSkinBuffer;
 use dumpster_fire_engine::resource_manager::gltf_driver::{
     AsyncGltfLoader, GltfCache, GltfUploadCtx, MaterialHandle,
-    create_material, create_material_pool, gltf_sampler_to_vk, upload_texture_rgba,
+    allocate_skin_palette_set, create_material, create_material_pool,
+    create_skin_palette_pool, create_skin_palette_set_layout,
+    gltf_sampler_to_vk, upload_texture_rgba,
     GltfSampler, TEXTURE_SLOT_COUNT,
 };
 
@@ -41,6 +46,9 @@ const FORWARD_LIT_VERT: &[u8] = include_bytes!(
 );
 const FORWARD_LIT_FRAG: &[u8] = include_bytes!(
     concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/forward_lit.frag.spv")
+);
+const SKINNED_VERT: &[u8] = include_bytes!(
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/skinned_forward_lit.vert.spv")
 );
 
 fn main() {
@@ -74,6 +82,9 @@ struct AssetState {
     pose:            Pose,
     /// Pre-resolved descriptor set per material index. Built once on load.
     material_sets:   Vec<Option<vk::DescriptorSet>>,
+    /// Per-skinned-primitive joints+weights vertex buffer (binding 1).
+    /// (mesh_idx, prim_idx) → owned GpuSkinBuffer.
+    skin_vertex_buffers: std::collections::HashMap<(usize, usize), GpuSkinBuffer>,
     /// Owned by the App for the lifetime of the asset.
     cache:           GltfCache,
     /// Track if we've ever animated.
@@ -81,12 +92,16 @@ struct AssetState {
 }
 
 struct LiveState {
-    ctx:             VulkanContext,
-    renderer:        Renderer,
-    window_handle:   dumpster_fire_engine::render::WindowHandle,
-    winit_id:        WindowId,
-    material_pool:   vk::DescriptorPool,
-    material_layout: vk::DescriptorSetLayout,
+    ctx:               VulkanContext,
+    renderer:          Renderer,
+    window_handle:     dumpster_fire_engine::render::WindowHandle,
+    winit_id:          WindowId,
+    material_pool:     vk::DescriptorPool,
+    material_layout:   vk::DescriptorSetLayout,
+    /// Skin palette descriptor set pool — reset every frame so the
+    /// per-frame palette set allocations recycle.
+    skin_pool:         vk::DescriptorPool,
+    skin_set_layout:   vk::DescriptorSetLayout,
 }
 
 impl ApplicationHandler for App {
@@ -123,6 +138,12 @@ impl ApplicationHandler for App {
             FORWARD_LIT_VERT,
             FORWARD_LIT_FRAG,
         ).expect("register ForwardLit forge");
+        forge.add_graphics_forge_from_spirv_bytes(
+            GraphicsForgeId::new(2),
+            GraphicsOreKind::SkinnedForwardLit,
+            SKINNED_VERT,
+            FORWARD_LIT_FRAG, // identical fragment stage
+        ).expect("register SkinnedForwardLit forge");
         // Pre-compile SkinPalette + MorphBlend compute pipelines once at
         // startup — per-frame plans can dispatch them without re-linking.
         register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
@@ -131,7 +152,7 @@ impl ApplicationHandler for App {
             .expect("ForwardLit forge present");
 
         // ── Window + swapchain + pipeline ────────────────────────────────────
-        let window = Window::new_with_surface(
+        let mut window = Window::new_with_surface(
             RenderWindowId::new(1),
             "hello_gltf",
             winit_window.clone(),
@@ -145,6 +166,17 @@ impl ApplicationHandler for App {
             &ctx.entry,
             graphics_forge,
         ).expect("Window::new_with_surface");
+
+        // Attach the SkinnedForwardLit pipeline BEFORE handing `forge` to the
+        // renderer — that way we don't need GraphicsForge: Clone or a
+        // re-borrow of the renderer-owned ForgeMaster.
+        {
+            let skinned_forge = forge
+                .graphics_forge(GraphicsOreKind::SkinnedForwardLit)
+                .expect("SkinnedForwardLit registered above");
+            window.attach_skinned_forge(&ctx.device, skinned_forge)
+                .expect("attach SkinnedForwardLit pipeline");
+        }
 
         let mut renderer = Renderer::new(forge);
         let window_handle = renderer.add_window(window);
@@ -160,9 +192,17 @@ impl ApplicationHandler for App {
         let material_pool = create_material_pool(&ctx.device, 4096)
             .expect("create material descriptor pool");
 
+        // Skin palette descriptor layout + pool. The pool is reset every
+        // frame so the per-frame palette allocations recycle their slots.
+        let skin_set_layout = create_skin_palette_set_layout(&ctx.device)
+            .expect("create skin set layout");
+        let skin_pool = create_skin_palette_pool(&ctx.device, 256)
+            .expect("create skin descriptor pool");
+
         self.live = Some(LiveState {
             ctx, renderer, window_handle, winit_id,
             material_pool, material_layout,
+            skin_pool, skin_set_layout,
         });
         if let Some(gfx) = &self.live.as_ref().unwrap().renderer
             .window(self.live.as_ref().unwrap().window_handle)
@@ -212,9 +252,12 @@ impl ApplicationHandler for App {
                                     let mut cache = GltfCache::new();
                                     let material_sets =
                                         upload_materials(&live.ctx, live, &mut cache, &asset);
+                                    let skin_vertex_buffers =
+                                        upload_skin_vertex_buffers(&live.ctx, &asset);
 
                                     self.asset_loaded = Some(AssetState {
-                                        asset, pose, material_sets, cache,
+                                        asset, pose, material_sets,
+                                        skin_vertex_buffers, cache,
                                         last_anim_time: -1.0,
                                     });
                                 }
@@ -240,22 +283,37 @@ impl ApplicationHandler for App {
 
                     let needs_rebuild = advanced || state.last_anim_time < 0.0;
                     if needs_rebuild {
+                        // Reset the per-frame skin-palette descriptor pool so we
+                        // can re-allocate sets pointing at the new compute output.
+                        unsafe {
+                            live.ctx.device.reset_descriptor_pool(
+                                live.skin_pool, vk::DescriptorPoolResetFlags::empty(),
+                            ).ok();
+                        }
+
                         // GPU skin/morph compute pass — dispatched per frame.
                         // The factory's ingots own the compute output buffers; we
-                        // harvest morph-blended vertex buffers and pass them to the
-                        // graphics-plan builder so each morphed draw rasterises the
-                        // posed vertices directly out of the compute output.
-                        let morph_buffers: std::collections::HashMap<_, _> =
+                        // harvest morph-blended vertex buffers and skin palettes
+                        // from it and feed them straight into the graphics draws.
+                        let (morph_buffers, palette_buffers):
+                            (std::collections::HashMap<_, _>, std::collections::HashMap<_, _>) =
                             if let Some(compute_proto) = build_skin_morph_proto(
                                 &state.asset, &state.pose, ProtoId::new(2), 0,
                             ) {
                                 match live.renderer.build_compute_factory(
                                     live.window_handle, compute_proto,
                                 ) {
-                                    Ok(handle) => live.renderer.window(live.window_handle)
-                                        .and_then(|w| w.factory_master.get(handle))
-                                        .map(|f| collect_morph_output_buffers(&state.asset, f))
-                                        .unwrap_or_default(),
+                                    Ok(handle) => {
+                                        let win = live.renderer.window(live.window_handle);
+                                        let factory = win.and_then(|w| w.factory_master.get(handle));
+                                        match factory {
+                                            Some(f) => (
+                                                collect_morph_output_buffers(&state.asset, f),
+                                                collect_skin_palette_buffers(&state.asset, f),
+                                            ),
+                                            None => Default::default(),
+                                        }
+                                    }
                                     Err(e) => {
                                         eprintln!("skin/morph compute dispatch error: {e:?}");
                                         Default::default()
@@ -263,13 +321,39 @@ impl ApplicationHandler for App {
                                 }
                             } else { Default::default() };
 
+                        // Allocate one palette descriptor set per (skinned) node
+                        // pointing at that skin's palette buffer.
+                        let mut palette_sets_by_node = std::collections::HashMap::new();
+                        for (node_idx, node) in state.asset.nodes.iter().enumerate() {
+                            let Some(skin_idx) = node.skin else { continue };
+                            let Some(&buf) = palette_buffers.get(&(skin_idx as usize)) else { continue };
+                            let range = (state.asset.skins[skin_idx as usize].joints.len() as vk::DeviceSize) * 64;
+                            match allocate_skin_palette_set(
+                                &live.ctx.device, live.skin_pool, live.skin_set_layout,
+                                buf, range.max(64),
+                            ) {
+                                Ok(set) => { palette_sets_by_node.insert(node_idx, set); }
+                                Err(e)  => eprintln!("skin palette set alloc error: {e:?}"),
+                            }
+                        }
+
+                        let skin_vbs: std::collections::HashMap<(usize, usize), vk::Buffer> =
+                            state.skin_vertex_buffers.iter()
+                                .map(|(k, gpu)| (*k, gpu.buffer.handle))
+                                .collect();
+                        let skinning = SkinningFrame {
+                            skin_vertex_buffers: skin_vbs,
+                            palette_sets_by_node,
+                        };
+
                         let upload_ctx = live.ctx.mesh_upload_ctx();
-                        match build_graphics_plans_full(
+                        match build_graphics_plans_maximal(
                             &state.asset,
                             &state.pose,
                             &upload_ctx,
                             &state.material_sets,
                             &morph_buffers,
+                            &skinning,
                         ) {
                             Ok(plans) => {
                                 let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "gltf_scene");
@@ -365,6 +449,30 @@ fn upload_materials(
             }
         }
     }).collect()
+}
+
+/// Upload one GpuSkinBuffer per skinned primitive in the asset. The
+/// buffers stay alive for the asset's lifetime — they're the source of
+/// vertex binding 1 on every SkinnedForwardLit draw.
+fn upload_skin_vertex_buffers(
+    ctx:   &VulkanContext,
+    asset: &GltfAsset,
+) -> std::collections::HashMap<(usize, usize), GpuSkinBuffer> {
+    let mut out = std::collections::HashMap::new();
+    let mesh_ctx = ctx.mesh_upload_ctx();
+    for (mi, mesh) in asset.meshes.iter().enumerate() {
+        for (pi, _prim) in mesh.primitives.iter().enumerate() {
+            if !primitive_is_skinned(asset, mi as u32, pi as u32) { continue; }
+            let bytes = pack_primitive_skin_attrs(asset, mi as u32, pi as u32);
+            let vcount = (bytes.len() / 24) as u32;
+            if vcount == 0 { continue; }
+            match GpuSkinBuffer::upload(&mesh_ctx, &bytes, vcount) {
+                Ok(b) => { out.insert((mi, pi), b); }
+                Err(e) => eprintln!("skin vertex buffer upload failed: {e:?}"),
+            }
+        }
+    }
+    out
 }
 
 // Touch TEXTURE_SLOT_COUNT so it's not flagged unused at the binary scope.

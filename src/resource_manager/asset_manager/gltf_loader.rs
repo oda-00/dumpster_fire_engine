@@ -544,6 +544,20 @@ pub fn build_graphics_plans_with_pose_and_materials(
     build_graphics_plans_full(asset, pose, upload_ctx, material_sets, &Default::default())
 }
 
+/// Bundle of per-frame resources for skinned-draw routing — output of
+/// the compute pass plus the device-side buffers/sets the graphics pass
+/// will bind.
+#[derive(Default)]
+pub struct SkinningFrame {
+    /// (mesh_idx, prim_idx) → the per-vertex joints+weights buffer
+    /// uploaded once per primitive via `GpuSkinBuffer::upload`. Owned by
+    /// the caller (typically cached for the asset's lifetime).
+    pub skin_vertex_buffers: std::collections::HashMap<(usize, usize), vk::Buffer>,
+    /// `node_idx` → the skin-palette descriptor set bound at set 2.
+    /// Allocated per frame from a recyclable descriptor pool.
+    pub palette_sets_by_node: std::collections::HashMap<usize, vk::DescriptorSet>,
+}
+
 /// Maximal-power per-frame plan builder.
 ///
 /// `morph_buffers` maps `(mesh_idx, prim_idx)` → the `vk::Buffer` produced
@@ -559,6 +573,23 @@ pub fn build_graphics_plans_full(
     material_sets: &[Option<vk::DescriptorSet>],
     morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    build_graphics_plans_maximal(
+        asset, pose, upload_ctx, material_sets, morph_buffers, &SkinningFrame::default(),
+    )
+}
+
+/// The final per-frame plan builder. Beyond `_full`, this also routes
+/// skinned primitives to the `SkinnedForwardLit` pipeline, attaches the
+/// per-vertex joints/weights buffer at vertex binding 1, and binds the
+/// SkinPalette descriptor set at descriptor set 2.
+pub fn build_graphics_plans_maximal(
+    asset:         &GltfAsset,
+    pose:          &Pose,
+    upload_ctx:    &MeshUploadCtx,
+    material_sets: &[Option<vk::DescriptorSet>],
+    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    skinning:      &SkinningFrame,
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     let mut cache: Vec<Vec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
         .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
         .collect();
@@ -573,6 +604,21 @@ pub fn build_graphics_plans_full(
             *mesh_slot = Some(Arc::new(gpu));
         }
         let mesh = mesh_slot.as_ref().unwrap().clone();
+
+        // Skinned primitives need three things in lockstep:
+        //   1. the per-vertex JOINTS_0 + WEIGHTS_0 buffer at vertex binding 1
+        //   2. the SkinPalette descriptor set at set 2 (one per node-with-skin)
+        //   3. the SkinnedForwardLit pipeline (kind override)
+        // Falls back to plain ForwardLit when any of those pieces is missing.
+        let node = &asset.nodes[d.node as usize];
+        let is_skinned = node.skin.is_some() && primitive_is_skinned(asset, d.mesh, d.primitive);
+        let skin_vb = if is_skinned {
+            skinning.skin_vertex_buffers.get(&(d.mesh as usize, d.primitive as usize)).copied()
+        } else { None };
+        let palette_set = if is_skinned {
+            skinning.palette_sets_by_node.get(&(d.node as usize)).copied()
+        } else { None };
+
         let mut plan = GraphicsFramePlan::new_mesh(
             crate::forge_master::frame::FrameId::new((i + 1) as i64),
             d.material
@@ -589,9 +635,90 @@ pub fn build_graphics_plans_full(
         if let Some(&buf) = morph_buffers.get(&(d.mesh as usize, d.primitive as usize)) {
             plan = plan.with_vertex_buffer_override(buf);
         }
-        plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
+        // Promote to the skinned pipeline only when the full triplet is wired.
+        if is_skinned && skin_vb.is_some() && palette_set.is_some() {
+            plan = plan
+                .with_kind(GraphicsOreKind::SkinnedForwardLit)
+                .with_skin_vertex_buffer(skin_vb.unwrap())
+                .with_skin_palette_set(palette_set.unwrap());
+            plans.push(plan);
+        } else {
+            plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
+        }
     }
     Ok(plans)
+}
+
+/// Pack one primitive's `JOINTS_0` + `WEIGHTS_0` streams into the
+/// 24-byte-per-vertex layout expected by `skinned_forward_lit.vert` at
+/// binding 1 — `uvec2 joints_packed` (4 × u16) + `vec4 weights` (4 × f32).
+///
+/// Primitives that don't carry joint/weight streams (i.e. unskinned) get a
+/// zero-byte vector — callers should not upload a SkinVertex buffer for
+/// them and should leave the draw on the regular ForwardLit pipeline.
+pub fn pack_primitive_skin_attrs(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> Vec<u8> {
+    let prim = &asset.meshes[mesh_idx as usize].primitives[prim_idx as usize];
+    let n = prim.streams.positions.len();
+    let joints0  = prim.streams.joints.first();
+    let weights0 = prim.streams.weights.first();
+    if joints0.is_none() || weights0.is_none() { return Vec::new(); }
+    let joints  = joints0.unwrap();
+    let weights = weights0.unwrap();
+
+    let mut out = Vec::with_capacity(n * 24);
+    for i in 0..n {
+        let j = joints.get(i).copied().unwrap_or([0; 4]);
+        let w = weights.get(i).copied().unwrap_or([0.0; 4]);
+        // Pack 4 × u16 into uvec2 (low halves into .x, high halves into .y).
+        let xy0 = (j[0] as u32) | ((j[1] as u32) << 16);
+        let xy1 = (j[2] as u32) | ((j[3] as u32) << 16);
+        out.extend_from_slice(&xy0.to_le_bytes());
+        out.extend_from_slice(&xy1.to_le_bytes());
+        for v in w { out.extend_from_slice(&v.to_le_bytes()); }
+    }
+    out
+}
+
+/// Returns true when primitive `prim_idx` of mesh `mesh_idx` carries any
+/// non-empty JOINTS_0 / WEIGHTS_0 streams — i.e. it's a skinned primitive
+/// that should be routed through the SkinnedForwardLit pipeline.
+pub fn primitive_is_skinned(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> bool {
+    let prim = &asset.meshes[mesh_idx as usize].primitives[prim_idx as usize];
+    prim.streams.joints.first().is_some_and(|s| !s.is_empty())
+        && prim.streams.weights.first().is_some_and(|s| !s.is_empty())
+}
+
+/// Identifier for a per-skin SkinPalette compute output, matching the
+/// iteration order that `build_skin_morph_proto` uses.
+pub fn skin_palette_frame_id(asset: &GltfAsset, skin_idx: usize) -> Option<FrameId> {
+    let mut next: i64 = 1;
+    for si in 0..asset.skins.len() {
+        if asset.skins.get(si).is_some_and(|s| !s.joints.is_empty()) {
+            if si == skin_idx { return Some(FrameId::new(next)); }
+            next += 1;
+        }
+    }
+    None
+}
+
+/// Walk a compute factory built from `build_skin_morph_proto` and produce
+/// a map from skin index → the SkinPalette mat4[] buffer the compute Ore
+/// just wrote, ready to be bound as set 2 binding 0 on the
+/// `SkinnedForwardLit` pipeline.
+pub fn collect_skin_palette_buffers(
+    asset:   &GltfAsset,
+    factory: &crate::render::factory_master::factory::Factory,
+) -> std::collections::HashMap<usize, vk::Buffer> {
+    let mut out = std::collections::HashMap::new();
+    for si in 0..asset.skins.len() {
+        let Some(id) = skin_palette_frame_id(asset, si) else { continue };
+        let Some(frame) = factory.frame_by_id(id) else { continue };
+        let Some(ingot) = frame.ingots.first() else { continue };
+        if let Some(buf) = ingot.result_buffer() {
+            out.insert(si, buf.handle);
+        }
+    }
+    out
 }
 
 fn primitive_to_mesh_ore(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> MeshOre {
