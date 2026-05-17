@@ -1209,6 +1209,13 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
         141 | 142                => bc::decode_bc5(level_data, w, h).to_vec(),
         145 | 146                => bc::decode_bc7(level_data, w, h).to_vec(),
 
+        // ETC2 + EAC family.
+        147 | 148 => crate::codec::etc2::decode_etc2_rgb(level_data, w, h).to_vec(),
+        149 | 150 => crate::codec::etc2::decode_etc2_rgba1(level_data, w, h).to_vec(),
+        151 | 152 => crate::codec::etc2::decode_etc2_rgba8(level_data, w, h).to_vec(),
+        153 | 154 => crate::codec::etc2::decode_eac_r11(level_data, w, h).to_vec(),
+        155 | 156 => crate::codec::etc2::decode_eac_r11g11(level_data, w, h).to_vec(),
+
         other => return Err(GltfError::UnsupportedFeature(
             format!("KTX2 uncompressed vkFormat {other}")
         )),
