@@ -488,6 +488,10 @@ pub struct ForgeImage {
     pub memory: vk::DeviceMemory,
     pub format: vk::Format,
     pub extent: vk::Extent3D,
+    /// Mip level count baked into the image at creation time. `1` for
+    /// single-mip / depth / storage images; > 1 for sampled textures that
+    /// went through `create_2d_mip`.
+    pub mip_levels: u32,
 }
 
 /// Infer the correct `ImageAspectFlags` from a format.
@@ -565,6 +569,72 @@ impl ForgeImage {
             memory,
             format,
             extent,
+            mip_levels: 1,
+        })
+    }
+
+    /// Same as `create_2d` but allocates the full mip chain
+    /// (`1 + floor(log2(max(w,h)))` levels). The image view covers every
+    /// level so the sampler can blend across them when `max_lod` permits.
+    /// Caller is responsible for writing each level (`upload_texture_rgba`
+    /// generates the lower levels via `vkCmdBlitImage` from level 0).
+    pub fn create_2d_mip(
+        device: &ash::Device,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        properties: vk::MemoryPropertyFlags,
+    ) -> ForgeResult<Self> {
+        let w = width.max(1);
+        let h = height.max(1);
+        let mip_levels = 1 + (w.max(h) as f32).log2().floor() as u32;
+        let extent = vk::Extent3D { width: w, height: h, depth: 1 };
+        let info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(extent)
+            .mip_levels(mip_levels)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let handle = unsafe { device.create_image(&info, None)? };
+        let req = unsafe { device.get_image_memory_requirements(handle) };
+        let memory_type_index =
+            find_memory_type(memory_properties, req.memory_type_bits, properties)?;
+        let alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { device.allocate_memory(&alloc, None)? };
+        unsafe { device.bind_image_memory(handle, memory, 0)? };
+
+        let aspect_mask = aspect_mask_for_format(format);
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(handle)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect_mask)
+                    .base_mip_level(0)
+                    .level_count(mip_levels)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+
+        Ok(Self {
+            handle,
+            view,
+            memory,
+            format,
+            extent,
+            mip_levels,
         })
     }
 

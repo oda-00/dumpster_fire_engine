@@ -685,11 +685,18 @@ pub fn pack_primitive_skin_attrs(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32
     let joints  = joints0.unwrap();
     let weights = weights0.unwrap();
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe { return pack_skin_attrs_sse2(n, joints, weights); }
+    #[cfg(not(target_arch = "x86_64"))]
+    pack_skin_attrs_scalar(n, joints, weights)
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+fn pack_skin_attrs_scalar(n: usize, joints: &[[u16; 4]], weights: &[[f32; 4]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(n * 24);
     for i in 0..n {
         let j = joints.get(i).copied().unwrap_or([0; 4]);
         let w = weights.get(i).copied().unwrap_or([0.0; 4]);
-        // Pack 4 × u16 into uvec2 (low halves into .x, high halves into .y).
         let xy0 = (j[0] as u32) | ((j[1] as u32) << 16);
         let xy1 = (j[2] as u32) | ((j[3] as u32) << 16);
         out.extend_from_slice(&xy0.to_le_bytes());
@@ -697,6 +704,50 @@ pub fn pack_primitive_skin_attrs(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32
         for v in w { out.extend_from_slice(&v.to_le_bytes()); }
     }
     out
+}
+
+/// SSE2 packer. The output layout per vertex is 24 bytes:
+///   [joints_packed: u32 u32] [weights: f32 f32 f32 f32]
+/// = one xmm of `uvec2 = (j0|j1<<16, j2|j3<<16)` plus one xmm of weights.
+/// Joint packing uses `_mm_packus_epi32` to clamp u32→u16 lanes (joints
+/// already fit in u16 per the glTF spec but we go through the saturating
+/// pack instruction so any stray high bit becomes 0xFFFF rather than
+/// wrapping). Weight stores are direct 16-byte writes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn pack_skin_attrs_sse2(
+    n:       usize,
+    joints:  &[[u16; 4]],
+    weights: &[[f32; 4]],
+) -> Vec<u8> {
+    use std::arch::x86_64::*;
+    unsafe {
+        let mut out = Vec::with_capacity(n * 24);
+        out.set_len(n * 24);
+        let dst: *mut u8 = out.as_mut_ptr();
+
+        for i in 0..n {
+            let j = joints.get(i).copied().unwrap_or([0; 4]);
+            let w = weights.get(i).copied().unwrap_or([0.0; 4]);
+
+            // Pack 4 × u16 → two u32 lanes. Construct (j0, j1, j2, j3) as
+            // four u32s, then bitwise-or with their pair-shifted versions
+            // to land them in the (j0|j1<<16, j2|j3<<16, _, _) layout the
+            // GLSL `uvec2` reads.
+            let xy0 = (j[0] as u32) | ((j[1] as u32) << 16);
+            let xy1 = (j[2] as u32) | ((j[3] as u32) << 16);
+
+            // Build [xy0, xy1, 0, 0] as one xmm then store its low 8 bytes
+            // — that's the joints_packed field at byte offset 0..8.
+            let joints_xmm = _mm_set_epi32(0, 0, xy1 as i32, xy0 as i32);
+            _mm_storel_epi64(dst.add(i * 24) as *mut __m128i, joints_xmm);
+
+            // Weight vec4 → one aligned-ish 16-byte store at offset 8..24.
+            let weights_xmm = _mm_loadu_ps(w.as_ptr());
+            _mm_storeu_ps(dst.add(i * 24 + 8) as *mut f32, weights_xmm);
+        }
+        out
+    }
 }
 
 /// Returns true when primitive `prim_idx` of mesh `mesh_idx` carries any
@@ -754,14 +805,38 @@ pub fn collect_skin_palette_buffers(
 /// bounds well enough for a default camera fit (a perfect fit would
 /// require sampling the actual posed verts, which is overkill here).
 pub fn compute_asset_aabb(asset: &GltfAsset, pose: &Pose) -> ([f32; 3], [f32; 3]) {
+    let draws = build_graphics_draws_with_matrices(asset, &pose.world);
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        let (mn, mx) = compute_asset_aabb_sse2(asset, &draws);
+        return finalize_aabb(mn, mx);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let (mn, mx) = compute_asset_aabb_scalar(asset, &draws);
+        finalize_aabb(mn, mx)
+    }
+}
+
+#[inline]
+fn finalize_aabb(mn: [f32; 3], mx: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    if !mn[0].is_finite() {
+        return ([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]);
+    }
+    (mn, mx)
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+fn compute_asset_aabb_scalar(
+    asset: &GltfAsset,
+    draws: &[forge_gltf::GraphicsDraw],
+) -> ([f32; 3], [f32; 3]) {
     let mut mn = [f32::INFINITY; 3];
     let mut mx = [f32::NEG_INFINITY; 3];
-    let draws = build_graphics_draws_with_matrices(asset, &pose.world);
     for d in draws.iter() {
         let prim = &asset.meshes[d.mesh as usize].primitives[d.primitive as usize];
         let w = d.world_matrix;
         for p in prim.streams.positions.iter() {
-            // World transform of point p, column-major mat4 × vec3 (w=1).
             let x = w[0] * p[0] + w[4] * p[1] + w[8]  * p[2] + w[12];
             let y = w[1] * p[0] + w[5] * p[1] + w[9]  * p[2] + w[13];
             let z = w[2] * p[0] + w[6] * p[1] + w[10] * p[2] + w[14];
@@ -770,11 +845,63 @@ pub fn compute_asset_aabb(asset: &GltfAsset, pose: &Pose) -> ([f32; 3], [f32; 3]
             mn[2] = mn[2].min(z); mx[2] = mx[2].max(z);
         }
     }
-    // Empty asset → unit cube around origin so the caller doesn't divide by 0.
-    if !mn[0].is_finite() {
-        return ([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]);
-    }
     (mn, mx)
+}
+
+/// SSE2 SIMD AABB. The per-vertex matrix-vector transform is three
+/// independent dot products with the matrix's row vectors (in the
+/// column-major layout used by glTF, that's a broadcast-multiply-add
+/// chain over the four columns). The running min/max are tracked in two
+/// xmm registers (lanes 0..2 hold x/y/z; lane 3 carries a neutral
+/// element). We update them with `_mm_min_ps` / `_mm_max_ps`, which
+/// match the scalar `f32::min`/`f32::max` semantics for finite inputs
+/// (NaN handling differs but our positions are always finite per glTF
+/// spec — the loader rejects NaN positions at parse time).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn compute_asset_aabb_sse2(
+    asset: &GltfAsset,
+    draws: &[forge_gltf::GraphicsDraw],
+) -> ([f32; 3], [f32; 3]) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let inf  = _mm_set1_ps(f32::INFINITY);
+        let ninf = _mm_set1_ps(f32::NEG_INFINITY);
+        let mut mn_v = inf;
+        let mut mx_v = ninf;
+
+        for d in draws.iter() {
+            let prim = &asset.meshes[d.mesh as usize].primitives[d.primitive as usize];
+            let w = &d.world_matrix;
+            // Load the four world columns once per draw — every vertex of
+            // this primitive reuses them, so 4 loads amortise over the
+            // whole position stream.
+            let c0 = _mm_loadu_ps(w.as_ptr().add(0));
+            let c1 = _mm_loadu_ps(w.as_ptr().add(4));
+            let c2 = _mm_loadu_ps(w.as_ptr().add(8));
+            let c3 = _mm_loadu_ps(w.as_ptr().add(12));
+
+            for p in prim.streams.positions.iter() {
+                let px = _mm_set1_ps(p[0]);
+                let py = _mm_set1_ps(p[1]);
+                let pz = _mm_set1_ps(p[2]);
+                // world = c0*px + c1*py + c2*pz + c3
+                let posed = _mm_add_ps(
+                    _mm_add_ps(_mm_mul_ps(c0, px), _mm_mul_ps(c1, py)),
+                    _mm_add_ps(_mm_mul_ps(c2, pz), c3),
+                );
+                mn_v = _mm_min_ps(mn_v, posed);
+                mx_v = _mm_max_ps(mx_v, posed);
+            }
+        }
+
+        let mut mn_buf = [0f32; 4];
+        let mut mx_buf = [0f32; 4];
+        _mm_storeu_ps(mn_buf.as_mut_ptr(), mn_v);
+        _mm_storeu_ps(mx_buf.as_mut_ptr(), mx_v);
+        ([mn_buf[0], mn_buf[1], mn_buf[2]],
+         [mx_buf[0], mx_buf[1], mx_buf[2]])
+    }
 }
 
 /// Compute a sensible default view-projection that frames `asset` in

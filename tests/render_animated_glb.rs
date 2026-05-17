@@ -487,6 +487,39 @@ fn gltf_driver_uploads_dummy_white_texture() {
     assert!(tex.image.handle.as_raw() != 0);
     assert!(tex.image.view.as_raw()   != 0);
     assert!(tex.sampler.as_raw()      != 0);
+    // 1×1 input has only one mip level — 1 + floor(log2(1)) == 1.
+    assert_eq!(tex.image.mip_levels, 1);
+
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+        let mut tex = tex;
+        tex.destroy(&ctx.device);
+        ctx.device.destroy_descriptor_pool(pool, None);
+        ctx.device.destroy_descriptor_set_layout(layout, None);
+    }
+}
+
+#[test]
+fn upload_texture_generates_full_mip_chain_on_64x64() {
+    let Some(ctx) = try_vulkan() else { return };
+    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(&ctx.device)
+        .expect("material set layout");
+    let pool = create_material_pool(&ctx.device, 4).expect("material pool");
+    let upload = GltfUploadCtx {
+        device:              &ctx.device,
+        memory_properties:   &ctx.memory_properties,
+        graphics_queue:      ctx.queue,
+        command_pool:        ctx.command_pool,
+        material_set_layout: layout,
+        material_pool:       pool,
+    };
+    // 64×64 RGBA — 64 = 2^6, so we expect 7 mip levels (64, 32, 16, 8, 4, 2, 1).
+    let rgba = vec![128u8; 64 * 64 * 4];
+    let tex = upload_texture_rgba(
+        &upload, 64, 64, &rgba, &GltfSampler::default(),
+        ash::vk::Format::R8G8B8A8_UNORM,
+    ).expect("upload 64x64");
+    assert_eq!(tex.image.mip_levels, 7);
 
     unsafe {
         ctx.device.device_wait_idle().ok();

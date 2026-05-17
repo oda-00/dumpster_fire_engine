@@ -519,12 +519,18 @@ pub fn upload_texture_rgba(
         staging.write_bytes(device, &rgba[..write_len])?;
     }
 
-    let image = ForgeImage::create_2d(
+    // Full mip chain — needed for trilinear / minified sampling to look
+    // right. `vkCmdBlitImage` halves the extent per level using linear
+    // filtering, which approximates a 2×2 box filter cheaply on the GPU.
+    let image = ForgeImage::create_2d_mip(
         device, mp, w, h,
         format,
-        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        vk::ImageUsageFlags::SAMPLED
+            | vk::ImageUsageFlags::TRANSFER_SRC
+            | vk::ImageUsageFlags::TRANSFER_DST,
         vk::MemoryPropertyFlags::DEVICE_LOCAL,
     )?;
+    let mip_levels = image.mip_levels;
 
     unsafe {
         let cb = alloc_single_cmd(device, ctx.command_pool)?;
@@ -535,18 +541,22 @@ pub fn upload_texture_rgba(
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
         ).map_err(ForgeError::Vk)?;
 
-        // Transition UNDEFINED → TRANSFER_DST.
+        // ── Step 1: transition every level UNDEFINED → TRANSFER_DST so the
+        //    buffer-to-image copy targets level 0 and the subsequent blits
+        //    can target levels 1..N safely.
         device.cmd_pipeline_barrier(cb,
             vk::PipelineStageFlags::TOP_OF_PIPE,
             vk::PipelineStageFlags::TRANSFER,
             vk::DependencyFlags::empty(), &[], &[],
-            &[image_layout_barrier(image.handle,
+            &[image_layout_barrier_mips(image.handle,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::AccessFlags::empty(),
-                vk::AccessFlags::TRANSFER_WRITE)],
+                vk::AccessFlags::TRANSFER_WRITE,
+                0, mip_levels)],
         );
 
+        // ── Step 2: copy staging buffer into level 0.
         let region = vk::BufferImageCopy::default()
             .buffer_offset(0).buffer_row_length(0).buffer_image_height(0)
             .image_subresource(vk::ImageSubresourceLayers::default()
@@ -557,16 +567,75 @@ pub fn upload_texture_rgba(
         device.cmd_copy_buffer_to_image(cb, staging.handle, image.handle,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
 
-        // Transition TRANSFER_DST → SHADER_READ.
+        // ── Step 3: build the rest of the mip chain by blitting level i-1
+        //    (TRANSFER_SRC) → level i (TRANSFER_DST), one level at a time.
+        let (mut mip_w, mut mip_h) = (w as i32, h as i32);
+        for i in 1..mip_levels {
+            // Transition the source level from TRANSFER_DST to TRANSFER_SRC.
+            device.cmd_pipeline_barrier(cb,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(), &[], &[],
+                &[image_layout_barrier_mips(image.handle,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::AccessFlags::TRANSFER_READ,
+                    i - 1, 1)],
+            );
+
+            let next_w = (mip_w / 2).max(1);
+            let next_h = (mip_h / 2).max(1);
+            let blit = vk::ImageBlit::default()
+                .src_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D { x: mip_w, y: mip_h, z: 1 },
+                ])
+                .src_subresource(vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(i - 1).base_array_layer(0).layer_count(1))
+                .dst_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D { x: next_w, y: next_h, z: 1 },
+                ])
+                .dst_subresource(vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(i).base_array_layer(0).layer_count(1));
+            device.cmd_blit_image(cb,
+                image.handle, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                image.handle, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[blit], vk::Filter::LINEAR);
+
+            mip_w = next_w;
+            mip_h = next_h;
+        }
+
+        // ── Step 4: transition every level to SHADER_READ. Levels 0..mip-2
+        //    are currently TRANSFER_SRC (we just blitted out of them);
+        //    level mip-1 is still TRANSFER_DST (last blit destination).
+        if mip_levels > 1 {
+            device.cmd_pipeline_barrier(cb,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(), &[], &[],
+                &[image_layout_barrier_mips(image.handle,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags::TRANSFER_READ,
+                    vk::AccessFlags::SHADER_READ,
+                    0, mip_levels - 1)],
+            );
+        }
         device.cmd_pipeline_barrier(cb,
             vk::PipelineStageFlags::TRANSFER,
             vk::PipelineStageFlags::FRAGMENT_SHADER,
             vk::DependencyFlags::empty(), &[], &[],
-            &[image_layout_barrier(image.handle,
+            &[image_layout_barrier_mips(image.handle,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::AccessFlags::TRANSFER_WRITE,
-                vk::AccessFlags::SHADER_READ)],
+                vk::AccessFlags::SHADER_READ,
+                mip_levels - 1, 1)],
         );
 
         device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
@@ -590,7 +659,12 @@ pub fn upload_texture_rgba(
         .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
         .unnormalized_coordinates(false)
         .compare_enable(false)
-        .mip_lod_bias(0.0).min_lod(0.0).max_lod(0.0);
+        .mip_lod_bias(0.0)
+        .min_lod(0.0)
+        // Now that every level is populated, let the sampler walk the full
+        // chain. The glTF sampler's mipmap mode + min_filter pick whether
+        // we get nearest/linear interpolation between levels.
+        .max_lod(mip_levels as f32);
     let vk_sampler = unsafe {
         device.create_sampler(&sampler_info, None).map_err(ForgeError::Vk)?
     };
@@ -818,6 +892,22 @@ fn image_layout_barrier(
     src_access: vk::AccessFlags,
     dst_access: vk::AccessFlags,
 ) -> vk::ImageMemoryBarrier<'static> {
+    image_layout_barrier_mips(image, old_layout, new_layout, src_access, dst_access, 0, 1)
+}
+
+/// Same as `image_layout_barrier` but for a specific mip-range. Used by
+/// the mipmap generation pipeline in `upload_texture_rgba` to flip
+/// individual levels between TRANSFER_SRC and TRANSFER_DST while
+/// building the chain.
+fn image_layout_barrier_mips(
+    image:        vk::Image,
+    old_layout:   vk::ImageLayout,
+    new_layout:   vk::ImageLayout,
+    src_access:   vk::AccessFlags,
+    dst_access:   vk::AccessFlags,
+    base_mip:     u32,
+    level_count:  u32,
+) -> vk::ImageMemoryBarrier<'static> {
     vk::ImageMemoryBarrier::default()
         .old_layout(old_layout)
         .new_layout(new_layout)
@@ -826,7 +916,7 @@ fn image_layout_barrier(
         .image(image)
         .subresource_range(vk::ImageSubresourceRange::default()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .base_mip_level(0).level_count(1)
+            .base_mip_level(base_mip).level_count(level_count)
             .base_array_layer(0).layer_count(1))
         .src_access_mask(src_access)
         .dst_access_mask(dst_access)
