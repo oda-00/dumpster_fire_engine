@@ -88,10 +88,20 @@ pub struct GltfAsset {
 impl GltfAsset {
     pub fn load(path: impl AsRef<Path>) -> GltfResult<Self> {
         // Read the bytes first so we can pre-process KHR_animation_pointer.
-        let bytes = std::fs::read(path).map_err(|e| {
+        let p = path.as_ref();
+        let bytes = std::fs::read(p).map_err(|e| {
             GltfError::Io(gltf::Error::Io(e))
         })?;
-        Self::load_slice(&bytes)
+        // Set the base directory so external .png / .bin URIs can resolve
+        // relative to the file we just read. Threading this through every
+        // call site cleanly is more invasive than we want here, so we stash
+        // it in a per-thread cell that `load_single_image_custom` consults
+        // when it sees a non-data:// URI.
+        let parent = p.parent().unwrap_or_else(|| Path::new("."));
+        let prev = set_image_base_dir(Some(parent.to_path_buf()));
+        let result = Self::load_slice(&bytes);
+        set_image_base_dir(prev);
+        result
     }
 
     pub fn load_slice(bytes: &[u8]) -> GltfResult<Self> {
@@ -115,8 +125,16 @@ impl GltfAsset {
         // Step 2: Parse document and load buffer data.
         let gltf_obj = gltf::Gltf::from_slice(effective_bytes.as_ref())
             .map_err(GltfError::Io)?;
-        let mut buffer_data = gltf::import_buffers(&gltf_obj.document, None, gltf_obj.blob)
-            .map_err(GltfError::Io)?;
+        // Pass the base directory (set by `GltfAsset::load`) so external
+        // `.bin` URI references in plain `.gltf` files resolve against the
+        // file's parent dir. `.glb` files have all buffers inline so the
+        // base dir is irrelevant; `load_slice` callers without filesystem
+        // context get `None` and external URIs error cleanly inside the
+        // gltf crate.
+        let base = image_base_dir();
+        let mut buffer_data = gltf::import_buffers(
+            &gltf_obj.document, base.as_deref(), gltf_obj.blob,
+        ).map_err(GltfError::Io)?;
 
         // Step 3: Pre-decompress any EXT_meshopt_compression buffer views.
         preprocess_meshopt_buffer_views(effective_bytes.as_ref(), &mut buffer_data);
@@ -921,7 +939,7 @@ fn load_single_image_custom(
             decode_image_bytes(bytes, Some(mime_type))
         }
         gltf::image::Source::Uri { uri, mime_type } => {
-            // Only data URIs are supported in slice context (no filesystem access).
+            // data:// — base64-decode in-place.
             if let Some(rest) = uri.strip_prefix("data:") {
                 let mut parts = rest.splitn(2, ";base64,");
                 let uri_mime = parts.next();
@@ -930,16 +948,40 @@ fn load_single_image_custom(
                 let bytes = simple_base64_decode(b64)
                     .ok_or(GltfError::InvalidAccessor("base64 decode failed"))?;
                 let eff_mime = uri_mime.or(mime_type);
-                decode_image_bytes(&bytes, eff_mime)
-            } else {
-                // External URI: fall through to gltf crate, which will error
-                // for slice context — treat as unsupported.
-                Err(GltfError::UnsupportedFeature(
-                    format!("external URI image in slice context: {uri}")
-                ))
+                return decode_image_bytes(&bytes, eff_mime);
             }
+            // file:// or relative path — resolve against the base dir set by
+            // GltfAsset::load. Without a base dir (load_slice was called
+            // directly without filesystem context) we treat it as
+            // unsupported and let the caller substitute a fallback.
+            let path_str = uri.strip_prefix("file://").unwrap_or(uri);
+            let Some(base) = image_base_dir() else {
+                return Err(GltfError::UnsupportedFeature(
+                    format!("external URI image without filesystem context: {uri}")
+                ));
+            };
+            let resolved = base.join(path_str);
+            let bytes = std::fs::read(&resolved).map_err(|e| {
+                GltfError::Io(gltf::Error::Io(e))
+            })?;
+            decode_image_bytes(&bytes, mime_type)
         }
     }
+}
+
+// Per-thread image-resolution base directory. Set by `GltfAsset::load` so
+// `load_single_image_custom` can resolve external URI references to disk;
+// `load_slice` callers leave this `None` and external URIs error cleanly.
+thread_local! {
+    static IMAGE_BASE_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn set_image_base_dir(p: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    IMAGE_BASE_DIR.with(|d| std::mem::replace(&mut *d.borrow_mut(), p))
+}
+fn image_base_dir() -> Option<std::path::PathBuf> {
+    IMAGE_BASE_DIR.with(|d| d.borrow().clone())
 }
 
 fn decode_image_bytes(bytes: &[u8], mime_type: Option<&str>) -> GltfResult<gltf::image::Data> {

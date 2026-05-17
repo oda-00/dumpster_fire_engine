@@ -780,10 +780,22 @@ pub fn compute_asset_aabb(asset: &GltfAsset, pose: &Pose) -> ([f32; 3], [f32; 3]
 /// Compute a sensible default view-projection that frames `asset` in
 /// `viewport_aspect`'s frustum. Camera sits at center + (radius * 2.5)
 /// in the (+x, +y, +z) octant looking back at center, FoV ≈ 50°.
+///
+/// This walks every vertex via `compute_asset_aabb` — call once at load
+/// time and reuse the AABB across frames via `view_projection_from_aabb`.
 pub fn default_view_projection(
     asset: &GltfAsset, pose: &Pose, viewport_aspect: f32,
 ) -> [f32; 16] {
-    let (mn, mx) = compute_asset_aabb(asset, pose);
+    let aabb = compute_asset_aabb(asset, pose);
+    view_projection_from_aabb(&aabb, viewport_aspect)
+}
+
+/// Same camera-fit math, but driven by a pre-computed AABB so per-frame
+/// callers avoid the O(vertices) walk.
+pub fn view_projection_from_aabb(
+    aabb: &([f32; 3], [f32; 3]), viewport_aspect: f32,
+) -> [f32; 16] {
+    let (mn, mx) = aabb;
     let center = [
         0.5 * (mn[0] + mx[0]),
         0.5 * (mn[1] + mx[1]),
@@ -799,7 +811,6 @@ pub fn default_view_projection(
     let eye = [center[0] + dist * 0.6, center[1] + dist * 0.4, center[2] + dist * 1.0];
 
     let view = look_at_rh(eye, center, [0.0, 1.0, 0.0]);
-    // Vulkan-style reverse-Y perspective (Y is flipped vs. OpenGL); 50° FoV.
     let fov_y = 50.0_f32.to_radians();
     let near  = (radius * 0.01).max(0.001);
     let far   = (radius * 10.0).max(100.0);

@@ -29,7 +29,7 @@ use dumpster_fire_engine::render::{
 use dumpster_fire_engine::resource_manager::asset_manager::{
     build_graphics_plans_maximal_with_meshes_vp, build_skin_morph_proto,
     collect_morph_output_buffers, collect_skin_palette_buffers,
-    default_view_projection,
+    compute_asset_aabb, view_projection_from_aabb,
     forge_gltf::{GltfAsset, Pose}, load_asset,
     pack_primitive_skin_attrs, primitive_is_skinned, register_skin_morph_forges,
     upload_all_primitive_meshes, SkinningFrame,
@@ -97,6 +97,11 @@ struct AssetState {
     cache:           GltfCache,
     /// Track if we've ever animated.
     last_anim_time:  f32,
+    /// Cached rest-pose world AABB (min, max) — computing it touches every
+    /// vertex in the asset, so we do it once at load instead of per frame.
+    /// Used to fit the default camera; animation can move the verts but the
+    /// resulting framing only drifts slightly so a static AABB is fine.
+    rest_aabb:       ([f32; 3], [f32; 3]),
 }
 
 struct LiveState {
@@ -275,12 +280,16 @@ impl ApplicationHandler for App {
                                             return;
                                         }
                                     };
+                                    // Cache the rest-pose AABB so the per-frame camera
+                                    // doesn't walk every vertex on each redraw.
+                                    let rest_aabb = compute_asset_aabb(&asset, &pose);
 
                                     self.asset_loaded = Some(AssetState {
                                         asset, pose, material_sets,
                                         meshes,
                                         skin_vertex_buffers, cache,
                                         last_anim_time: -1.0,
+                                        rest_aabb,
                                     });
                                 }
                                 Err(e) => {
@@ -378,16 +387,16 @@ impl ApplicationHandler for App {
 
                         // Fit a default camera around the asset's posed bounds
                         // so the whole model lands inside Vulkan's clip space
-                        // (-1..1 in X/Y, 0..1 in Z). Without this the raw model-
-                        // space coordinates fall outside NDC for anything bigger
-                        // than ~2 units and nothing rasterises.
+                        // (-1..1 in X/Y, 0..1 in Z). Uses the cached rest-pose
+                        // AABB — animation drift is small enough that re-walking
+                        // every vertex per frame isn't worth it.
                         let extent = live.renderer
                             .window(live.window_handle)
                             .and_then(|w| w.graphics.as_ref())
                             .map(|g| g.swapchain_extent)
                             .unwrap_or(ash::vk::Extent2D { width: 1024, height: 768 });
                         let aspect = extent.width as f32 / extent.height.max(1) as f32;
-                        let view_proj = default_view_projection(&state.asset, &state.pose, aspect);
+                        let view_proj = view_projection_from_aabb(&state.rest_aabb, aspect);
 
                         let plans = build_graphics_plans_maximal_with_meshes_vp(
                             &state.asset,
