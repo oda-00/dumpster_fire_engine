@@ -499,6 +499,22 @@ impl Window {
         device: &ash::Device,
         queue: vk::Queue,
     ) -> ForgeResult<()> {
+        unsafe { self.draw_frame_with_compute_wait(instance, device, queue, &[]) }
+    }
+
+    /// Draw one frame, waiting on `compute_wait` semaphores before the
+    /// graphics submission's vertex stages execute. Used by callers that
+    /// dispatch compute work asynchronously (via
+    /// `ForgeMaster::refine_batch_async`) — the returned semaphore from
+    /// that call must be passed here so the graphics queue blocks
+    /// per-stage instead of the CPU blocking on a fence.
+    pub unsafe fn draw_frame_with_compute_wait(
+        &mut self,
+        instance: &ash::Instance,
+        device: &ash::Device,
+        queue: vk::Queue,
+        compute_wait: &[vk::Semaphore],
+    ) -> ForgeResult<()> {
         // Resize check up front — covers explicit resize() calls.
         if self.graphics.as_ref().is_some_and(|g| g.needs_resize) {
             self.recreate_swapchain(instance, device)?;
@@ -731,23 +747,47 @@ impl Window {
             device.end_command_buffer(command_buffer).map_err(ForgeError::Vk)?;
         }
 
-        // Submit + present.
+        // Submit + present via Sync2 (queue_submit2): one
+        // SemaphoreSubmitInfo per wait with explicit per-semaphore
+        // stage masks. img_avail blocks COLOR_ATTACHMENT_OUTPUT (no
+        // earlier graphics stage needs the swapchain image), while
+        // each compute_wait semaphore blocks only the precise stages
+        // that read its compute output — VERTEX_ATTRIBUTE_INPUT (vertex
+        // buffer bound from MorphBlend output) + VERTEX_SHADER (SSBO
+        // bound from SkinPalette output).
         let render_done = gfx.render_finished_semaphores[image_index as usize];
-        let wait_semaphores  = [img_avail];
-        let signal_semaphores = [render_done];
-        let cmd_buffers = [command_buffer];
-        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let submit_info = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&cmd_buffers)
-            .signal_semaphores(&signal_semaphores);
 
+        let mut wait_infos: Vec<vk::SemaphoreSubmitInfo> = Vec::with_capacity(1 + compute_wait.len());
+        wait_infos.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(img_avail)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+        );
+        for &sem in compute_wait {
+            wait_infos.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(sem)
+                    .stage_mask(
+                        vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
+                            | vk::PipelineStageFlags2::VERTEX_SHADER,
+                    ),
+            );
+        }
+        let cb_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)];
+        let signal_infos = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(render_done)
+            .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS)];
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait_infos)
+            .command_buffer_infos(&cb_infos)
+            .signal_semaphore_infos(&signal_infos);
+
+        let signal_semaphores = [render_done];
         let present_swapchains = [gfx.swapchain];
         let present_image_indices = [image_index];
 
         unsafe {
-            device.queue_submit(queue, &[submit_info], in_flight)
+            device.queue_submit2(queue, &[submit_info], in_flight)
                 .map_err(ForgeError::Vk)?;
 
             let present_info = vk::PresentInfoKHR::default()
