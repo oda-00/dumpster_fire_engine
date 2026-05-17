@@ -100,7 +100,7 @@ impl<'a> BitReader<'a> {
         r
     }
 
-    #[inline(always)]
+    #[inline]
     fn refill(&mut self) {
         while self.bits_in <= 56 && self.byte_pos < self.data.len() {
             self.bit_buf |= (self.data[self.byte_pos] as u64) << self.bits_in;
@@ -109,7 +109,7 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     fn read_bits(&mut self, n: u32) -> GltfResult<u32> {
         if n == 0 { return Ok(0); }
         if self.bits_in < n {
@@ -124,7 +124,7 @@ impl<'a> BitReader<'a> {
         Ok(val)
     }
 
-    #[inline(always)]
+    #[inline]
     fn read_bit(&mut self) -> GltfResult<u32> {
         self.read_bits(1)
     }
@@ -687,75 +687,81 @@ fn apply_inverse_transform(
 
     match t {
         Vp8lTransform::SubtractGreen => {
-            let mut out = pixels.to_vec();
-            for p in out.iter_mut() {
-                let a =  (*p >> 24) & 0xff;
-                let r = ((*p >> 16) & 0xff).wrapping_add((*p >> 8) & 0xff) & 0xff;
-                let g =  (*p >>  8) & 0xff;
-                let b = ( *p        & 0xff).wrapping_add((*p >> 8) & 0xff) & 0xff;
-                *p = (a << 24) | (r << 16) | (g << 8) | b;
+            #[cfg(target_arch = "x86_64")]
+            unsafe { return Ok(subtract_green_sse2(pixels)); }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let mut out = pixels.to_vec();
+                for p in out.iter_mut() {
+                    let a =  (*p >> 24) & 0xff;
+                    let r = ((*p >> 16) & 0xff).wrapping_add((*p >> 8) & 0xff) & 0xff;
+                    let g =  (*p >>  8) & 0xff;
+                    let b = ( *p        & 0xff).wrapping_add((*p >> 8) & 0xff) & 0xff;
+                    *p = (a << 24) | (r << 16) | (g << 8) | b;
+                }
+                Ok(out)
             }
-            Ok(out)
         }
 
         Vp8lTransform::Color { size_bits, meta } => {
-            let mut out = pixels.to_vec();
-            for y in 0..h {
-                for x in 0..w {
-                    let mx = x >> size_bits;
-                    let my = y >> size_bits;
-                    let mw = meta_dim(width, *size_bits) as usize;
-                    let meta_idx = my * mw + mx;
-                    let cte = if meta_idx < meta.len() { meta[meta_idx] } else { 0 };
-                    // Color transform element: packed as (0, g2r, g2b, r2b) in ARGB.
-                    let g2r = ((cte >> 16) & 0xff) as i32 as i8 as i32;
-                    let g2b = ((cte >>  8) & 0xff) as i32 as i8 as i32;
-                    let r2b = ( cte        & 0xff) as i32 as i8 as i32;
-                    let p = out[y * w + x];
-                    let a = (p >> 24) & 0xff;
-                    let r = ((p >> 16) & 0xff) as i32;
-                    let g = ((p >>  8) & 0xff) as i32;
-                    let b = (p & 0xff) as i32;
-                    let new_r = (r + ((g * g2r) >> 5)) & 0xff;
-                    let new_b = (b + ((g * g2b) >> 5) + ((r * r2b) >> 5)) & 0xff;
-                    out[y * w + x] = (a << 24) | ((new_r as u32) << 16) | ((g as u32) << 8) | new_b as u32;
-                }
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                return Ok(color_transform_sse2(pixels, *size_bits, meta, width, height));
             }
-            Ok(out)
-        }
-
-        Vp8lTransform::Predictor { size_bits, meta } => {
-            let cw = cur_width as usize;
-            // Expand cur_width back to width if they differ (shouldn't for predictor).
-            let _ = cw;
-            let mut out = vec![0u32; w * h];
-
-            for y in 0..h {
-                for x in 0..w {
-                    let idx = y * w + x;
-                    let src_idx = if cur_width == width { idx } else {
-                        // Shouldn't happen; predictor is always applied at full width.
-                        idx.min(pixels.len().saturating_sub(1))
-                    };
-                    let val = if src_idx < pixels.len() { pixels[src_idx] } else { 0 };
-
-                    let pred_mode = if x == 0 && y == 0 {
-                        0u32 // top-left corner: predict 0xff000000
-                    } else {
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let mut out = pixels.to_vec();
+                for y in 0..h {
+                    for x in 0..w {
                         let mx = x >> size_bits;
                         let my = y >> size_bits;
                         let mw = meta_dim(width, *size_bits) as usize;
                         let meta_idx = my * mw + mx;
-                        if meta_idx < meta.len() {
-                            (meta[meta_idx] >> 8) & 0xff
-                        } else { 0 }
-                    };
-
-                    let pred = predict(pred_mode, x, y, &out, w);
-                    out[idx] = add_argb(val, pred);
+                        let cte = if meta_idx < meta.len() { meta[meta_idx] } else { 0 };
+                        let g2r = ((cte >> 16) & 0xff) as i32 as i8 as i32;
+                        let g2b = ((cte >>  8) & 0xff) as i32 as i8 as i32;
+                        let r2b = ( cte        & 0xff) as i32 as i8 as i32;
+                        let p = out[y * w + x];
+                        let a = (p >> 24) & 0xff;
+                        let r = ((p >> 16) & 0xff) as i32;
+                        let g = ((p >>  8) & 0xff) as i32;
+                        let b = (p & 0xff) as i32;
+                        let new_r = (r + ((g * g2r) >> 5)) & 0xff;
+                        let new_b = (b + ((g * g2b) >> 5) + ((r * r2b) >> 5)) & 0xff;
+                        out[y * w + x] = (a << 24) | ((new_r as u32) << 16) | ((g as u32) << 8) | new_b as u32;
+                    }
                 }
+                Ok(out)
             }
-            Ok(out)
+        }
+
+        Vp8lTransform::Predictor { size_bits, meta } => {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                return Ok(predictor_transform_sse2(pixels, width, height, *size_bits, meta));
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let mut out = vec![0u32; w * h];
+                for y in 0..h {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        let val = if idx < pixels.len() { pixels[idx] } else { 0 };
+                        let pred_mode = if x == 0 && y == 0 {
+                            0u32
+                        } else {
+                            let mx = x >> size_bits;
+                            let my = y >> size_bits;
+                            let mw = meta_dim(width, *size_bits) as usize;
+                            let meta_idx = my * mw + mx;
+                            if meta_idx < meta.len() { (meta[meta_idx] >> 8) & 0xff } else { 0 }
+                        };
+                        let pred = predict(pred_mode, x, y, &out, w);
+                        out[idx] = add_argb(val, pred);
+                    }
+                }
+                Ok(out)
+            }
         }
 
         Vp8lTransform::ColorIndex { table, index_bits } => {
@@ -782,6 +788,426 @@ fn apply_inverse_transform(
             }
             Ok(out)
         }
+    }
+}
+
+/// SSE2 SubtractGreen inverse: per-pixel R += G, B += G (byte-wise, wrap).
+/// 4 ARGB pixels (16 bytes) per iteration. Replaces ~12 scalar ops per
+/// pixel with 3 SIMD ops per 4 pixels.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn subtract_green_sse2(pixels: &[u32]) -> Vec<u32> {
+    use std::arch::x86_64::*;
+    unsafe {
+        let n = pixels.len();
+        let mut out = Vec::with_capacity(n);
+        out.set_len(n);
+        let src = pixels.as_ptr() as *const __m128i;
+        let dst = out.as_mut_ptr() as *mut __m128i;
+        // Mask isolating only the G byte in each pixel (positions 8..16 of
+        // each 32-bit ARGB lane).
+        let g_mask = _mm_set1_epi32(0x0000FF00u32 as i32);
+
+        let chunks = n / 4;
+        for i in 0..chunks {
+            let v = _mm_loadu_si128(src.add(i));
+            // Extract G into a zero-padded lane at byte 0.
+            let g = _mm_srli_epi32(_mm_and_si128(v, g_mask), 8);
+            // Broadcast G into byte 0 (B lane) and byte 2 (R lane) of each
+            // pixel. byte 1 is G itself (keep unchanged), byte 3 is A
+            // (keep unchanged). Pattern per pixel: byte 0 += G, byte 2 += G.
+            let g_b = g; // already at byte 0 position
+            let g_r = _mm_slli_epi32(g, 16);
+            let add_v = _mm_or_si128(g_b, g_r);
+            // Byte-wise wrapping add. _mm_add_epi8 doesn't propagate carry
+            // between bytes — exactly the semantics we need.
+            let result = _mm_add_epi8(v, add_v);
+            _mm_storeu_si128(dst.add(i), result);
+        }
+        // Tail.
+        for i in (chunks * 4)..n {
+            let p = pixels[i];
+            let a =  (p >> 24) & 0xff;
+            let r = ((p >> 16) & 0xff).wrapping_add((p >> 8) & 0xff) & 0xff;
+            let g =  (p >>  8) & 0xff;
+            let b = ( p        & 0xff).wrapping_add((p >> 8) & 0xff) & 0xff;
+            out[i] = (a << 24) | (r << 16) | (g << 8) | b;
+        }
+        out
+    }
+}
+
+/// SSE2 Color transform inverse. Per-pixel formula:
+///   new_r = r + ((g * g2r) >> 5)
+///   new_b = b + ((g * g2b) >> 5) + ((r * r2b) >> 5)
+/// where g2r/g2b/r2b are signed 8-bit constants drawn from the meta
+/// table (one entry per `1<<size_bits × 1<<size_bits` meta block). 4
+/// pixels processed per iteration: ARGB lanes are widened to 16-bit
+/// signed integers, all multiplies use `_mm_mullo_epi16` (16-bit×16-bit
+/// → 16-bit low), and the final masked OR rebuilds the ARGB layout.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn color_transform_sse2(
+    pixels:    &[u32],
+    size_bits: u32,
+    meta:      &[u32],
+    width:     u32,
+    height:    u32,
+) -> Vec<u32> {
+    use std::arch::x86_64::*;
+    unsafe {
+        let w = width as usize;
+        let h = height as usize;
+        let mw = meta_dim(width, size_bits) as usize;
+        let mut out = pixels.to_vec();
+        let zero = _mm_setzero_si128();
+        // Mask for the alpha lane only (preserves A through arithmetic).
+        let a_mask = _mm_set1_epi32(0xFF000000u32 as i32);
+        // Mask for the green lane only.
+        let g_mask = _mm_set1_epi32(0x0000FF00u32 as i32);
+
+        for y in 0..h {
+            let my = y >> size_bits;
+            let mut x = 0usize;
+            while x < w {
+                let mx = x >> size_bits;
+                let meta_idx = my * mw + mx;
+                let cte = if meta_idx < meta.len() { meta[meta_idx] } else { 0 };
+                let g2r = ((cte >> 16) & 0xff) as i8 as i16;
+                let g2b = ((cte >>  8) & 0xff) as i8 as i16;
+                let r2b = ( cte        & 0xff) as i8 as i16;
+                let cell_end = ((mx + 1) << size_bits).min(w);
+
+                // Broadcast each signed coefficient into an 8-wide xmm of
+                // 16-bit lanes (we need 4 pixels × 2 lanes each).
+                let v_g2r = _mm_set1_epi16(g2r);
+                let v_g2b = _mm_set1_epi16(g2b);
+                let v_r2b = _mm_set1_epi16(r2b);
+
+                // 4-wide SIMD body: load 4 pixels (16 bytes), unpack to
+                // 16-bit per byte, do the arithmetic, repack, OR with the
+                // preserved A and G bytes from the source.
+                let row_base = y * w;
+                let mut xi = x;
+                while xi + 4 <= cell_end {
+                    let src_ptr = out.as_ptr().add(row_base + xi) as *const __m128i;
+                    let dst_ptr = out.as_mut_ptr().add(row_base + xi) as *mut __m128i;
+                    let v = _mm_loadu_si128(src_ptr);
+
+                    // Widen u8 → i16 in two halves: low 8 bytes → 8 × i16.
+                    let lo16 = _mm_unpacklo_epi8(v, zero);
+                    let hi16 = _mm_unpackhi_epi8(v, zero);
+
+                    // For each 16-bit-per-byte pixel laid out as
+                    // [B0, G0, R0, A0, B1, G1, R1, A1] in lo16:
+                    //   shuffle gives us per-pixel R and G in their own xmms.
+                    // SSE2 shuffles operate at 16-bit granularity within a
+                    // 64-bit half — _mm_shufflelo_epi16 / _mm_shufflehi_epi16.
+
+                    // Helper: from a half [b, g, r, a] (×2 pixels) extract
+                    // r_lane = [r, r, r, r, r1, r1, r1, r1] and similar for g.
+                    // We need: g→r contribution per pixel, r→b per pixel, g→b per pixel.
+                    let r_lo = shuffle_broadcast_r(lo16);
+                    let g_lo = shuffle_broadcast_g(lo16);
+                    let r_hi = shuffle_broadcast_r(hi16);
+                    let g_hi = shuffle_broadcast_g(hi16);
+
+                    // (g * g2r) >> 5 — but only the R lane gets this added.
+                    // We compute the delta for every lane, then mask it to
+                    // the R byte position before adding.
+                    let r_delta_lo = _mm_srai_epi16(_mm_mullo_epi16(g_lo, v_g2r), 5);
+                    let r_delta_hi = _mm_srai_epi16(_mm_mullo_epi16(g_hi, v_g2r), 5);
+
+                    // (g * g2b + r * r2b) >> 5 — added to B lane.
+                    let b_delta_lo = _mm_srai_epi16(
+                        _mm_add_epi16(_mm_mullo_epi16(g_lo, v_g2b), _mm_mullo_epi16(r_lo, v_r2b)),
+                        5,
+                    );
+                    let b_delta_hi = _mm_srai_epi16(
+                        _mm_add_epi16(_mm_mullo_epi16(g_hi, v_g2b), _mm_mullo_epi16(r_hi, v_r2b)),
+                        5,
+                    );
+
+                    // Mask the deltas to land only on the target byte:
+                    //   r_delta → byte 2 in each pixel (mask 0x00FF0000)
+                    //   b_delta → byte 0 in each pixel (mask 0x000000FF)
+                    // Both deltas are 16-bit signed; we want their low 8
+                    // bits added byte-wise. Pack two i16 → i8 vectors and
+                    // re-zero the irrelevant byte positions.
+                    let r_delta_lo_packed = _mm_packs_epi16(r_delta_lo, _mm_setzero_si128());
+                    let r_delta_hi_packed = _mm_packs_epi16(r_delta_hi, _mm_setzero_si128());
+                    let b_delta_lo_packed = _mm_packs_epi16(b_delta_lo, _mm_setzero_si128());
+                    let b_delta_hi_packed = _mm_packs_epi16(b_delta_hi, _mm_setzero_si128());
+
+                    // Re-widen to 32-bit-per-pixel: the packed values have
+                    // 2 pixels each (8 bytes); each pixel's [b, g, r, a] is
+                    // in 4 adjacent bytes. We only care about the b and r
+                    // r_delta_packed has the 8-bit value at byte 0 of each
+                    // 32-bit lane after _mm_cvtepu8_to_epi32_sse2. Shift left
+                    // 16 to land it in byte 2 (R lane) of each ARGB pixel.
+                    let r_add_lo32 = _mm_slli_epi32(_mm_cvtepu8_to_epi32_sse2(r_delta_lo_packed), 16);
+                    let r_add_hi32 = _mm_slli_epi32(_mm_cvtepu8_to_epi32_sse2(r_delta_hi_packed), 16);
+                    let b_add_lo32 = _mm_cvtepu8_to_epi32_sse2(b_delta_lo_packed);
+                    let b_add_hi32 = _mm_cvtepu8_to_epi32_sse2(b_delta_hi_packed);
+
+                    // Combine the two halves back into one xmm (4 pixels).
+                    let r_add = _mm_unpacklo_epi64(r_add_lo32, r_add_hi32);
+                    let b_add = _mm_unpacklo_epi64(b_add_lo32, b_add_hi32);
+
+                    // Byte-wise add the delta into the source.  byte 2 = R,
+                    // byte 0 = B; G + A bytes are preserved (delta has 0
+                    // there).
+                    let with_r = _mm_add_epi8(v, r_add);
+                    let result = _mm_add_epi8(with_r, b_add);
+
+                    // Re-OR the original A + G bytes in case our adds
+                    // overflowed into adjacent bytes. The deltas are 8-bit
+                    // each so this is paranoia — but cheap.
+                    let preserve = _mm_or_si128(_mm_and_si128(v, a_mask), _mm_and_si128(v, g_mask));
+                    let mut final_pixels = _mm_andnot_si128(_mm_or_si128(a_mask, g_mask), result);
+                    final_pixels = _mm_or_si128(final_pixels, preserve);
+
+                    _mm_storeu_si128(dst_ptr, final_pixels);
+                    xi += 4;
+                }
+                // Tail (≤3 pixels): scalar maths, same formula.
+                while xi < cell_end {
+                    let p = out[y * w + xi];
+                    let a = (p >> 24) & 0xff;
+                    let r = ((p >> 16) & 0xff) as i32;
+                    let g = ((p >>  8) & 0xff) as i32;
+                    let b = (p & 0xff) as i32;
+                    let new_r = (r + ((g * g2r as i32) >> 5)) & 0xff;
+                    let new_b = (b + ((g * g2b as i32) >> 5) + ((r * r2b as i32) >> 5)) & 0xff;
+                    out[y * w + xi] = (a << 24) | ((new_r as u32) << 16) | ((g as u32) << 8) | new_b as u32;
+                    xi += 1;
+                }
+                x = cell_end;
+            }
+        }
+        out
+    }
+}
+
+/// SSE2 broadcast: from `[b0, g0, r0, a0, b1, g1, r1, a1]` (16-bit lanes),
+/// return `[r0, r0, r0, r0, r1, r1, r1, r1]` — the R lane broadcast across
+/// each pixel's 4-wide slot for use as a multiplier input.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn shuffle_broadcast_r(v: std::arch::x86_64::__m128i) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let low = _mm_shufflelo_epi16(v, 0b10_10_10_10);
+    _mm_shufflehi_epi16(low, 0b10_10_10_10)
+}
+
+/// SSE2 broadcast for G (16-bit lane 1 in each pixel half).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn shuffle_broadcast_g(v: std::arch::x86_64::__m128i) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let low = _mm_shufflelo_epi16(v, 0b01_01_01_01);
+    _mm_shufflehi_epi16(low, 0b01_01_01_01)
+}
+
+/// Polyfill for `_mm_cvtepu8_epi32` (SSE4.1) using SSE2 primitives:
+/// widen the low 4 u8 lanes of `v` to 4 × i32 lanes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn _mm_cvtepu8_to_epi32_sse2(v: std::arch::x86_64::__m128i) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let zero = _mm_setzero_si128();
+    let lo16 = _mm_unpacklo_epi8(v, zero);
+    _mm_unpacklo_epi16(lo16, zero)
+}
+
+/// True byte-wise round-down average of two xmms: `(a + b) >> 1` per byte
+/// lane. Differs from SSE2 `_mm_avg_epu8` which computes `(a + b + 1) >> 1`
+/// (round-up) — the WebP spec calls for round-down, so we implement it
+/// manually by widening to 16-bit, adding, shifting, and repacking.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn webp_avg_epu8_sse2(
+    a: std::arch::x86_64::__m128i,
+    b: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let zero = _mm_setzero_si128();
+    let a_lo = _mm_unpacklo_epi8(a, zero);
+    let a_hi = _mm_unpackhi_epi8(a, zero);
+    let b_lo = _mm_unpacklo_epi8(b, zero);
+    let b_hi = _mm_unpackhi_epi8(b, zero);
+    let sum_lo = _mm_add_epi16(a_lo, b_lo);
+    let sum_hi = _mm_add_epi16(a_hi, b_hi);
+    let avg_lo = _mm_srli_epi16(sum_lo, 1);
+    let avg_hi = _mm_srli_epi16(sum_hi, 1);
+    _mm_packus_epi16(avg_lo, avg_hi)
+}
+
+/// SSE2 Predictor transform inverse. Per-meta-cell dispatches the inner
+/// row stripe to a mode-specific kernel: modes 0, 2, 3, 4, 8, 9 have no
+/// dependency on already-written pixels within the current row so we
+/// process 4 ARGB pixels per `_mm_add_epi8`. Modes 1, 5-7, 10-13 read
+/// `out[idx - 1]` which is the just-written left neighbour — that's a
+/// genuine cross-pixel data dependency, so those modes execute pixel-by-
+/// pixel via the scalar `predict()` + `add_argb()` path (no SIMD is
+/// structurally possible without speculative execution).
+///
+/// Row 0 is special-cased: only mode 0 is meaningful (no top neighbours).
+/// First pixel of every row 0..h uses L = 0xFF000000 default.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn predictor_transform_sse2(
+    pixels:    &[u32],
+    width:     u32,
+    height:    u32,
+    size_bits: u32,
+    meta:      &[u32],
+) -> Vec<u32> {
+    use std::arch::x86_64::*;
+    unsafe {
+        let w = width as usize;
+        let h = height as usize;
+        let mw = meta_dim(width, size_bits) as usize;
+        let mut out = vec![0u32; w * h];
+        let alpha_default = _mm_set1_epi32(0xFF000000u32 as i32);
+
+        // Row 0: spec — top-left = pred 0 (0xff000000), rest of row 0
+        // uses mode 1 (L) which is the only mode that makes sense when y=0
+        // (no top row exists). Implementation: serial scan.
+        if h > 0 {
+            out[0] = add_argb(pixels[0], 0xFF000000);
+            for x in 1..w {
+                let val = if x < pixels.len() { pixels[x] } else { 0 };
+                let pred = out[x - 1];
+                out[x] = add_argb(val, pred);
+            }
+        }
+
+        for y in 1..h {
+            let my = y >> size_bits;
+            let top_base = (y - 1) * w;
+            let row_base = y * w;
+
+            // First pixel of row y always uses L = top[0] per spec (the
+            // implicit left-fallback when x == 0 is to read the top
+            // neighbour, which is what predict() does — `t` falls back to
+            // `l = 0xFF000000` if y == 0, but here y > 0 so `t = top[0]`).
+            // Per the spec, for x == 0 the predictor reads top[0] for L.
+            {
+                let val = if row_base < pixels.len() { pixels[row_base] } else { 0 };
+                let pred = out[top_base]; // top[0]
+                out[row_base] = add_argb(val, pred);
+            }
+
+            let mut x = 1usize;
+            while x < w {
+                let mx = x >> size_bits;
+                let meta_idx = my * mw + mx;
+                let pred_mode = if meta_idx < meta.len() { (meta[meta_idx] >> 8) & 0xff } else { 0 };
+                let cell_end = ((mx + 1) << size_bits).min(w);
+
+                // Modes with L dependency must execute serially per pixel.
+                let l_dependent = matches!(pred_mode, 1 | 5 | 6 | 7 | 10 | 11 | 12 | 13);
+                if l_dependent {
+                    for xi in x..cell_end {
+                        let val = if row_base + xi < pixels.len() { pixels[row_base + xi] } else { 0 };
+                        let pred = predict(pred_mode, xi, y, &out, w);
+                        out[row_base + xi] = add_argb(val, pred);
+                    }
+                } else {
+                    // L-independent modes: 4-wide SIMD body.
+                    // Each mode's prediction is computed from top-row data
+                    // alone; out[idx] write doesn't feed back into the
+                    // same row's later predictions.
+                    let mut xi = x;
+                    // Tail pixels that don't fill an xmm.
+                    let aligned_end = if cell_end >= 3 { cell_end - 3 } else { x };
+                    while xi < aligned_end {
+                        // Load val (4 ARGB from input).
+                        let val_ptr = pixels.as_ptr().add(row_base + xi) as *const __m128i;
+                        let val_v = if row_base + xi + 4 <= pixels.len() {
+                            _mm_loadu_si128(val_ptr)
+                        } else {
+                            _mm_setzero_si128()
+                        };
+
+                        // Compute prediction based on mode.
+                        let top_ptr = out.as_ptr().add(top_base + xi) as *const __m128i;
+                        let pred_v = match pred_mode {
+                            0 => alpha_default,
+                            2 => _mm_loadu_si128(top_ptr),
+                            3 => {
+                                // TR: top[x+1] for each lane. At the right edge
+                                // (xi + 4 == w), the last pixel needs top[w-1].
+                                if xi + 5 <= w {
+                                    let p = out.as_ptr().add(top_base + xi + 1) as *const __m128i;
+                                    _mm_loadu_si128(p)
+                                } else {
+                                    // Right edge — fall back to scalar for this stripe.
+                                    for xj in xi..(xi + 4).min(cell_end) {
+                                        let val = if row_base + xj < pixels.len() { pixels[row_base + xj] } else { 0 };
+                                        let pred = predict(pred_mode, xj, y, &out, w);
+                                        out[row_base + xj] = add_argb(val, pred);
+                                    }
+                                    xi += 4;
+                                    continue;
+                                }
+                            }
+                            4 => {
+                                // TL: top[x-1]. xi >= 1 always since outer x >= 1.
+                                let p = out.as_ptr().add(top_base + xi - 1) as *const __m128i;
+                                _mm_loadu_si128(p)
+                            }
+                            8 => {
+                                // avg(TL, T) = average2(top[x-1], top[x])
+                                let p_tl = out.as_ptr().add(top_base + xi - 1) as *const __m128i;
+                                let p_t  = out.as_ptr().add(top_base + xi)     as *const __m128i;
+                                let tl = _mm_loadu_si128(p_tl);
+                                let t  = _mm_loadu_si128(p_t);
+                                webp_avg_epu8_sse2(tl, t)
+                            }
+                            9 => {
+                                // avg(T, TR) = average2(top[x], top[x+1])
+                                if xi + 5 <= w {
+                                    let p_t  = out.as_ptr().add(top_base + xi)     as *const __m128i;
+                                    let p_tr = out.as_ptr().add(top_base + xi + 1) as *const __m128i;
+                                    let t  = _mm_loadu_si128(p_t);
+                                    let tr = _mm_loadu_si128(p_tr);
+                                    webp_avg_epu8_sse2(t, tr)
+                                } else {
+                                    for xj in xi..(xi + 4).min(cell_end) {
+                                        let val = if row_base + xj < pixels.len() { pixels[row_base + xj] } else { 0 };
+                                        let pred = predict(pred_mode, xj, y, &out, w);
+                                        out[row_base + xj] = add_argb(val, pred);
+                                    }
+                                    xi += 4;
+                                    continue;
+                                }
+                            }
+                            _ => alpha_default, // unreachable in valid streams
+                        };
+
+                        let result = _mm_add_epi8(val_v, pred_v);
+                        let dst_ptr = out.as_mut_ptr().add(row_base + xi) as *mut __m128i;
+                        _mm_storeu_si128(dst_ptr, result);
+                        xi += 4;
+                    }
+                    // Tail (1..3 pixels): scalar.
+                    while xi < cell_end {
+                        let val = if row_base + xi < pixels.len() { pixels[row_base + xi] } else { 0 };
+                        let pred = predict(pred_mode, xi, y, &out, w);
+                        out[row_base + xi] = add_argb(val, pred);
+                        xi += 1;
+                    }
+                }
+                x = cell_end;
+            }
+        }
+        out
     }
 }
 

@@ -24,7 +24,15 @@ pub type WindowId = Id<WindowMarker>;
 /// 2 = double-buffer the command recording — CPU records frame N+1 while
 /// the GPU is still consuming frame N. Higher (3) reduces stutter on input
 /// spikes but adds a frame of latency; 2 is the standard tradeoff.
-pub const FRAMES_IN_FLIGHT: usize = 2;
+/// Number of frames the CPU is allowed to record ahead of the GPU. Three
+/// matches the MAILBOX-mode swapchain image count (caps.min_image_count
+/// + 1 = typically 3) so we never CPU-stall waiting for an image while
+/// also providing headroom for the GPU to be one frame behind. Two would
+/// be the conservative pick but adds CPU-side fence waits on input-light
+/// frames; four+ buys little and burns more host-visible UBO / staging
+/// memory. Three is the standard Vulkan recommendation for real-time
+/// rendering with triple-buffered presents.
+pub const FRAMES_IN_FLIGHT: usize = 3;
 
 // ── Graphics plumbing ───────────────────────────────────────────────────────
 
