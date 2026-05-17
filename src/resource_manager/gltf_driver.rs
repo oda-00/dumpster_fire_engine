@@ -135,19 +135,39 @@ impl Default for MaterialUniform {
 
 impl MaterialUniform {
     pub fn from_gltf(mat: &Material) -> Self {
-        let flags = (mat.double_sided as u32)
+        // bit 0   doubleSided
+        // bits 1-2 alphaMode (Opaque=0, Mask=2, Blend=4)
+        // bit 3   KHR_materials_unlit
+        // bit 4   KHR_materials_ior present (then alpha_cutoff doubles as IOR)
+        let mut flags = (mat.double_sided as u32)
             | match mat.alpha_mode {
                 AlphaMode::Opaque => 0,
                 AlphaMode::Mask   => 2,
                 AlphaMode::Blend  => 4,
             };
+        if mat.unlit { flags |= 1 << 3; }
+        // We only flag IOR when it deviates meaningfully from the default
+        // 1.5 dielectric value — otherwise the shader can use its
+        // hard-coded F0 = 0.04 and skip the alpha_cutoff override.
+        let ior_active = (mat.ior - 1.5).abs() > 1e-3;
+        if ior_active { flags |= 1 << 4; }
+
+        // When the unlit flag isn't set AND IOR is active, the shader
+        // borrows the alpha_cutoff slot for the IOR value (the only place
+        // we currently have an unused float in this 64-byte UBO).
+        let alpha_cutoff = if ior_active && !matches!(mat.alpha_mode, AlphaMode::Mask) {
+            mat.ior
+        } else {
+            mat.alpha_cutoff
+        };
+
         Self {
             base_color_factor: mat.pbr.base_color_factor,
             metallic_factor:   mat.pbr.metallic_factor,
             roughness_factor:  mat.pbr.roughness_factor,
             _pad0:             [0.0; 2],
             emissive_factor:   mat.emissive_factor,
-            alpha_cutoff:      mat.alpha_cutoff,
+            alpha_cutoff,
             flags,
             _pad1:             [0; 3],
         }

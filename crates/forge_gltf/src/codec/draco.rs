@@ -915,11 +915,21 @@ fn decode_attr_values(
         1.0
     };
 
-    // Prefix-sum for delta prediction.
+    // Per-channel prefix-sum for delta prediction. With `nc <= 4` we can
+    // run all channels in one SSE2 i32x4 register: the running sum lives
+    // in a single xmm and each vertex adds its nc raw deltas into it.
+    // For nc > 4 we fall back to scalar (no glTF accessor uses > 4 chans).
     let mut decoded = vec![0i32; total];
-    for i in 0..total {
-        let prev = if i >= nc { decoded[i - nc] } else { 0 };
-        decoded[i] = prev.wrapping_add(raw_ints[i]);
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        prefix_sum_per_channel_sse2(&raw_ints, &mut decoded, npoints, nc);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        for i in 0..total {
+            let prev = if i >= nc { decoded[i - nc] } else { 0 };
+            decoded[i] = prev.wrapping_add(raw_ints[i]);
+        }
     }
 
     // Per-type clamp ceiling driven by `data_type` so an oversized rANS
@@ -1092,6 +1102,58 @@ fn store_attribute(
         _ => {}
     }
     Ok(())
+}
+
+/// SSE2 per-channel prefix-sum for the Draco delta-decode pass. `raw_ints`
+/// holds interleaved deltas (nc per vertex); `decoded` receives the
+/// running sums. Works for `nc <= 4`; falls back to scalar for wider
+/// vectors (glTF accessors don't exceed 4 channels in practice).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn prefix_sum_per_channel_sse2(
+    raw_ints: &[i32],
+    decoded:  &mut [i32],
+    npoints:  usize,
+    nc:       usize,
+) {
+    use std::arch::x86_64::*;
+    unsafe {
+        if nc == 0 || npoints == 0 { return; }
+
+        if nc <= 4 {
+            // Pack each per-vertex stripe into an i32x4 — unused lanes hold
+            // zero so they contribute nothing to the running sum.
+            let mut running = _mm_setzero_si128();
+            for i in 0..npoints {
+                // Build a 4-lane register from the at-most-4 channels.
+                let mut lane = [0i32; 4];
+                for c in 0..nc {
+                    lane[c] = *raw_ints.get_unchecked(i * nc + c);
+                }
+                let delta = _mm_loadu_si128(lane.as_ptr() as *const __m128i);
+                running = _mm_add_epi32(running, delta);
+
+                // Scatter the per-vertex sum back to the output. We can't
+                // do a single 16-byte store without overrunning when nc<4,
+                // so we go lane-by-lane (still fast — the values are in
+                // the same xmm register).
+                let mut out = [0i32; 4];
+                _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, running);
+                for c in 0..nc {
+                    *decoded.get_unchecked_mut(i * nc + c) = out[c];
+                }
+            }
+        } else {
+            // Wider strides → scalar fallback (path that the legacy code
+            // takes; preserved for correctness on any future >4-channel
+            // accessor).
+            let total = npoints * nc;
+            for i in 0..total {
+                let prev = if i >= nc { *decoded.get_unchecked(i - nc) } else { 0 };
+                *decoded.get_unchecked_mut(i) = prev.wrapping_add(*raw_ints.get_unchecked(i));
+            }
+        }
+    }
 }
 
 // ─── Byte reader ─────────────────────────────────────────────────────────────
