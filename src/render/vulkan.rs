@@ -38,6 +38,10 @@ pub struct VulkanContext {
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub depth_format: vk::Format,
     pub device_name: Arc<str>,
+    /// Maximum MSAA sample count the chosen device supports for both
+    /// colour and depth framebuffer attachments. `TYPE_1` when the
+    /// driver (e.g. lavapipe) doesn't expose multi-sample storage.
+    pub msaa_samples: vk::SampleCountFlags,
 }
 
 impl VulkanContext {
@@ -382,6 +386,24 @@ impl VulkanContext {
         )
         .unwrap_or(vk::Format::D32_SFLOAT);
 
+        // Maximum MSAA we can use for the swapchain colour pass: take the
+        // intersection of the device's per-framebuffer colour + depth
+        // sample-count masks and pick the highest set bit. Most discrete
+        // GPUs report at least 8×; lavapipe is `TYPE_1`-only.
+        let dev_props = unsafe {
+            instance.get_physical_device_properties(physical_device)
+        };
+        let supported = dev_props.limits.framebuffer_color_sample_counts
+            & dev_props.limits.framebuffer_depth_sample_counts;
+        let msaa_samples = if supported.contains(vk::SampleCountFlags::TYPE_64) { vk::SampleCountFlags::TYPE_64 }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_32) { vk::SampleCountFlags::TYPE_32 }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_16) { vk::SampleCountFlags::TYPE_16 }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_8 ) { vk::SampleCountFlags::TYPE_8  }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_4 ) { vk::SampleCountFlags::TYPE_4  }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_2 ) { vk::SampleCountFlags::TYPE_2  }
+                      else                                                       { vk::SampleCountFlags::TYPE_1  };
+        println!("vulkan: MSAA capability — using {msaa_samples:?}");
+
         Ok(Self {
             entry,
             instance,
@@ -396,6 +418,7 @@ impl VulkanContext {
             memory_properties,
             depth_format,
             device_name,
+            msaa_samples,
         })
     }
 }
