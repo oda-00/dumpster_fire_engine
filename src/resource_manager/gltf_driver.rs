@@ -303,19 +303,32 @@ pub struct GltfCache {
     pub materials:   Arena<MaterialTag, GpuMaterial>,
     pub textures:    Arena<TextureTag,  GpuTexture>,
     dummy_tex:       Option<TextureHandle>,
-    /// Owned GpuTexture list for cleanup (arenas don't own by value yet).
-    owned_textures:  Vec<GpuTexture>,
-    owned_materials: Vec<GpuMaterial>,
+    /// Device handle stored so `Drop` can destroy every GPU resource the
+    /// cache owns. `ash::Device` clones bump an inner Arc — cheap.
+    device:          Option<ash::Device>,
 }
 
 impl GltfCache {
-    pub fn new() -> Self {
+    /// Create an empty cache that will release every GPU resource it owns
+    /// (textures, materials) when dropped.
+    pub fn new(device: ash::Device) -> Self {
         Self {
             materials:       Arena::new(),
             textures:        Arena::new(),
             dummy_tex:       None,
-            owned_textures:  Vec::new(),
-            owned_materials: Vec::new(),
+            device:          Some(device),
+        }
+    }
+
+    /// Legacy constructor kept for callers that bring their own destruction
+    /// path (e.g. integration tests that use `device_wait_idle` then leak
+    /// at process exit). New code should use `new(device)` instead.
+    pub fn detached() -> Self {
+        Self {
+            materials:       Arena::new(),
+            textures:        Arena::new(),
+            dummy_tex:       None,
+            device:          None,
         }
     }
 
@@ -345,6 +358,31 @@ impl GltfCache {
 
     pub fn material(&self, h: MaterialHandle) -> Option<&GpuMaterial> {
         self.materials.get(h)
+    }
+
+    /// Explicitly destroy every GPU resource the cache owns. Called
+    /// automatically from `Drop` when the cache was built via `new(device)`,
+    /// but tests / advanced callers can invoke it manually before
+    /// `device_wait_idle` returns, to be sure resources are gone before
+    /// the device is destroyed.
+    pub fn destroy(&mut self, device: &ash::Device) {
+        unsafe {
+            for mat in self.materials.values_mut() { mat.destroy(device); }
+            for tex in self.textures.values_mut()  { tex.destroy(device); }
+        }
+    }
+}
+
+impl Drop for GltfCache {
+    fn drop(&mut self) {
+        // Only auto-destroy when we own a device handle. Tests that opt out
+        // (via `detached()`) are responsible for tearing down themselves.
+        if let Some(device) = self.device.take() {
+            // Drain the GPU before touching descriptor pools / image memory
+            // — the cache may still be referenced by an in-flight draw.
+            unsafe { let _ = device.device_wait_idle(); }
+            self.destroy(&device);
+        }
     }
 }
 
@@ -474,12 +512,43 @@ pub fn create_material(
     let uniform = MaterialUniform::from_gltf(mat);
 
     let ubo_size = std::mem::size_of::<MaterialUniform>() as vk::DeviceSize;
-    let mut ubo = ForgeBuffer::create(
+    // DEVICE_LOCAL UBO + one-shot staging copy: materials are written
+    // exactly once at upload time and then read every fragment shader
+    // invocation, so the cost of the staging copy is paid in full by
+    // not having every fragment go through the PCIe-mapped HOST_VISIBLE
+    // heap. The staging buffer is freed before this function returns.
+    let mut staging = ForgeBuffer::create(
         device, mp, ubo_size,
-        vk::BufferUsageFlags::UNIFORM_BUFFER,
+        vk::BufferUsageFlags::TRANSFER_SRC,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
     )?;
-    ubo.write_bytes(device, uniform.as_bytes())?;
+    staging.write_bytes(device, uniform.as_bytes())?;
+    let ubo = ForgeBuffer::create(
+        device, mp, ubo_size,
+        vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+    unsafe {
+        let cb = alloc_single_cmd(device, ctx.command_pool)?;
+        let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)
+            .map_err(ForgeError::Vk)?;
+        device.begin_command_buffer(cb,
+            &vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        ).map_err(ForgeError::Vk)?;
+        let copy = vk::BufferCopy::default().src_offset(0).dst_offset(0).size(ubo_size);
+        device.cmd_copy_buffer(cb, staging.handle, ubo.handle, &[copy]);
+        device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
+        device.queue_submit(
+            ctx.graphics_queue,
+            &[vk::SubmitInfo::default().command_buffers(&[cb])],
+            fence,
+        ).map_err(ForgeError::Vk)?;
+        device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+        device.destroy_fence(fence, None);
+        device.free_command_buffers(ctx.command_pool, &[cb]);
+        staging.destroy(device);
+    }
 
     let dummy = cache.ensure_dummy_texture(ctx)?;
 

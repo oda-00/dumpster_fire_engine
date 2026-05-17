@@ -317,27 +317,15 @@ impl GraphicsForge {
     /// vertices from `gl_VertexIndex` alone (perfect for the hello-triangle
     /// path, which baked positions into the shader).
     pub fn descriptor_bindings(&self) -> ThinVec<vk::DescriptorSetLayoutBinding<'static>> {
-        match self.kind {
-            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit => {
-                let mut v = ThinVec::with_capacity(2);
-                v.push(
-                    vk::DescriptorSetLayoutBinding::default()
-                        .binding(0)
-                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                        .descriptor_count(1)
-                        .stage_flags(vk::ShaderStageFlags::VERTEX),
-                );
-                v.push(
-                    vk::DescriptorSetLayoutBinding::default()
-                        .binding(1)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(1)
-                        .stage_flags(vk::ShaderStageFlags::VERTEX),
-                );
-                v
-            }
-            GraphicsOreKind::Ui => ThinVec::new(),
-        }
+        // ForwardLit / SkinnedForwardLit consume MVP via a push constant and
+        // their material / palette descriptors live in sets 1 and 2 — set 0
+        // is an unused slot kept for future "camera + actor SSBO" data. Keep
+        // the descriptor set itself (so set indices in the shader stay
+        // stable) but with zero bindings — Vulkan accepts empty layouts,
+        // and we never need to bind a set 0 descriptor.
+        //
+        // Ui has no descriptor sets at all (gl_VertexIndex-driven shader).
+        ThinVec::new()
     }
 
     /// Build the device-side mold (render pass + pipeline) against a concrete

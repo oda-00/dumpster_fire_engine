@@ -262,7 +262,7 @@ impl ApplicationHandler for App {
                                     println!("{summary}");
 
                                     let pose = Pose::rest(&asset);
-                                    let mut cache = GltfCache::new();
+                                    let mut cache = GltfCache::new(live.ctx.device.clone());
                                     let material_sets =
                                         upload_materials(&live.ctx, live, &mut cache, &asset);
                                     let skin_vertex_buffers =
@@ -314,17 +314,17 @@ impl ApplicationHandler for App {
 
                     let needs_rebuild = advanced || state.last_anim_time < 0.0;
                     if needs_rebuild {
-                        // Drain the GPU before we rebuild this frame's compute +
-                        // graphics factories. Both `build_compute_factory` and
-                        // `build_graphics_factory` `Factory::destroy` the previous
-                        // frame's slot, which frees buffers / descriptor sets that
-                        // may still be referenced by the previous frame's
-                        // in-flight submission. `device_wait_idle` is the simplest
-                        // correct fence to use here; a per-frame fence + per-slot
-                        // descriptor pool would let us avoid the stall, but for
-                        // single-asset hello-gltf rendering this is fine.
+                        // Wait on the most-recently-submitted frame's fence (just
+                        // that one — NOT `device_wait_idle`, which blocks every
+                        // queue including the transfer queue for nothing). After
+                        // this returns the previous draw is off the GPU, so we
+                        // can safely reset descriptor sets that draw was reading
+                        // and replace compute / graphics factories whose ingots
+                        // it consumed.
+                        if let Err(e) = live.renderer.wait_for_last_submission(live.window_handle) {
+                            eprintln!("wait for previous frame failed: {e:?}");
+                        }
                         unsafe {
-                            live.ctx.device.device_wait_idle().ok();
                             live.ctx.device.reset_descriptor_pool(
                                 live.skin_pool, vk::DescriptorPoolResetFlags::empty(),
                             ).ok();

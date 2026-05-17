@@ -104,6 +104,17 @@ impl Renderer {
             .expect("window handle is stale or was never valid");
         window.build_graphics_factory(proto, &device)
     }
+
+    /// Wait on the most-recently-submitted frame fence for `window_h`.
+    /// Use this in per-frame setup code to guarantee the previous frame's
+    /// resources are no longer in flight before recycling/destroying them.
+    /// Replaces `device_wait_idle` for single-window apps.
+    pub fn wait_for_last_submission(&self, window_h: WindowHandle) -> ForgeResult<()> {
+        let device = self.forge.device.clone();
+        let window = self.windows.get(window_h)
+            .expect("window handle is stale or was never valid");
+        window.wait_for_last_submission(&device)
+    }
 }
 
 impl Drop for Renderer {

@@ -515,7 +515,7 @@ fn gltf_driver_creates_material_descriptor_set_for_toycar() {
         material_set_layout: layout,
         material_pool:       pool,
     };
-    let mut cache = GltfCache::new();
+    let mut cache = GltfCache::detached();
 
     // Upload every image (skip on error so the test still runs against
     // partial assets).

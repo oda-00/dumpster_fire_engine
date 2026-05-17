@@ -275,6 +275,24 @@ impl Window {
         Ok(())
     }
 
+    /// Wait on the fence belonging to the most recently submitted frame.
+    /// After this returns, the GPU has finished that submission and any
+    /// resources it referenced (descriptor sets, compute output buffers,
+    /// vertex buffers) are safe to destroy or recycle. Substantially
+    /// lighter than `device_wait_idle` because it only blocks on the
+    /// single relevant fence rather than every queue.
+    ///
+    /// Returns `Ok(())` immediately on the very first frame (the fences
+    /// are created in the signalled state).
+    pub fn wait_for_last_submission(&self, device: &ash::Device) -> ForgeResult<()> {
+        let Some(gfx) = self.graphics.as_ref() else { return Ok(()); };
+        let prev = (gfx.current_frame + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT;
+        let fence = gfx.in_flight_fences[prev];
+        if fence == vk::Fence::null() { return Ok(()); }
+        unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }
+            .map_err(ForgeError::Vk)
+    }
+
     pub fn build_compute_factory(
         &mut self,
         proto:  Proto<ComputeTag>,
@@ -530,6 +548,27 @@ impl Window {
                 .map_err(ForgeError::Vk)?;
             device.begin_command_buffer(command_buffer, &begin_info)
                 .map_err(ForgeError::Vk)?;
+
+            // Compute → graphics memory dependency. Same-queue submission
+            // ordering guarantees the compute dispatch FINISHES before this
+            // draw starts, but does NOT guarantee the compute writes are
+            // visible to the vertex stage's reads — that needs an explicit
+            // memory barrier. A global SHADER_WRITE → VERTEX_ATTRIBUTE_READ
+            // | SHADER_READ barrier covers both MorphBlend (read via
+            // VERTEX_INPUT as a vertex source) and SkinPalette (read via
+            // VERTEX_SHADER as an SSBO).
+            let mem_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ
+                    | vk::AccessFlags::SHADER_READ);
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::VERTEX_INPUT | vk::PipelineStageFlags::VERTEX_SHADER,
+                vk::DependencyFlags::empty(),
+                &[mem_barrier], &[], &[],
+            );
+
             device.cmd_begin_render_pass(command_buffer, &rp_begin, vk::SubpassContents::INLINE);
 
             // Dynamic viewport/scissor — pipeline is extent-agnostic, set here.
