@@ -412,48 +412,14 @@ impl GraphicsForge {
         // Set 1 — material descriptor layout (ForwardLit only):
         //   binding 0 = UNIFORM_BUFFER (fragment), binding 1-5 = COMBINED_IMAGE_SAMPLER (fragment).
         let material_set_layout = if matches!(self.kind, GraphicsOreKind::ForwardLit) {
-            let mat_bindings = [
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(1)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(2)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(3)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(4)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(5)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-            ];
-            let mat_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-                .bindings(&mat_bindings);
-            match unsafe { device.create_descriptor_set_layout(&mat_layout_info, None) } {
+            match crate::resource_manager::gltf_driver::create_material_set_layout(device) {
                 Ok(l) => l,
                 Err(e) => {
                     unsafe {
                         device.destroy_descriptor_set_layout(descriptor_set_layout, None);
                         device.destroy_render_pass(render_pass, None);
                     }
-                    return Err(ForgeError::Vk(e));
+                    return Err(e);
                 }
             }
         } else {

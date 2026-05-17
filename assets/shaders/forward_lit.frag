@@ -7,13 +7,14 @@ layout(location = 0) out vec4 outColor;
 // Set 1 — material (optional; if the descriptor set is not bound the
 // driver writes white defaults into the UBO and dummy textures).
 layout(set = 1, binding = 0) uniform MaterialUbo {
-    vec4  baseColorFactor;
-    float metallicFactor;
-    float roughnessFactor;
-    vec3  emissiveFactor;
-    float alphaCutoff;
-    uint  flags;            // bit0=doubleSided, bits1-2=alphaMode
-    uint  _pad[3];
+    vec4  baseColorFactor;  // offset 0
+    float metallicFactor;   // offset 16
+    float roughnessFactor;  // offset 20
+    // std140 padding (8 B) so vec3 below lands on a 16-byte boundary.
+    vec3  emissiveFactor;   // offset 32
+    float alphaCutoff;      // offset 44
+    uint  flags;            // offset 48 — bit0=doubleSided, bits1-2=alphaMode
+    // std140 rounds the whole struct to vec4 alignment → final size 64 B.
 } mat;
 
 layout(set = 1, binding = 1) uniform sampler2D texBaseColor;

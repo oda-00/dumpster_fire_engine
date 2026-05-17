@@ -402,6 +402,19 @@ pub fn build_graphics_plans_with_pose(
     pose:       &Pose,
     upload_ctx: &MeshUploadCtx,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
+    build_graphics_plans_with_pose_and_materials(asset, pose, upload_ctx, &[])
+}
+
+/// Variant of `build_graphics_plans_with_pose` that attaches a pre-resolved
+/// material descriptor set to each plan. `material_sets` is indexed by the
+/// asset's material index; entries that are `None` (or out of range) leave
+/// the plan's `material_set` unset (caller falls back to dummy bindings).
+pub fn build_graphics_plans_with_pose_and_materials(
+    asset:         &GltfAsset,
+    pose:          &Pose,
+    upload_ctx:    &MeshUploadCtx,
+    material_sets: &[Option<vk::DescriptorSet>],
+) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     let mut cache: Vec<Vec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
         .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
         .collect();
@@ -416,7 +429,7 @@ pub fn build_graphics_plans_with_pose(
             *mesh_slot = Some(Arc::new(gpu));
         }
         let mesh = mesh_slot.as_ref().unwrap().clone();
-        let plan = GraphicsFramePlan::new_mesh(
+        let mut plan = GraphicsFramePlan::new_mesh(
             crate::forge_master::frame::FrameId::new((i + 1) as i64),
             d.material
                 .map(|m| format!("animated_prim_{i}_mat_{m}"))
@@ -424,6 +437,11 @@ pub fn build_graphics_plans_with_pose(
             mesh,
         )
         .with_mvp(d.world_matrix);
+        if let Some(mat_idx) = d.material {
+            if let Some(Some(set)) = material_sets.get(mat_idx as usize) {
+                plan = plan.with_material_set(*set);
+            }
+        }
         plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
     }
     Ok(plans)

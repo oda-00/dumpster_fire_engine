@@ -5,15 +5,16 @@
 //     first primitive),
 //   • samples animations over wall-clock time and rebuilds per-frame plans,
 //   • uploads each unique primitive once and reuses the GpuMesh across
-//     animation frames.
+//     animation frames,
+//   • uploads every glTF material as a Vulkan descriptor set (set 1) and
+//     binds it per draw call via the new gltf_driver module.
 //
 //   cargo run --bin hello_gltf -- path/to/model.glb
 
 use std::sync::Arc;
-use std::sync::mpsc;
-use std::thread;
 use std::time::Instant;
 
+use ash::vk;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -26,7 +27,13 @@ use dumpster_fire_engine::render::{
     Window, WindowId as RenderWindowId,
 };
 use dumpster_fire_engine::resource_manager::asset_manager::{
-    build_graphics_plans_with_pose, forge_gltf::{GltfAsset, Pose}, load_asset,
+    build_graphics_plans_with_pose_and_materials,
+    forge_gltf::{GltfAsset, Pose}, load_asset, register_skin_morph_forges,
+};
+use dumpster_fire_engine::resource_manager::gltf_driver::{
+    AsyncGltfLoader, GltfCache, GltfUploadCtx, MaterialHandle,
+    create_material, create_material_pool, gltf_sampler_to_vk, upload_texture_rgba,
+    GltfSampler, TEXTURE_SLOT_COUNT,
 };
 
 const FORWARD_LIT_VERT: &[u8] = include_bytes!(
@@ -47,7 +54,7 @@ fn main() {
     let mut app = App {
         live: None,
         model_path: path,
-        asset_rx: None,
+        loader: None,
         asset_loaded: None,
         start: Instant::now(),
     };
@@ -57,25 +64,29 @@ fn main() {
 struct App {
     live:         Option<LiveState>,
     model_path:   String,
-    asset_rx:     Option<mpsc::Receiver<GltfAsset>>,
+    loader:       Option<AsyncGltfLoader>,
     asset_loaded: Option<AssetState>,
     start:        Instant,
 }
 
 struct AssetState {
-    asset: GltfAsset,
-    pose:  Pose,
-    /// Cached so we don't rebuild the proto on every redraw — only the
-    /// MVPs inside it change between frames; the engine reads the latest
-    /// plans each redraw.
-    last_anim_time: f32,
+    asset:           GltfAsset,
+    pose:            Pose,
+    /// Pre-resolved descriptor set per material index. Built once on load.
+    material_sets:   Vec<Option<vk::DescriptorSet>>,
+    /// Owned by the App for the lifetime of the asset.
+    cache:           GltfCache,
+    /// Track if we've ever animated.
+    last_anim_time:  f32,
 }
 
 struct LiveState {
-    ctx:           VulkanContext,
-    renderer:      Renderer,
-    window_handle: dumpster_fire_engine::render::WindowHandle,
-    winit_id:      WindowId,
+    ctx:             VulkanContext,
+    renderer:        Renderer,
+    window_handle:   dumpster_fire_engine::render::WindowHandle,
+    winit_id:        WindowId,
+    material_pool:   vk::DescriptorPool,
+    material_layout: vk::DescriptorSetLayout,
 }
 
 impl ApplicationHandler for App {
@@ -96,16 +107,8 @@ impl ApplicationHandler for App {
             .display_handle().expect("display handle").as_raw();
         let ctx = VulkanContext::with_surface(display_handle).expect("Vulkan init");
 
-        // ── Background asset loader: pull the full document, not just one
-        //    primitive, so per-frame replanning sees the whole scene.
-        let path = self.model_path.clone();
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let asset = load_asset(&path)
-                .unwrap_or_else(|e| panic!("failed to load '{path}': {e}"));
-            tx.send(asset).unwrap();
-        });
-        self.asset_rx = Some(rx);
+        // ── Background asset loader (hand-rolled AsyncGltfLoader) ────────────
+        self.loader = Some(AsyncGltfLoader::spawn(self.model_path.clone().into()));
 
         // ── ForwardLit forge ─────────────────────────────────────────────────
         let mut forge = ForgeMaster::new(
@@ -120,6 +123,9 @@ impl ApplicationHandler for App {
             FORWARD_LIT_VERT,
             FORWARD_LIT_FRAG,
         ).expect("register ForwardLit forge");
+        // Pre-compile SkinPalette + MorphBlend compute pipelines once at
+        // startup — per-frame plans can dispatch them without re-linking.
+        register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
         let graphics_forge = forge
             .graphics_forge(GraphicsOreKind::ForwardLit)
             .expect("ForwardLit forge present");
@@ -143,7 +149,21 @@ impl ApplicationHandler for App {
         let mut renderer = Renderer::new(forge);
         let window_handle = renderer.add_window(window);
 
-        self.live = Some(LiveState { ctx, renderer, window_handle, winit_id });
+        // Grab the material descriptor-set layout from the freshly built mold.
+        let material_layout = renderer
+            .window(window_handle)
+            .and_then(|w| w.graphics.as_ref())
+            .map(|g| g.mold.material_set_layout)
+            .unwrap_or(vk::DescriptorSetLayout::null());
+
+        // Material descriptor pool (4096 sets max — fits any reasonable glTF).
+        let material_pool = create_material_pool(&ctx.device, 4096)
+            .expect("create material descriptor pool");
+
+        self.live = Some(LiveState {
+            ctx, renderer, window_handle, winit_id,
+            material_pool, material_layout,
+        });
         if let Some(gfx) = &self.live.as_ref().unwrap().renderer
             .window(self.live.as_ref().unwrap().window_handle)
             .unwrap()
@@ -171,20 +191,39 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // First time we see the asset, install it.
+                // First time we see the asset, install it and upload all GPU
+                // textures + materials.
                 if self.asset_loaded.is_none() {
-                    if let Some(rx) = &self.asset_rx {
-                        if let Ok(asset) = rx.try_recv() {
-                            let pose = Pose::rest(&asset);
-                            let summary = format!(
-                                "loaded: {} meshes, {} nodes, {} animations, {} materials, {} lights",
-                                asset.meshes.len(), asset.nodes.len(),
-                                asset.animations.len(), asset.materials.len(), asset.lights.len(),
-                            );
-                            println!("{summary}");
-                            self.asset_loaded = Some(AssetState {
-                                asset, pose, last_anim_time: -1.0,
-                            });
+                    if let Some(loader) = self.loader.as_mut() {
+                        if let Some(result) = loader.try_recv() {
+                            match result {
+                                Ok(asset) => {
+                                    let summary = format!(
+                                        "loaded: {} meshes, {} nodes, {} animations, \
+                                         {} materials, {} textures, {} images, {} lights",
+                                        asset.meshes.len(), asset.nodes.len(),
+                                        asset.animations.len(), asset.materials.len(),
+                                        asset.textures.len(), asset.images.len(),
+                                        asset.lights.len(),
+                                    );
+                                    println!("{summary}");
+
+                                    let pose = Pose::rest(&asset);
+                                    let mut cache = GltfCache::new();
+                                    let material_sets =
+                                        upload_materials(&live.ctx, live, &mut cache, &asset);
+
+                                    self.asset_loaded = Some(AssetState {
+                                        asset, pose, material_sets, cache,
+                                        last_anim_time: -1.0,
+                                    });
+                                }
+                                Err(e) => {
+                                    eprintln!("asset load failed: {e:?}");
+                                    event_loop.exit();
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
@@ -199,12 +238,15 @@ impl ApplicationHandler for App {
                         true
                     } else { false };
 
-                    // Rebuild plans every frame for animated assets; static
-                    // assets only build once.
                     let needs_rebuild = advanced || state.last_anim_time < 0.0;
                     if needs_rebuild {
                         let upload_ctx = live.ctx.mesh_upload_ctx();
-                        match build_graphics_plans_with_pose(&state.asset, &state.pose, &upload_ctx) {
+                        match build_graphics_plans_with_pose_and_materials(
+                            &state.asset,
+                            &state.pose,
+                            &upload_ctx,
+                            &state.material_sets,
+                        ) {
                             Ok(plans) => {
                                 let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "gltf_scene");
                                 for plan in plans { proto.push_call(plan); }
@@ -239,3 +281,67 @@ impl ApplicationHandler for App {
         }
     }
 }
+
+/// Upload every glTF image as a GpuTexture and every material as a
+/// descriptor-bound GpuMaterial. Returns the resolved descriptor set per
+/// material index (None when creation failed).
+fn upload_materials(
+    ctx:   &VulkanContext,
+    live:  &LiveState,
+    cache: &mut GltfCache,
+    asset: &GltfAsset,
+) -> Vec<Option<vk::DescriptorSet>> {
+    let upload_ctx = GltfUploadCtx {
+        device:              &ctx.device,
+        memory_properties:   &ctx.memory_properties,
+        graphics_queue:      ctx.queue,
+        command_pool:        ctx.command_pool,
+        material_set_layout: live.material_layout,
+        material_pool:       live.material_pool,
+    };
+
+    // Resolve per-image sampler from the first texture pointing at it.
+    let n_images = asset.images.len();
+    let mut img_samplers: Vec<GltfSampler> = vec![GltfSampler::default(); n_images];
+    for tex in &asset.textures {
+        let idx = tex.image as usize;
+        if idx < n_images {
+            if let Some(sampler_idx) = tex.sampler {
+                if let Some(s) = asset.samplers.get(sampler_idx as usize) {
+                    img_samplers[idx] = gltf_sampler_to_vk(s);
+                }
+            }
+        }
+    }
+
+    // Upload each image.
+    let img_handles: Vec<Option<_>> = asset.images.iter().enumerate()
+        .map(|(i, img)| {
+            match upload_texture_rgba(&upload_ctx, img.width, img.height, &img.rgba, &img_samplers[i]) {
+                Ok(tex) => Some(cache.textures.insert(tex)),
+                Err(e)  => {
+                    eprintln!("texture upload failed (image {i}): {e:?}");
+                    None
+                }
+            }
+        }).collect();
+
+    // Create each material — fall back to None on failure so the draw still
+    // happens with whatever was last bound.
+    asset.materials.iter().map(|mat| {
+        match create_material(mat, asset, &img_handles, &upload_ctx, cache) {
+            Ok(gm) => {
+                let set = gm.descriptor_set;
+                let _h: MaterialHandle = cache.materials.insert(gm);
+                Some(set)
+            }
+            Err(e) => {
+                eprintln!("material upload failed: {e:?}");
+                None
+            }
+        }
+    }).collect()
+}
+
+// Touch TEXTURE_SLOT_COUNT so it's not flagged unused at the binary scope.
+const _SLOT_CHECK: usize = TEXTURE_SLOT_COUNT;

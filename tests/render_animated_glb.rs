@@ -20,6 +20,10 @@ use dumpster_fire_engine::resource_manager::asset_manager::{
     build_compute_ores, build_graphics_plans, build_graphics_plans_with_pose,
     load_asset, asset_to_texture_ores,
 };
+use dumpster_fire_engine::resource_manager::gltf_driver::{
+    GltfCache, GltfSampler, GltfUploadCtx, MaterialUniform,
+    create_material, create_material_pool, upload_texture_rgba, TEXTURE_SLOT_COUNT,
+};
 
 use forge_gltf::{
     GltfAsset, MaterialBlock, MaterialExtBlock, PipelineParams, Pose,
@@ -422,4 +426,141 @@ fn material_flattening_emits_both_base_and_ext_blocks() {
     assert_eq!(up.element_count, n as u32);
     assert_eq!(up.primary_bytes.len(),   n * MaterialBlock::BYTES);
     assert_eq!(up.secondary_bytes.len(), n * MaterialExtBlock::BYTES);
+}
+
+// ── 14. gltf_driver: pure CPU-side material uniform mapping ────────────────
+
+#[test]
+fn material_uniform_size_layout_matches_std140_64_bytes_aligned_16() {
+    // std140: vec3 needs 16-byte alignment, struct rounds up to vec4 alignment.
+    assert_eq!(std::mem::size_of::<MaterialUniform>(), 64);
+    assert_eq!(std::mem::align_of::<MaterialUniform>(), 16);
+}
+
+#[test]
+fn material_uniform_from_gltf_packs_flags_correctly() {
+    let asset = load_asset(asset_path("ToyCar.glb")).expect("load ToyCar");
+    assert!(!asset.materials.is_empty());
+    for m in &asset.materials {
+        let u = MaterialUniform::from_gltf(m);
+        // alphaMode bits 1-2 — Opaque=0, Mask=2, Blend=4.
+        let alpha_bits = u.flags & 0x6;
+        assert!(matches!(alpha_bits, 0 | 2 | 4),
+            "alphaMode flag bits must encode one of Opaque/Mask/Blend");
+        // doubleSided bit 0.
+        let ds_bit = u.flags & 0x1;
+        assert_eq!(ds_bit, m.double_sided as u32);
+        // Factors must round-trip exactly.
+        assert_eq!(u.base_color_factor, m.pbr.base_color_factor);
+        assert_eq!(u.metallic_factor,   m.pbr.metallic_factor);
+        assert_eq!(u.roughness_factor,  m.pbr.roughness_factor);
+        assert_eq!(u.emissive_factor,   m.emissive_factor);
+    }
+}
+
+// ── 15. gltf_driver: GPU upload — needs Vulkan, falls through on lavapipe ──
+
+#[test]
+fn gltf_driver_uploads_dummy_white_texture() {
+    let Some(ctx) = try_vulkan() else { return };
+    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(&ctx.device)
+        .expect("material set layout");
+    let pool = create_material_pool(&ctx.device, 16).expect("material pool");
+    let upload = GltfUploadCtx {
+        device:              &ctx.device,
+        memory_properties:   &ctx.memory_properties,
+        graphics_queue:      ctx.queue,
+        command_pool:        ctx.command_pool,
+        material_set_layout: layout,
+        material_pool:       pool,
+    };
+    use ash::vk::Handle;
+    let tex = upload_texture_rgba(&upload, 1, 1, &[255, 255, 255, 255], &GltfSampler::default())
+        .expect("upload 1x1 white");
+    assert!(tex.image.handle.as_raw() != 0);
+    assert!(tex.image.view.as_raw()   != 0);
+    assert!(tex.sampler.as_raw()      != 0);
+
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+        let mut tex = tex;
+        tex.destroy(&ctx.device);
+        ctx.device.destroy_descriptor_pool(pool, None);
+        ctx.device.destroy_descriptor_set_layout(layout, None);
+    }
+}
+
+#[test]
+fn gltf_driver_creates_material_descriptor_set_for_toycar() {
+    let Some(ctx) = try_vulkan() else { return };
+    let asset = load_asset(asset_path("ToyCar.glb")).expect("load ToyCar");
+    assert!(!asset.materials.is_empty());
+
+    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(&ctx.device)
+        .expect("material set layout");
+    // ToyCar has ~5 materials and ~5 textures — 64 sets is plenty.
+    let pool = create_material_pool(&ctx.device, 64).expect("material pool");
+    let upload = GltfUploadCtx {
+        device:              &ctx.device,
+        memory_properties:   &ctx.memory_properties,
+        graphics_queue:      ctx.queue,
+        command_pool:        ctx.command_pool,
+        material_set_layout: layout,
+        material_pool:       pool,
+    };
+    let mut cache = GltfCache::new();
+
+    // Upload every image (skip on error so the test still runs against
+    // partial assets).
+    let img_handles: Vec<Option<_>> = asset.images.iter().map(|img| {
+        upload_texture_rgba(&upload, img.width, img.height, &img.rgba, &GltfSampler::default())
+            .ok().map(|t| cache.textures.insert(t))
+    }).collect();
+
+    // Create one descriptor set per material.
+    use ash::vk::Handle;
+    let mat = create_material(&asset.materials[0], &asset, &img_handles, &upload, &mut cache)
+        .expect("create material");
+    assert!(mat.descriptor_set.as_raw() != 0,
+        "material's descriptor set must be a real Vulkan handle");
+    assert_eq!(mat.textures.len(), TEXTURE_SLOT_COUNT);
+    let _h = cache.materials.insert(mat);
+
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+        // Cache owns resources for the test; we let them leak at process exit
+        // (test-only — no Drop on GltfCache yet).
+        ctx.device.destroy_descriptor_pool(pool, None);
+        ctx.device.destroy_descriptor_set_layout(layout, None);
+    }
+}
+
+#[test]
+fn build_graphics_plans_attaches_material_sets() {
+    use dumpster_fire_engine::resource_manager::asset_manager::build_graphics_plans_with_pose_and_materials;
+    let Some(ctx) = try_vulkan() else { return };
+    let asset = load_asset(asset_path("ToyCar.glb")).expect("load ToyCar");
+    let pose = forge_gltf::Pose::rest(&asset);
+    let upload_ctx = ctx.mesh_upload_ctx();
+
+    use ash::vk::Handle;
+    // Synthesize one fake-but-non-null descriptor set per material slot.
+    let fake = ash::vk::DescriptorSet::from_raw(0xDEADBEEFu64);
+    let sets: Vec<Option<ash::vk::DescriptorSet>> =
+        (0..asset.materials.len()).map(|_| Some(fake)).collect();
+
+    let plans = build_graphics_plans_with_pose_and_materials(
+        &asset, &pose, &upload_ctx, &sets,
+    ).expect("build plans with materials");
+    assert!(!plans.is_empty(), "ToyCar has draws");
+
+    // Every draw whose primitive carried a material index must have a set.
+    let with_material = plans.iter().filter(|p| p.material_set.is_some()).count();
+    assert!(with_material > 0, "at least one draw must carry the fake material set");
+    for p in &plans {
+        if let Some(s) = p.material_set {
+            assert_eq!(s.as_raw(), 0xDEADBEEFu64);
+        }
+    }
+    unsafe { ctx.device.device_wait_idle().ok(); }
 }

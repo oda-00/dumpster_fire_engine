@@ -99,17 +99,23 @@ impl GpuTexture {
 
 pub const TEXTURE_SLOT_COUNT: usize = 5;
 
+/// Matches the std140 layout of `MaterialUbo` in
+/// `assets/shaders/forward_lit.frag` exactly: 64 bytes total, 16-byte aligned.
+/// The two `_pad` fields exist so `emissive_factor` lands at the 16-byte
+/// boundary `vec3` requires in std140, and so the trailing `flags` rounds
+/// the struct up to the next vec4 boundary.
 #[repr(C, align(16))]
 #[derive(Copy, Clone, Debug)]
 pub struct MaterialUniform {
-    pub base_color_factor: [f32; 4],
-    pub metallic_factor:   f32,
-    pub roughness_factor:  f32,
-    pub emissive_factor:   [f32; 3],
-    pub alpha_cutoff:      f32,
+    pub base_color_factor: [f32; 4], // offset 0
+    pub metallic_factor:   f32,       // offset 16
+    pub roughness_factor:  f32,       // offset 20
+    pub _pad0:             [f32; 2],  // 24..32 — vec3 alignment
+    pub emissive_factor:   [f32; 3],  // offset 32
+    pub alpha_cutoff:      f32,       // offset 44
     /// bit0=doubleSided, bits1-2=alphaMode (Opaque=0, Mask=2, Blend=4)
-    pub flags:             u32,
-    pub _pad:              [u32; 3],
+    pub flags:             u32,       // offset 48
+    pub _pad1:             [u32; 3],  // 52..64 — round struct to 64
 }
 
 impl Default for MaterialUniform {
@@ -118,10 +124,11 @@ impl Default for MaterialUniform {
             base_color_factor: [1.0; 4],
             metallic_factor:   1.0,
             roughness_factor:  1.0,
+            _pad0:             [0.0; 2],
             emissive_factor:   [0.0; 3],
             alpha_cutoff:      0.5,
             flags:             0,
-            _pad:              [0; 3],
+            _pad1:             [0; 3],
         }
     }
 }
@@ -138,10 +145,11 @@ impl MaterialUniform {
             base_color_factor: mat.pbr.base_color_factor,
             metallic_factor:   mat.pbr.metallic_factor,
             roughness_factor:  mat.pbr.roughness_factor,
+            _pad0:             [0.0; 2],
             emissive_factor:   mat.emissive_factor,
             alpha_cutoff:      mat.alpha_cutoff,
             flags,
-            _pad: [0; 3],
+            _pad1:             [0; 3],
         }
     }
 
@@ -179,6 +187,56 @@ pub struct GltfUploadCtx<'a> {
     pub command_pool:        vk::CommandPool,
     pub material_set_layout: vk::DescriptorSetLayout,
     pub material_pool:       vk::DescriptorPool,
+}
+
+/// Build the descriptor-set layout for material set 1 — must match what the
+/// ForwardLit fragment shader expects (binding 0 = MaterialUbo,
+/// bindings 1–5 = COMBINED_IMAGE_SAMPLER for the 5 PBR texture slots).
+pub fn create_material_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout, ForgeError> {
+    let mut bindings = Vec::with_capacity(1 + TEXTURE_SLOT_COUNT);
+    bindings.push(
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+    );
+    for i in 0..TEXTURE_SLOT_COUNT {
+        bindings.push(
+            vk::DescriptorSetLayoutBinding::default()
+                .binding((i + 1) as u32)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        );
+    }
+    let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    unsafe { device.create_descriptor_set_layout(&info, None).map_err(ForgeError::Vk) }
+}
+
+/// Create a descriptor pool sized for `max_materials` material slots.
+/// Each slot consumes 1 uniform-buffer descriptor + `TEXTURE_SLOT_COUNT`
+/// combined-image-sampler descriptors. `FREE_DESCRIPTOR_SET_BIT` is enabled
+/// so individual sets can be freed on cache eviction.
+pub fn create_material_pool(
+    device:        &ash::Device,
+    max_materials: u32,
+) -> Result<vk::DescriptorPool, ForgeError> {
+    let pool_sizes = [
+        vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(max_materials),
+        vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(max_materials * TEXTURE_SLOT_COUNT as u32),
+    ];
+    let info = vk::DescriptorPoolCreateInfo::default()
+        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+        .max_sets(max_materials)
+        .pool_sizes(&pool_sizes);
+    unsafe { device.create_descriptor_pool(&info, None).map_err(ForgeError::Vk) }
 }
 
 // ─── Cache ───────────────────────────────────────────────────────────────────
