@@ -480,8 +480,10 @@ fn gltf_driver_uploads_dummy_white_texture() {
         material_pool:       pool,
     };
     use ash::vk::Handle;
-    let tex = upload_texture_rgba(&upload, 1, 1, &[255, 255, 255, 255], &GltfSampler::default())
-        .expect("upload 1x1 white");
+    let tex = upload_texture_rgba(
+        &upload, 1, 1, &[255, 255, 255, 255], &GltfSampler::default(),
+        ash::vk::Format::R8G8B8A8_UNORM,
+    ).expect("upload 1x1 white");
     assert!(tex.image.handle.as_raw() != 0);
     assert!(tex.image.view.as_raw()   != 0);
     assert!(tex.sampler.as_raw()      != 0);
@@ -518,7 +520,11 @@ fn gltf_driver_creates_material_descriptor_set_for_toycar() {
     // Upload every image (skip on error so the test still runs against
     // partial assets).
     let img_handles: Vec<Option<_>> = asset.images.iter().map(|img| {
-        upload_texture_rgba(&upload, img.width, img.height, &img.rgba, &GltfSampler::default())
+        let fmt = match img.format {
+            forge_gltf::ImageFormatHint::Srgb   => ash::vk::Format::R8G8B8A8_SRGB,
+            forge_gltf::ImageFormatHint::Linear => ash::vk::Format::R8G8B8A8_UNORM,
+        };
+        upload_texture_rgba(&upload, img.width, img.height, &img.rgba, &GltfSampler::default(), fmt)
             .ok().map(|t| cache.textures.insert(t))
     }).collect();
 
@@ -625,6 +631,62 @@ fn diffuse_transmission_plant_morph_blend_dispatches_finite_ingot() {
 }
 
 // ── 16c. Full GPU loop closure for skinning — palette feeds vertex shader ─
+
+/// End-to-end correctness check: dispatch the SkinPalette compute Ore
+/// against BrainStem at rest pose and compare every output mat4 to the
+/// CPU reference produced by `Pose::skin_palette`. Catches both shader
+/// math errors and input-upload mistakes (the previous variant of this
+/// test caught a real bug where `upload_to_ore` was dropping the primary
+/// buffer for non-mesh-shaped uploads — primary world-matrices ended up
+/// all zero, the palette computed to 0×IBM=0, and skinning corrupted the
+/// mesh).
+#[test]
+fn brainstem_skin_palette_matches_cpu_reference_at_rest() {
+    let Some(ctx) = try_vulkan() else { return };
+    let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
+    let pose  = forge_gltf::Pose::rest(&asset);
+
+    let mut forge = ForgeMaster::new(
+        ctx.device.clone(), ctx.queue, ctx.command_pool, ctx.memory_properties,
+    ).expect("ForgeMaster");
+    register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
+
+    let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(120), 0)
+        .expect("BrainStem skins → proto must be Some");
+    let factory = Factory::from_compute_proto(FactoryId::new(120), proto, &mut forge)
+        .expect("compute dispatch");
+
+    let frame = factory.frames().next().expect("at least one compute frame");
+    let ingot = frame.ingots.first().expect("at least one ingot per frame");
+    let bytes = ingot.as_bytes();
+    assert_eq!(bytes.len() % 64, 0, "ingot must be whole number of mat4s");
+    let n_joints = asset.skins[0].joints.len();
+    assert!(bytes.len() / 64 >= n_joints,
+        "ingot has {} mat4s, expected ≥ {n_joints}", bytes.len() / 64);
+
+    let cpu = pose.skin_palette(&asset, 0);
+    assert_eq!(cpu.len(), n_joints);
+
+    for j in 0..n_joints {
+        let base = j * 64;
+        let mut gpu = [0f32; 16];
+        for k in 0..16 {
+            let off = base + k * 4;
+            gpu[k] = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        }
+        let ref_mat = cpu[j];
+        let max_err = (0..16).map(|k| (gpu[k] - ref_mat[k]).abs())
+            .fold(0f32, f32::max);
+        assert!(max_err < 1e-3,
+            "joint {j} GPU palette differs from CPU: max_err={max_err}\n  gpu={gpu:?}\n  cpu={ref_mat:?}");
+    }
+
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+        let mut factory = factory;
+        factory.destroy(&ctx.device);
+    }
+}
 
 #[test]
 fn brainstem_skin_palette_buffer_is_bindable_as_storage_buffer() {

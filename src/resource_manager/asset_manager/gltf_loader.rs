@@ -187,27 +187,50 @@ pub fn upload_to_ore(up: &PipelineUpload, output_size: vk::DeviceSize) -> Ore {
     let kind = pipeline_kind_to_ore(up.kind);
     let primary: ThinVec<u8> = up.primary_bytes.clone();
     let secondary: ThinVec<u8> = up.secondary_bytes.clone();
-    let input = if up.is_mesh && !primary.is_empty() {
-        // Re-wrap as raw bytes; the engine's Ore::primary_bytes/secondary_bytes
-        // already handles arbitrary byte payloads regardless of OreInput tag.
-        OreInput::Bytes(primary)
-    } else if primary.is_empty() {
-        OreInput::Empty
-    } else {
-        OreInput::Bytes(primary)
-    };
-    // Compute outputs that downstream graphics draws read directly need
-    // extra buffer-usage flags so the same allocation is bindable as a
+
+    // Compute-output buffers that downstream graphics draws read directly
+    // need extra buffer-usage flags so the same allocation is bindable as a
     // vertex source or SSBO without a copy step.
-    //   MorphBlend → posed vertex buffer  → VERTEX_BUFFER
-    //   SkinPalette → joint-palette SSBO → STORAGE_BUFFER (already default,
+    //   MorphBlend  → posed vertex buffer → VERTEX_BUFFER
+    //   SkinPalette → joint-palette SSBO  → STORAGE_BUFFER (already default;
     //                  redundant flag is a no-op but documents intent)
     let extra_usage = match kind {
         OreKind::MorphBlend  => vk::BufferUsageFlags::VERTEX_BUFFER,
         OreKind::SkinPalette => vk::BufferUsageFlags::STORAGE_BUFFER,
         _                    => vk::BufferUsageFlags::empty(),
     };
-    let mut ore = Ore::new(
+
+    // Build the input variant carefully so we don't drop either buffer:
+    //   • Mesh-shaped upload (is_mesh + vertices + indices)
+    //     → OreInput::Mesh (the staging path reads vertices_as_bytes /
+    //       indices_as_bytes).
+    //   • Non-mesh upload with both primary and secondary bytes
+    //     → OreInput::DualBytes — neither input fits Mesh, but we still
+    //       need both bound to compute set 0 binding 0 and binding 1
+    //       (SkinPalette: world matrices + IBMs; MorphBlend: rest verts +
+    //       header/weights/deltas blob).
+    //   • Non-mesh upload with only primary bytes → OreInput::Bytes.
+    //   • Empty payload → OreInput::Empty.
+    let input = if primary.is_empty() && secondary.is_empty() {
+        OreInput::Empty
+    } else if up.is_mesh && !primary.is_empty() {
+        let vertex_stride = std::mem::size_of::<ForgeVertex>();
+        let n_vertices = if up.element_stride == vertex_stride as u32 {
+            (up.primary_bytes.len() / vertex_stride) as u32
+        } else {
+            up.element_count
+        };
+        OreInput::Mesh(MeshOre::new(
+            unpack_forge_vertices(&up.primary_bytes, n_vertices as usize),
+            if secondary.is_empty() { ThinVec::new() } else { unpack_u32(&secondary) },
+        ))
+    } else if !secondary.is_empty() {
+        OreInput::DualBytes { primary, secondary }
+    } else {
+        OreInput::Bytes(primary)
+    };
+
+    Ore::new(
         kind,
         input,
         IngotSpec::Buffer {
@@ -216,33 +239,7 @@ pub fn upload_to_ore(up: &PipelineUpload, output_size: vk::DeviceSize) -> Ore {
             extra_usage,
         },
         up.workgroups,
-    );
-    // Override secondary_bytes via a wrapper: store on a side ore is not
-    // necessary — we instead use the secondary buffer directly by pushing it
-    // through a "twin" ore when present. For now the engine's compute path
-    // sees secondary bytes via Ore::secondary_bytes (mesh case) — if the
-    // PipelineUpload carries a secondary buffer, drop it into a Mesh-shaped
-    // OreInput so the existing Ore::secondary_bytes returns it.
-    if !secondary.is_empty() {
-        let vertex_stride = std::mem::size_of::<ForgeVertex>();
-        let n_vertices = if up.element_stride == vertex_stride as u32 {
-            (up.primary_bytes.len() / vertex_stride) as u32
-        } else {
-            up.element_count
-        };
-        ore.input = OreInput::Mesh(MeshOre::new(
-            // Vertices are bytes-cast: we already encoded them in the
-            // ForgeVertex layout in `pack_primitive_vertices`, but we don't
-            // need to reconstruct the typed view — the staging path only
-            // reads `vertices_as_bytes`, so an empty vec works when the
-            // primary buffer was non-vertex. We keep the typed mirror only
-            // for mesh-shaped uploads (is_mesh = true).
-            if up.is_mesh { unpack_forge_vertices(&up.primary_bytes, n_vertices as usize) }
-                else      { ThinVec::new() },
-            unpack_u32(&secondary),
-        ));
-    }
-    ore
+    )
 }
 
 fn unpack_forge_vertices(bytes: &[u8], n: usize) -> ThinVec<ForgeVertex> {
@@ -751,6 +748,115 @@ pub fn collect_skin_palette_buffers(
 /// point for any renderer that animates the scene — re-uploading on each
 /// redraw both costs perf and risks destroying GPU resources still in
 /// flight from the previous frame's submission.
+/// World-space AABB enclosing every primitive's posed vertices in `asset`
+/// at `pose`. Skinned primitives use their rest positions multiplied by
+/// the bind-pose node world matrices, which approximates the rendered
+/// bounds well enough for a default camera fit (a perfect fit would
+/// require sampling the actual posed verts, which is overkill here).
+pub fn compute_asset_aabb(asset: &GltfAsset, pose: &Pose) -> ([f32; 3], [f32; 3]) {
+    let mut mn = [f32::INFINITY; 3];
+    let mut mx = [f32::NEG_INFINITY; 3];
+    let draws = build_graphics_draws_with_matrices(asset, &pose.world);
+    for d in draws.iter() {
+        let prim = &asset.meshes[d.mesh as usize].primitives[d.primitive as usize];
+        let w = d.world_matrix;
+        for p in prim.streams.positions.iter() {
+            // World transform of point p, column-major mat4 × vec3 (w=1).
+            let x = w[0] * p[0] + w[4] * p[1] + w[8]  * p[2] + w[12];
+            let y = w[1] * p[0] + w[5] * p[1] + w[9]  * p[2] + w[13];
+            let z = w[2] * p[0] + w[6] * p[1] + w[10] * p[2] + w[14];
+            mn[0] = mn[0].min(x); mx[0] = mx[0].max(x);
+            mn[1] = mn[1].min(y); mx[1] = mx[1].max(y);
+            mn[2] = mn[2].min(z); mx[2] = mx[2].max(z);
+        }
+    }
+    // Empty asset → unit cube around origin so the caller doesn't divide by 0.
+    if !mn[0].is_finite() {
+        return ([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]);
+    }
+    (mn, mx)
+}
+
+/// Compute a sensible default view-projection that frames `asset` in
+/// `viewport_aspect`'s frustum. Camera sits at center + (radius * 2.5)
+/// in the (+x, +y, +z) octant looking back at center, FoV ≈ 50°.
+pub fn default_view_projection(
+    asset: &GltfAsset, pose: &Pose, viewport_aspect: f32,
+) -> [f32; 16] {
+    let (mn, mx) = compute_asset_aabb(asset, pose);
+    let center = [
+        0.5 * (mn[0] + mx[0]),
+        0.5 * (mn[1] + mx[1]),
+        0.5 * (mn[2] + mx[2]),
+    ];
+    let half = [
+        0.5 * (mx[0] - mn[0]).max(1e-3),
+        0.5 * (mx[1] - mn[1]).max(1e-3),
+        0.5 * (mx[2] - mn[2]).max(1e-3),
+    ];
+    let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
+    let dist = radius * 2.5;
+    let eye = [center[0] + dist * 0.6, center[1] + dist * 0.4, center[2] + dist * 1.0];
+
+    let view = look_at_rh(eye, center, [0.0, 1.0, 0.0]);
+    // Vulkan-style reverse-Y perspective (Y is flipped vs. OpenGL); 50° FoV.
+    let fov_y = 50.0_f32.to_radians();
+    let near  = (radius * 0.01).max(0.001);
+    let far   = (radius * 10.0).max(100.0);
+    let proj  = perspective_rh_zo_y_down(fov_y, viewport_aspect.max(1e-3), near, far);
+    mat4_mul_cm(&proj, &view)
+}
+
+/// Column-major right-handed look-at. Returns the world→view matrix.
+fn look_at_rh(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [f32; 16] {
+    let f = normalize_v3([center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]]);
+    let s = normalize_v3(cross_v3(f, up));
+    let u = cross_v3(s, f);
+    [
+         s[0],  u[0], -f[0], 0.0,
+         s[1],  u[1], -f[1], 0.0,
+         s[2],  u[2], -f[2], 0.0,
+        -dot_v3(s, eye), -dot_v3(u, eye), dot_v3(f, eye), 1.0,
+    ]
+}
+
+/// Vulkan-clip-space perspective (right-handed, NDC z ∈ [0, 1], y flipped).
+fn perspective_rh_zo_y_down(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
+    let f = 1.0 / (fov_y * 0.5).tan();
+    let mut m = [0f32; 16];
+    m[0]  =  f / aspect;
+    m[5]  = -f;                       // y-flip for Vulkan NDC
+    m[10] =  far / (near - far);
+    m[11] = -1.0;
+    m[14] = (far * near) / (near - far);
+    m
+}
+
+#[inline]
+fn cross_v3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1],
+     a[2] * b[0] - a[0] * b[2],
+     a[0] * b[1] - a[1] * b[0]]
+}
+#[inline] fn dot_v3(a: [f32; 3], b: [f32; 3]) -> f32 { a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }
+#[inline]
+fn normalize_v3(v: [f32; 3]) -> [f32; 3] {
+    let l = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt().max(1e-30);
+    [v[0] / l, v[1] / l, v[2] / l]
+}
+#[inline]
+fn mat4_mul_cm(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut r = [0f32; 16];
+    for c in 0..4 {
+        for row in 0..4 {
+            let mut s = 0f32;
+            for k in 0..4 { s += a[k * 4 + row] * b[c * 4 + k]; }
+            r[c * 4 + row] = s;
+        }
+    }
+    r
+}
+
 pub fn build_graphics_plans_maximal_with_meshes(
     asset:         &GltfAsset,
     pose:          &Pose,
@@ -758,6 +864,31 @@ pub fn build_graphics_plans_maximal_with_meshes(
     material_sets: &[Option<vk::DescriptorSet>],
     morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
     skinning:      &SkinningFrame,
+) -> ThinVec<GraphicsFramePlan> {
+    build_graphics_plans_maximal_with_meshes_vp(
+        asset, pose, meshes, material_sets, morph_buffers, skinning, &IDENTITY_MAT4,
+    )
+}
+
+const IDENTITY_MAT4: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+];
+
+/// Same as `build_graphics_plans_maximal_with_meshes`, but multiplies a
+/// caller-supplied view-projection matrix into each draw's MVP so the
+/// rasterizer actually gets clip-space coordinates. Pass identity to keep
+/// the original "MVP = world only" behaviour.
+pub fn build_graphics_plans_maximal_with_meshes_vp(
+    asset:         &GltfAsset,
+    pose:          &Pose,
+    meshes:        &std::collections::HashMap<(usize, usize), Arc<GpuMesh>>,
+    material_sets: &[Option<vk::DescriptorSet>],
+    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    skinning:      &SkinningFrame,
+    view_proj:     &[f32; 16],
 ) -> ThinVec<GraphicsFramePlan> {
     let draws = build_graphics_draws_with_matrices(asset, &pose.world);
     let mut plans = ThinVec::with_capacity(draws.len());
@@ -774,6 +905,7 @@ pub fn build_graphics_plans_maximal_with_meshes(
             skinning.palette_sets_by_node.get(&(d.node as usize)).copied()
         } else { None };
 
+        let mvp = mat4_mul_cm(view_proj, &d.world_matrix);
         let mut plan = GraphicsFramePlan::new_mesh(
             crate::forge_master::frame::FrameId::new((i + 1) as i64),
             d.material
@@ -781,7 +913,7 @@ pub fn build_graphics_plans_maximal_with_meshes(
                 .unwrap_or_else(|| format!("animated_prim_{i}")),
             mesh.clone(),
         )
-        .with_mvp(d.world_matrix);
+        .with_mvp(mvp);
         if let Some(mat_idx) = d.material {
             if let Some(Some(set)) = material_sets.get(mat_idx as usize) {
                 plan = plan.with_material_set(*set);

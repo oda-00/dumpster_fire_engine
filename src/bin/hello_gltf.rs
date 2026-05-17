@@ -27,8 +27,9 @@ use dumpster_fire_engine::render::{
     Window, WindowId as RenderWindowId,
 };
 use dumpster_fire_engine::resource_manager::asset_manager::{
-    build_graphics_plans_maximal_with_meshes, build_skin_morph_proto,
+    build_graphics_plans_maximal_with_meshes_vp, build_skin_morph_proto,
     collect_morph_output_buffers, collect_skin_palette_buffers,
+    default_view_projection,
     forge_gltf::{GltfAsset, Pose}, load_asset,
     pack_primitive_skin_attrs, primitive_is_skinned, register_skin_morph_forges,
     upload_all_primitive_meshes, SkinningFrame,
@@ -375,13 +376,27 @@ impl ApplicationHandler for App {
                             palette_sets_by_node,
                         };
 
-                        let plans = build_graphics_plans_maximal_with_meshes(
+                        // Fit a default camera around the asset's posed bounds
+                        // so the whole model lands inside Vulkan's clip space
+                        // (-1..1 in X/Y, 0..1 in Z). Without this the raw model-
+                        // space coordinates fall outside NDC for anything bigger
+                        // than ~2 units and nothing rasterises.
+                        let extent = live.renderer
+                            .window(live.window_handle)
+                            .and_then(|w| w.graphics.as_ref())
+                            .map(|g| g.swapchain_extent)
+                            .unwrap_or(ash::vk::Extent2D { width: 1024, height: 768 });
+                        let aspect = extent.width as f32 / extent.height.max(1) as f32;
+                        let view_proj = default_view_projection(&state.asset, &state.pose, aspect);
+
+                        let plans = build_graphics_plans_maximal_with_meshes_vp(
                             &state.asset,
                             &state.pose,
                             &state.meshes,
                             &state.material_sets,
                             &morph_buffers,
                             &skinning,
+                            &view_proj,
                         );
                         let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "gltf_scene");
                         for plan in plans { proto.push_call(plan); }
@@ -446,10 +461,15 @@ fn upload_materials(
         }
     }
 
-    // Upload each image.
+    // Upload each image, picking the Vulkan format from the forge_gltf
+    // sRGB-vs-linear hint so sampler de-gamma fires on albedo/emissive.
     let img_handles: Vec<Option<_>> = asset.images.iter().enumerate()
         .map(|(i, img)| {
-            match upload_texture_rgba(&upload_ctx, img.width, img.height, &img.rgba, &img_samplers[i]) {
+            let fmt = match img.format {
+                forge_gltf::ImageFormatHint::Srgb   => vk::Format::R8G8B8A8_SRGB,
+                forge_gltf::ImageFormatHint::Linear => vk::Format::R8G8B8A8_UNORM,
+            };
+            match upload_texture_rgba(&upload_ctx, img.width, img.height, &img.rgba, &img_samplers[i], fmt) {
                 Ok(tex) => Some(cache.textures.insert(tex)),
                 Err(e)  => {
                     eprintln!("texture upload failed (image {i}): {e:?}");

@@ -204,6 +204,12 @@ pub enum OreInput {
     Bytes(ThinVec<u8>),
     Mesh(MeshOre),
     Texture(TextureOre),
+    /// Two raw byte buffers — primary goes to binding 0, secondary to
+    /// binding 1. Used by compute pipelines whose secondary input is
+    /// neither an index list nor mesh-shaped (e.g. SkinPalette: primary =
+    /// joint world matrices, secondary = inverse-bind matrices; both are
+    /// `mat4[]` SSBOs, neither matches the `MeshOre` shape).
+    DualBytes { primary: ThinVec<u8>, secondary: ThinVec<u8> },
     Empty,
 }
 
@@ -249,6 +255,7 @@ impl Ore {
 
     pub fn primary_bytes(&self) -> ThinVec<u8> {
         match &self.input {
+            OreInput::DualBytes { primary, .. } => primary.clone(),
             OreInput::Bytes(bytes) => bytes.clone(),
             OreInput::Mesh(mesh) => vertices_as_bytes(&mesh.vertices).iter().copied().collect(),
             OreInput::Texture(texture) => texture.pixels.clone(),
@@ -258,6 +265,7 @@ impl Ore {
 
     pub fn secondary_bytes(&self) -> ThinVec<u8> {
         match &self.input {
+            OreInput::DualBytes { secondary, .. } if !secondary.is_empty() => secondary.clone(),
             OreInput::Mesh(mesh) if !mesh.indices.is_empty() => {
                 indices_as_bytes(&mesh.indices).iter().copied().collect()
             }

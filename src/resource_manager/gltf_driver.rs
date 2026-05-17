@@ -328,7 +328,12 @@ impl GltfCache {
             return Ok(h);
         }
         let white = [255u8, 255, 255, 255];
-        let tex = upload_texture_rgba(ctx, 1, 1, &white, &GltfSampler::default())?;
+        // Dummy is a constant white texel — linear UNORM is fine (no gamma
+        // ambiguity in pure white).
+        let tex = upload_texture_rgba(
+            ctx, 1, 1, &white, &GltfSampler::default(),
+            vk::Format::R8G8B8A8_UNORM,
+        )?;
         let h = self.textures.insert(tex);
         self.dummy_tex = Some(h);
         Ok(h)
@@ -351,6 +356,7 @@ pub fn upload_texture_rgba(
     height:  u32,
     rgba:    &[u8],
     sampler: &GltfSampler,
+    format:  vk::Format,
 ) -> Result<GpuTexture, ForgeError> {
     let device = ctx.device;
     let mp     = ctx.memory_properties;
@@ -371,7 +377,7 @@ pub fn upload_texture_rgba(
 
     let image = ForgeImage::create_2d(
         device, mp, w, h,
-        vk::Format::R8G8B8A8_UNORM,
+        format,
         vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
         vk::MemoryPropertyFlags::DEVICE_LOCAL,
     )?;
@@ -555,11 +561,22 @@ pub fn load_full_document(
     }
 
     // Upload all images → TextureHandle per image index.
+    //
+    // The Vulkan format is chosen from the per-image `format` hint that
+    // `forge_gltf` set during extraction: sRGB-encoded source data (albedo,
+    // emissive) goes to R8G8B8A8_SRGB so the sampler does the de-gamma
+    // automatically; everything else (normal, metallicRoughness, occlusion,
+    // data) goes to R8G8B8A8_UNORM. Without this distinction sRGB textures
+    // come out about 2× too bright in linear shading.
     let img_handles: Vec<Option<TextureHandle>> = asset.images
         .iter()
         .enumerate()
         .map(|(i, img)| {
-            upload_texture_rgba(ctx, img.width, img.height, &img.rgba, &img_samplers[i])
+            let fmt = match img.format {
+                forge_gltf::ImageFormatHint::Srgb   => vk::Format::R8G8B8A8_SRGB,
+                forge_gltf::ImageFormatHint::Linear => vk::Format::R8G8B8A8_UNORM,
+            };
+            upload_texture_rgba(ctx, img.width, img.height, &img.rgba, &img_samplers[i], fmt)
                 .ok()
                 .map(|t| cache.textures.insert(t))
         })
