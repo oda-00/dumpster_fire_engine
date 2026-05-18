@@ -207,6 +207,15 @@ pub struct GltfUploadCtx<'a> {
     pub command_pool:        vk::CommandPool,
     pub material_set_layout: vk::DescriptorSetLayout,
     pub material_pool:       vk::DescriptorPool,
+    /// Layout for set 3 — per-instance mat4 SSBO. One binding (binding 0 =
+    /// STORAGE_BUFFER at vertex stage). Reused for both the dummy
+    /// identity set and every per-draw instance set.
+    pub instance_set_layout: vk::DescriptorSetLayout,
+    /// Pool from which both the dummy identity set and per-frame
+    /// per-draw instance sets are allocated. Sized for ~4096 sets +
+    /// 4096 storage buffers — re-growable via
+    /// FREE_DESCRIPTOR_SET_BIT if the engine needs more.
+    pub instance_pool:       vk::DescriptorPool,
 }
 
 /// Build the descriptor-set layout for material set 1 — must match what the
@@ -317,6 +326,39 @@ pub fn create_material_pool(
     unsafe { device.create_descriptor_pool(&info, None).map_err(ForgeError::Vk) }
 }
 
+/// Build the descriptor-set layout for set 3 — per-instance mat4 SSBO
+/// at binding 0 (vertex stage). Used by ForwardLit and
+/// SkinnedForwardLit. Shared between the dummy identity set and every
+/// per-draw instance set.
+pub fn create_instance_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout, ForgeError> {
+    let bindings = [vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)];
+    let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    unsafe { device.create_descriptor_set_layout(&info, None).map_err(ForgeError::Vk) }
+}
+
+/// Pool sized for `max_sets` per-instance descriptor sets. Each set has
+/// one STORAGE_BUFFER descriptor. Sets can be individually freed
+/// (FREE_DESCRIPTOR_SET) so per-frame allocations don't leak.
+pub fn create_instance_pool(
+    device:   &ash::Device,
+    max_sets: u32,
+) -> Result<vk::DescriptorPool, ForgeError> {
+    let pool_sizes = [vk::DescriptorPoolSize::default()
+        .ty(vk::DescriptorType::STORAGE_BUFFER)
+        .descriptor_count(max_sets)];
+    let info = vk::DescriptorPoolCreateInfo::default()
+        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+        .max_sets(max_sets)
+        .pool_sizes(&pool_sizes);
+    unsafe { device.create_descriptor_pool(&info, None).map_err(ForgeError::Vk) }
+}
+
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
 pub struct GltfCache {
@@ -329,6 +371,19 @@ pub struct GltfCache {
     dummy_material:   Option<vk::DescriptorSet>,
     /// Backing UBO for `dummy_material`; we own it to free it on drop.
     dummy_material_ubo: Option<ForgeBuffer>,
+    /// Dummy single-element identity matrix SSBO + descriptor set for
+    /// set 3. The vertex shader always reads
+    /// `instances.m[gl_InstanceIndex]`, so non-instanced draws need
+    /// this bound at slot 3 — index 0 reads identity and the
+    /// multiplication is a no-op.
+    dummy_instance_set:    Option<vk::DescriptorSet>,
+    dummy_instance_buffer: Option<ForgeBuffer>,
+    /// Per-frame instance buffers + descriptor sets allocated by
+    /// `create_instance_matrices_set`. Tracked here so they can be
+    /// freed (FREE_DESCRIPTOR_SET) on `flush_per_frame_instances`
+    /// — typically called at the start of each frame before
+    /// re-uploading.
+    per_frame_instance_sets:    Vec<(vk::DescriptorSet, ForgeBuffer)>,
     /// Device handle stored so `Drop` can destroy every GPU resource the
     /// cache owns. `ash::Device` clones bump an inner Arc — cheap.
     device:           Option<ash::Device>,
@@ -344,6 +399,9 @@ impl GltfCache {
             dummy_tex:          None,
             dummy_material:     None,
             dummy_material_ubo: None,
+            dummy_instance_set:    None,
+            dummy_instance_buffer: None,
+            per_frame_instance_sets: Vec::new(),
             device:             Some(device),
         }
     }
@@ -358,6 +416,9 @@ impl GltfCache {
             dummy_tex:          None,
             dummy_material:     None,
             dummy_material_ubo: None,
+            dummy_instance_set:    None,
+            dummy_instance_buffer: None,
+            per_frame_instance_sets: Vec::new(),
             device:          None,
         }
     }
@@ -475,6 +536,73 @@ impl GltfCache {
         self.dummy_material
     }
 
+    /// Ensure the dummy single-identity per-instance SSBO + descriptor
+    /// set exists. Bound at set 3 for every non-instanced draw so the
+    /// vertex shader's `instances.m[gl_InstanceIndex]` read returns
+    /// identity for `gl_InstanceIndex == 0`.
+    pub fn ensure_dummy_instance_matrices(
+        &mut self,
+        ctx: &GltfUploadCtx<'_>,
+    ) -> Result<vk::DescriptorSet, ForgeError> {
+        if let Some(set) = self.dummy_instance_set {
+            return Ok(set);
+        }
+        let identity: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(identity.as_ptr() as *const u8, 64)
+        };
+        let (set, buf) = create_instance_matrices_set_impl(ctx, bytes)?;
+        self.dummy_instance_buffer = Some(buf);
+        self.dummy_instance_set    = Some(set);
+        Ok(set)
+    }
+
+    pub fn dummy_instance_set(&self) -> Option<vk::DescriptorSet> {
+        self.dummy_instance_set
+    }
+
+    /// Allocate a per-draw instance descriptor set + DEVICE_LOCAL SSBO,
+    /// upload `matrices`, and stash both for cleanup on the next
+    /// `flush_per_frame_instances` call. Returns the descriptor set
+    /// handle the caller binds at set 3.
+    pub fn create_instance_matrices_set(
+        &mut self,
+        ctx:      &GltfUploadCtx<'_>,
+        matrices: &[[f32; 16]],
+    ) -> Result<vk::DescriptorSet, ForgeError> {
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                matrices.as_ptr() as *const u8,
+                matrices.len() * 64,
+            )
+        };
+        let (set, buf) = create_instance_matrices_set_impl(ctx, bytes)?;
+        self.per_frame_instance_sets.push((set, buf));
+        Ok(set)
+    }
+
+    /// Free every per-frame instance descriptor set + SSBO. Caller MUST
+    /// have ensured the GPU is finished with last frame's draws (fence
+    /// wait) before invoking — otherwise the device-local buffer
+    /// destruction races with in-flight reads.
+    pub fn flush_per_frame_instances(&mut self, device: &ash::Device, pool: vk::DescriptorPool) {
+        let mut sets_to_free: Vec<vk::DescriptorSet> = Vec::new();
+        for (set, mut buf) in self.per_frame_instance_sets.drain(..) {
+            sets_to_free.push(set);
+            unsafe { buf.destroy(device); }
+        }
+        if !sets_to_free.is_empty() {
+            unsafe {
+                let _ = device.free_descriptor_sets(pool, &sets_to_free);
+            }
+        }
+    }
+
     pub fn texture(&self, h: TextureHandle) -> Option<&GpuTexture> {
         self.textures.get(h)
     }
@@ -495,8 +623,75 @@ impl GltfCache {
             if let Some(mut ubo) = self.dummy_material_ubo.take() {
                 ubo.destroy(device);
             }
+            if let Some(mut buf) = self.dummy_instance_buffer.take() {
+                buf.destroy(device);
+            }
+            for (_, mut buf) in self.per_frame_instance_sets.drain(..) {
+                buf.destroy(device);
+            }
         }
     }
+}
+
+/// Allocate one descriptor set against the instance-set layout, upload
+/// `bytes` into a fresh DEVICE_LOCAL STORAGE_BUFFER, and bind the
+/// buffer at binding 0 of the set. Caller owns the returned buffer
+/// until the next pool reset or explicit destroy.
+fn create_instance_matrices_set_impl(
+    ctx:   &GltfUploadCtx<'_>,
+    bytes: &[u8],
+) -> Result<(vk::DescriptorSet, ForgeBuffer), ForgeError> {
+    let device = ctx.device;
+    let mp     = ctx.memory_properties;
+    let size   = bytes.len() as vk::DeviceSize;
+
+    // Staging upload pattern shared with other GPU resource paths.
+    let mut staging = ForgeBuffer::create(
+        device, mp, size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )?;
+    staging.write_bytes(device, bytes)?;
+    let buf = ForgeBuffer::create(
+        device, mp, size,
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+    unsafe {
+        let cb = alloc_single_cmd(device, ctx.command_pool)?;
+        let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)
+            .map_err(ForgeError::Vk)?;
+        device.begin_command_buffer(cb,
+            &vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        ).map_err(ForgeError::Vk)?;
+        device.cmd_copy_buffer(cb, staging.handle, buf.handle,
+            &[vk::BufferCopy::default().size(size)]);
+        device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
+        device.queue_submit(ctx.graphics_queue,
+            &[vk::SubmitInfo::default().command_buffers(&[cb])], fence)
+            .map_err(ForgeError::Vk)?;
+        device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+        device.destroy_fence(fence, None);
+        device.free_command_buffers(ctx.command_pool, &[cb]);
+        staging.destroy(device);
+    }
+
+    let set = unsafe {
+        device.allocate_descriptor_sets(
+            &vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(ctx.instance_pool)
+                .set_layouts(&[ctx.instance_set_layout]),
+        ).map_err(ForgeError::Vk)?.remove(0)
+    };
+    let buf_info = [vk::DescriptorBufferInfo::default()
+        .buffer(buf.handle).offset(0).range(size)];
+    let writes = [vk::WriteDescriptorSet::default()
+        .dst_set(set).dst_binding(0)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .buffer_info(&buf_info)];
+    unsafe { device.update_descriptor_sets(&writes, &[]); }
+    Ok((set, buf))
 }
 
 impl Drop for GltfCache {

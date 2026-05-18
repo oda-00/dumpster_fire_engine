@@ -272,9 +272,15 @@ pub struct GraphicsMold {
     /// Set 1 layout (material UBO + 5 texture samplers) for ForwardLit /
     /// SkinnedForwardLit. `null()` for non-ForwardLit kinds.
     pub material_set_layout: vk::DescriptorSetLayout,
-    /// Set 2 layout (single STORAGE_BUFFER for the skin palette) — only
-    /// populated on SkinnedForwardLit; `null()` everywhere else.
+    /// Set 2 layout (single STORAGE_BUFFER for the skin palette).
+    /// For SkinnedForwardLit: a real layout with one STORAGE_BUFFER binding.
+    /// For ForwardLit: an empty layout (placeholder so the instance set
+    /// lands at slot 3). `null()` for Ui.
     pub skin_set_layout: vk::DescriptorSetLayout,
+    /// Set 3 layout (single STORAGE_BUFFER for the per-instance mat4
+    /// array, EXT_mesh_gpu_instancing). ForwardLit + SkinnedForwardLit
+    /// only; `null()` for Ui.
+    pub instance_set_layout: vk::DescriptorSetLayout,
     pub pipeline_layout: vk::PipelineLayout,
     pub pipeline: vk::Pipeline,
 }
@@ -457,6 +463,9 @@ impl GraphicsForge {
 
         // Set 2 — skin palette SSBO (SkinnedForwardLit only):
         //   binding 0 = STORAGE_BUFFER (vertex), one mat4[] per joint.
+        // For non-skinned ForwardLit we still need a layout object at slot 2
+        // (the instance set lives at slot 3 and Vulkan pipeline layouts
+        // are positional). An empty layout fills that gap.
         let skin_set_layout = if matches!(self.kind, GraphicsOreKind::SkinnedForwardLit) {
             let bindings = [vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -468,6 +477,55 @@ impl GraphicsForge {
                 Ok(l) => l,
                 Err(e) => {
                     unsafe {
+                        if material_set_layout != vk::DescriptorSetLayout::null() {
+                            device.destroy_descriptor_set_layout(material_set_layout, None);
+                        }
+                        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                        device.destroy_render_pass(render_pass, None);
+                    }
+                    return Err(ForgeError::Vk(e));
+                }
+            }
+        } else if matches!(self.kind, GraphicsOreKind::ForwardLit) {
+            // Empty layout — placeholder so the instance set lands at slot 3.
+            let info = vk::DescriptorSetLayoutCreateInfo::default();
+            match unsafe { device.create_descriptor_set_layout(&info, None) } {
+                Ok(l) => l,
+                Err(e) => {
+                    unsafe {
+                        if material_set_layout != vk::DescriptorSetLayout::null() {
+                            device.destroy_descriptor_set_layout(material_set_layout, None);
+                        }
+                        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                        device.destroy_render_pass(render_pass, None);
+                    }
+                    return Err(ForgeError::Vk(e));
+                }
+            }
+        } else {
+            vk::DescriptorSetLayout::null()
+        };
+
+        // Set 3 — per-instance mat4 SSBO (EXT_mesh_gpu_instancing).
+        //   binding 0 = STORAGE_BUFFER (vertex), one mat4[] per instance.
+        // ForwardLit + SkinnedForwardLit both expose this; Ui does not.
+        let instance_set_layout = if matches!(
+            self.kind,
+            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit,
+        ) {
+            let bindings = [vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)];
+            let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+            match unsafe { device.create_descriptor_set_layout(&info, None) } {
+                Ok(l) => l,
+                Err(e) => {
+                    unsafe {
+                        if skin_set_layout != vk::DescriptorSetLayout::null() {
+                            device.destroy_descriptor_set_layout(skin_set_layout, None);
+                        }
                         if material_set_layout != vk::DescriptorSetLayout::null() {
                             device.destroy_descriptor_set_layout(material_set_layout, None);
                         }
@@ -490,15 +548,14 @@ impl GraphicsForge {
                     .size(64)], // sizeof(mat4)
             GraphicsOreKind::Ui => &[],
         };
-        // Build set_layouts slice — 1/2/3 entries depending on the kind.
-        let set_layouts_three = [descriptor_set_layout, material_set_layout, skin_set_layout];
-        let set_layouts_two   = [descriptor_set_layout, material_set_layout];
-        let set_layouts_one   = [descriptor_set_layout];
+        // Build set_layouts slice. ForwardLit / SkinnedForwardLit both
+        // have 4 slots [camera_actor, material, skin/empty, instance];
+        // Ui only has 1 (camera_actor).
+        let set_layouts_four = [descriptor_set_layout, material_set_layout, skin_set_layout, instance_set_layout];
+        let set_layouts_one  = [descriptor_set_layout];
         let set_layouts_ref: &[vk::DescriptorSetLayout] =
-            if skin_set_layout != vk::DescriptorSetLayout::null() {
-                &set_layouts_three
-            } else if material_set_layout != vk::DescriptorSetLayout::null() {
-                &set_layouts_two
+            if instance_set_layout != vk::DescriptorSetLayout::null() {
+                &set_layouts_four
             } else {
                 &set_layouts_one
             };
@@ -511,6 +568,9 @@ impl GraphicsForge {
             Ok(l) => l,
             Err(e) => {
                 unsafe {
+                    if instance_set_layout != vk::DescriptorSetLayout::null() {
+                        device.destroy_descriptor_set_layout(instance_set_layout, None);
+                    }
                     if skin_set_layout != vk::DescriptorSetLayout::null() {
                         device.destroy_descriptor_set_layout(skin_set_layout, None);
                     }
@@ -526,6 +586,9 @@ impl GraphicsForge {
 
         // Shader modules — destroyed before returning regardless of outcome.
         let destroy_layouts = |device: &ash::Device| unsafe {
+            if instance_set_layout != vk::DescriptorSetLayout::null() {
+                device.destroy_descriptor_set_layout(instance_set_layout, None);
+            }
             if skin_set_layout != vk::DescriptorSetLayout::null() {
                 device.destroy_descriptor_set_layout(skin_set_layout, None);
             }
@@ -724,6 +787,7 @@ impl GraphicsForge {
             descriptor_set_layout,
             material_set_layout,
             skin_set_layout,
+            instance_set_layout,
             pipeline_layout,
             pipeline,
         })
@@ -740,6 +804,10 @@ impl GraphicsMold {
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 device.destroy_pipeline_layout(self.pipeline_layout, None);
                 self.pipeline_layout = vk::PipelineLayout::null();
+            }
+            if self.instance_set_layout != vk::DescriptorSetLayout::null() {
+                device.destroy_descriptor_set_layout(self.instance_set_layout, None);
+                self.instance_set_layout = vk::DescriptorSetLayout::null();
             }
             if self.skin_set_layout != vk::DescriptorSetLayout::null() {
                 device.destroy_descriptor_set_layout(self.skin_set_layout, None);

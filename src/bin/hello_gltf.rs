@@ -125,6 +125,10 @@ struct LiveState {
     /// per-frame palette set allocations recycle.
     skin_pool:         vk::DescriptorPool,
     skin_set_layout:   vk::DescriptorSetLayout,
+    /// Per-instance mat4 SSBO pool — re-used across frames; per-draw
+    /// sets get freed each frame after the fence wait.
+    instance_pool:     vk::DescriptorPool,
+    instance_layout:   vk::DescriptorSetLayout,
     renderer:          Renderer,
     window_handle:     dumpster_fire_engine::render::WindowHandle,
     winit_id:          WindowId,
@@ -148,6 +152,12 @@ impl Drop for LiveState {
             }
             if self.material_pool != vk::DescriptorPool::null() {
                 self.ctx.device.destroy_descriptor_pool(self.material_pool, None);
+            }
+            if self.instance_pool != vk::DescriptorPool::null() {
+                self.ctx.device.destroy_descriptor_pool(self.instance_pool, None);
+            }
+            if self.instance_layout != vk::DescriptorSetLayout::null() {
+                self.ctx.device.destroy_descriptor_set_layout(self.instance_layout, None);
             }
             // Note: material_layout is owned by the GraphicsMold (the
             // renderer's window) and gets destroyed there. We just
@@ -252,10 +262,19 @@ impl ApplicationHandler for App {
         let skin_pool = create_skin_palette_pool(&ctx.device, 256)
             .expect("create skin descriptor pool");
 
+        // Per-instance mat4 descriptor layout + pool (set 3,
+        // EXT_mesh_gpu_instancing). Per-draw sets get freed each frame
+        // via FREE_DESCRIPTOR_SET after the fence wait.
+        let instance_layout = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(&ctx.device)
+            .expect("create instance set layout");
+        let instance_pool = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 4096)
+            .expect("create instance descriptor pool");
+
         self.live = Some(LiveState {
             ctx, renderer, window_handle, winit_id,
             material_pool, material_layout,
             skin_pool, skin_set_layout,
+            instance_pool, instance_layout,
         });
         if let Some(gfx) = &self.live.as_ref().unwrap().renderer
             .window(self.live.as_ref().unwrap().window_handle)
@@ -450,10 +469,32 @@ impl ApplicationHandler for App {
                             command_pool:        live.ctx.command_pool,
                             material_set_layout: live.material_layout,
                             material_pool:       live.material_pool,
+                            instance_set_layout: live.instance_layout,
+                            instance_pool:       live.instance_pool,
                         };
                         let fallback_material = state.cache
                             .ensure_dummy_material(&upload_ctx_for_dummy)
                             .ok();
+                        let dummy_instance_set = state.cache
+                            .ensure_dummy_instance_matrices(&upload_ctx_for_dummy)
+                            .ok();
+                        // Allocate per-draw per-instance SSBO sets for
+                        // any node that declares EXT_mesh_gpu_instancing.
+                        // Single upload per (mesh, prim) per frame.
+                        let mut instance_sets: std::collections::HashMap<(usize, usize), vk::DescriptorSet>
+                            = std::collections::HashMap::new();
+                        let draws_for_instances = forge_gltf::build_graphics_draws_with_matrices(
+                            &state.asset, &state.pose.world);
+                        for d in &draws_for_instances {
+                            if d.instance_matrices.is_empty() { continue; }
+                            let key = (d.mesh as usize, d.primitive as usize);
+                            if instance_sets.contains_key(&key) { continue; }
+                            if let Ok(set) = state.cache.create_instance_matrices_set(
+                                &upload_ctx_for_dummy, &d.instance_matrices,
+                            ) {
+                                instance_sets.insert(key, set);
+                            }
+                        }
                         let plans = build_graphics_plans_maximal_with_meshes_vp(
                             &state.asset,
                             &state.pose,
@@ -463,6 +504,8 @@ impl ApplicationHandler for App {
                             &skinning,
                             &view_proj,
                             fallback_material,
+                            &instance_sets,
+                            dummy_instance_set,
                         );
                         let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(1), "gltf_scene");
                         for plan in plans { proto.push_call(plan); }
@@ -511,6 +554,8 @@ fn upload_materials(
         command_pool:        ctx.command_pool,
         material_set_layout: live.material_layout,
         material_pool:       live.material_pool,
+        instance_set_layout: live.instance_layout,
+        instance_pool:       live.instance_pool,
     };
 
     // Resolve per-image sampler from the first texture pointing at it.

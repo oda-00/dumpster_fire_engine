@@ -471,6 +471,10 @@ fn gltf_driver_uploads_dummy_white_texture() {
     let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(&ctx.device)
         .expect("material set layout");
     let pool = create_material_pool(&ctx.device, 16).expect("material pool");
+    let instance_layout = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(&ctx.device)
+        .expect("instance set layout");
+    let instance_pool = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
+        .expect("instance pool");
     let upload = GltfUploadCtx {
         device:              &ctx.device,
         memory_properties:   &ctx.memory_properties,
@@ -478,6 +482,8 @@ fn gltf_driver_uploads_dummy_white_texture() {
         command_pool:        ctx.command_pool,
         material_set_layout: layout,
         material_pool:       pool,
+        instance_set_layout: instance_layout,
+        instance_pool,
     };
     use ash::vk::Handle;
     let tex = upload_texture_rgba(
@@ -505,6 +511,10 @@ fn upload_texture_generates_full_mip_chain_on_64x64() {
     let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(&ctx.device)
         .expect("material set layout");
     let pool = create_material_pool(&ctx.device, 4).expect("material pool");
+    let instance_layout = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(&ctx.device)
+        .expect("instance set layout");
+    let instance_pool = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
+        .expect("instance pool");
     let upload = GltfUploadCtx {
         device:              &ctx.device,
         memory_properties:   &ctx.memory_properties,
@@ -512,6 +522,8 @@ fn upload_texture_generates_full_mip_chain_on_64x64() {
         command_pool:        ctx.command_pool,
         material_set_layout: layout,
         material_pool:       pool,
+        instance_set_layout: instance_layout,
+        instance_pool,
     };
     // 64×64 RGBA — 64 = 2^6, so we expect 7 mip levels (64, 32, 16, 8, 4, 2, 1).
     let rgba = vec![128u8; 64 * 64 * 4];
@@ -540,6 +552,10 @@ fn gltf_driver_creates_material_descriptor_set_for_toycar() {
         .expect("material set layout");
     // ToyCar has ~5 materials and ~5 textures — 64 sets is plenty.
     let pool = create_material_pool(&ctx.device, 64).expect("material pool");
+    let instance_layout = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(&ctx.device)
+        .expect("instance set layout");
+    let instance_pool = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
+        .expect("instance pool");
     let upload = GltfUploadCtx {
         device:              &ctx.device,
         memory_properties:   &ctx.memory_properties,
@@ -547,6 +563,8 @@ fn gltf_driver_creates_material_descriptor_set_for_toycar() {
         command_pool:        ctx.command_pool,
         material_set_layout: layout,
         material_pool:       pool,
+        instance_set_layout: instance_layout,
+        instance_pool,
     };
     let mut cache = GltfCache::detached();
 

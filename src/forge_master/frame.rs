@@ -162,6 +162,12 @@ pub struct GraphicsFramePlan {
     /// Optional skin-palette descriptor set (set 2). Resolved from the
     /// SkinPalette compute Ingot's buffer each frame.
     pub skin_palette_set: Option<vk::DescriptorSet>,
+    /// Optional per-instance mat4 SSBO descriptor set (set 3). For
+    /// EXT_mesh_gpu_instancing draws this points at a per-draw allocation
+    /// containing the instance offset matrices. For non-instanced draws
+    /// (or when `None`), the dummy-identity set kept by the cache binds
+    /// instead so the shader's gl_InstanceIndex==0 read returns identity.
+    pub instance_set: Option<vk::DescriptorSet>,
 }
 
 impl GraphicsFramePlan {
@@ -186,6 +192,7 @@ impl GraphicsFramePlan {
             vertex_buffer_override: None,
             skin_vertex_buffer: None,
             skin_palette_set: None,
+            instance_set: None,
         }
     }
 
@@ -209,6 +216,7 @@ impl GraphicsFramePlan {
             vertex_buffer_override: None,
             skin_vertex_buffer: None,
             skin_palette_set: None,
+            instance_set: None,
         }
     }
 
@@ -284,7 +292,16 @@ impl GraphicsFramePlan {
             vertex_buffer_override: self.vertex_buffer_override,
             skin_vertex_buffer:     self.skin_vertex_buffer,
             skin_palette_set:       self.skin_palette_set,
+            instance_set:           self.instance_set,
         }
+    }
+
+    /// Attach a per-instance mat4 SSBO descriptor set (set 3) to the
+    /// upcoming draw. The set must reference a buffer with at least one
+    /// mat4 entry; passing `None` keeps the dummy-identity binding.
+    pub fn with_instance_set(mut self, set: vk::DescriptorSet) -> GraphicsFramePlan {
+        self.instance_set = Some(set);
+        self
     }
 }
 
@@ -311,4 +328,5 @@ pub struct GraphicsFrame {
     pub vertex_buffer_override: Option<vk::Buffer>,
     pub skin_vertex_buffer:     Option<vk::Buffer>,
     pub skin_palette_set:       Option<vk::DescriptorSet>,
+    pub instance_set:           Option<vk::DescriptorSet>,
 }

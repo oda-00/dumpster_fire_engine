@@ -1005,7 +1005,7 @@ pub fn build_graphics_plans_maximal_with_meshes(
 ) -> ThinVec<GraphicsFramePlan> {
     build_graphics_plans_maximal_with_meshes_vp(
         asset, pose, meshes, material_sets, morph_buffers, skinning,
-        &IDENTITY_MAT4, None,
+        &IDENTITY_MAT4, None, &std::collections::HashMap::new(), None,
     )
 }
 
@@ -1020,15 +1020,24 @@ const IDENTITY_MAT4: [f32; 16] = [
 /// caller-supplied view-projection matrix into each draw's MVP so the
 /// rasterizer actually gets clip-space coordinates. Pass identity to keep
 /// the original "MVP = world only" behaviour.
+/// Maximal plan builder.
+///
+/// `instance_sets` carries per-(mesh_idx, prim_idx) per-instance mat4
+/// descriptor sets allocated this frame by
+/// `cache.create_instance_matrices_set`. Draws without an entry fall back
+/// to `dummy_instance_set` (1×identity); callers must call
+/// `cache.ensure_dummy_instance_matrices` first to obtain it.
 pub fn build_graphics_plans_maximal_with_meshes_vp(
-    asset:             &GltfAsset,
-    pose:              &Pose,
-    meshes:            &std::collections::HashMap<(usize, usize), Arc<GpuMesh>>,
-    material_sets:     &[Option<vk::DescriptorSet>],
-    morph_buffers:     &std::collections::HashMap<(usize, usize), vk::Buffer>,
-    skinning:          &SkinningFrame,
-    view_proj:         &[f32; 16],
-    fallback_material: Option<vk::DescriptorSet>,
+    asset:                  &GltfAsset,
+    pose:                   &Pose,
+    meshes:                 &std::collections::HashMap<(usize, usize), Arc<GpuMesh>>,
+    material_sets:          &[Option<vk::DescriptorSet>],
+    morph_buffers:          &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    skinning:               &SkinningFrame,
+    view_proj:              &[f32; 16],
+    fallback_material:      Option<vk::DescriptorSet>,
+    instance_sets:          &std::collections::HashMap<(usize, usize), vk::DescriptorSet>,
+    dummy_instance_set:     Option<vk::DescriptorSet>,
 ) -> ThinVec<GraphicsFramePlan> {
     let draws = build_graphics_draws_with_matrices(asset, &pose.world);
     let mut plans = ThinVec::with_capacity(draws.len());
@@ -1068,14 +1077,22 @@ pub fn build_graphics_plans_maximal_with_meshes_vp(
             plan = plan.with_vertex_buffer_override(buf);
         }
         // EXT_mesh_gpu_instancing: when the draw carries per-instance
-        // matrices, fan it out by passing the count to the GPU's
-        // `vkCmdDrawIndexed(instanceCount = count, ...)`. The per-
-        // instance offsets need to land in a vertex shader binding;
-        // until that pipeline arrives we still pay the instance count
-        // here so the rasterizer fans the draw N times — useful for
-        // identical-replica scenarios like grass or particles.
+        // matrices, fan it out via vkCmdDrawIndexed(instanceCount=N).
+        // The actual mat4 per instance lives in the set-3 SSBO that the
+        // vertex shader indexes by gl_InstanceIndex; the engine bridge
+        // uploads it once at plan-build time and references the
+        // resulting descriptor set here.
         if !d.instance_matrices.is_empty() {
             plan = plan.with_instances(d.instance_matrices.len() as u32);
+            if let Some(&set) = instance_sets.get(&(d.mesh as usize, d.primitive as usize)) {
+                plan = plan.with_instance_set(set);
+            } else if let Some(set) = dummy_instance_set {
+                plan = plan.with_instance_set(set);
+            }
+        } else if let Some(set) = dummy_instance_set {
+            // Non-instanced draws still need the dummy bound so the
+            // shader's set 3 reference resolves to the identity matrix.
+            plan = plan.with_instance_set(set);
         }
 
         if is_skinned && skin_vb.is_some() && palette_set.is_some() {

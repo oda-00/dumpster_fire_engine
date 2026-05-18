@@ -683,6 +683,21 @@ impl Window {
                         );
                     }
                 }
+                // Bind per-instance mat4 SSBO (set 3). Always bind something
+                // — the shader unconditionally reads `instances.m[gl_InstanceIndex]`
+                // so missing binding is undefined. Real per-instance sets land
+                // here when EXT_mesh_gpu_instancing is active; otherwise the
+                // dummy identity set from the cache.
+                if let Some(inst_set) = call.instance_set {
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        mold.pipeline_layout,
+                        3,
+                        &[inst_set],
+                        &[],
+                    );
+                }
 
                 if let Some(mesh) = &call.mesh {
                     // Use the compute-shader-posed vertex buffer when the call
