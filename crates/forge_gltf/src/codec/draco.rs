@@ -425,16 +425,31 @@ fn rans_decode_symbols(data: &[u8], count: usize, num_symbols: u32) -> GltfResul
         return Ok(vec![0; count]);
     }
 
-    // Build decode table: slot[s] = symbol such that cdf[symbol] <= s < cdf[symbol+1]
-    let mut sym_table = vec![0u8; l as usize];
+    // Build decode table: slot[s] = symbol such that cdf[symbol] <= s < cdf[symbol+1].
+    // Per-symbol broadcast-fill of contiguous slot ranges — SSE2-friendly
+    // because each `s` writes a known number of identical entries
+    // (`freqs[s]` of them) into three parallel tables. The inner
+    // broadcasts use 8-wide u32 stores per iteration for the freq/bias
+    // tables; sym_table is a u8 byte-fill via _mm_storeu_si128.
+    let mut sym_table  = vec![0u8;  l as usize];
     let mut freq_table = vec![0u32; l as usize];
     let mut bias_table = vec![0u32; l as usize];
-    for s in 0..num_symbols as usize {
-        for slot in cdf[s]..cdf[s + 1] {
-            if (slot as usize) < sym_table.len() {
-                sym_table[slot as usize]  = s as u8;
-                freq_table[slot as usize] = freqs[s];
-                bias_table[slot as usize] = cdf[s];
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        build_rans_decode_tables_sse2(
+            &cdf, &freqs, num_symbols as usize,
+            &mut sym_table, &mut freq_table, &mut bias_table,
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        for s in 0..num_symbols as usize {
+            for slot in cdf[s]..cdf[s + 1] {
+                if (slot as usize) < sym_table.len() {
+                    sym_table[slot as usize]  = s as u8;
+                    freq_table[slot as usize] = freqs[s];
+                    bias_table[slot as usize] = cdf[s];
+                }
             }
         }
     }
@@ -955,8 +970,26 @@ fn decode_attr_values(
         1.0
     };
 
-    // Dequantize: f = min + (quant_value / normalize_div) * scale
+    // Dequantize: f = min + (quant_value / normalize_div) * scale.
+    // Per-vertex arithmetic — no data dependency between vertices. For
+    // nc ≤ 4 we load 4 lanes of a vertex into one xmm, clamp/cvt/fma
+    // in 4 SSE2 ops, then store the first nc lanes. For nc > 4 fall
+    // back to scalar (no glTF accessor uses > 4 channels).
     let mut out = vec![0.0f32; total];
+    let inv_norm = 1.0 / normalize_div;
+    let combined_scale = inv_norm * scale;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if nc >= 1 && nc <= 4 {
+            dequantize_vertices_sse2(
+                &decoded, &mut out, npoints, nc,
+                clamp_max,
+                combined_scale,
+                &q.min_values,
+            );
+            return Ok(out);
+        }
+    }
     for i in 0..npoints {
         for c in 0..nc {
             let q_val  = decoded[i * nc + c].clamp(0, clamp_max) as f32 / normalize_div;
@@ -965,6 +998,141 @@ fn decode_attr_values(
         }
     }
     Ok(out)
+}
+
+/// SSE2 rANS decode-table builder. For each symbol s, broadcast-fill
+/// the slot range `cdf[s] .. cdf[s+1]` of three parallel tables:
+///   sym_table[slot]  = s     (u8 broadcast)
+///   freq_table[slot] = freqs[s] (u32 broadcast — 4 lanes per store)
+///   bias_table[slot] = cdf[s]   (u32 broadcast — 4 lanes per store)
+/// Replaces per-slot scalar stores with 16-byte / 16-lane chunks.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn build_rans_decode_tables_sse2(
+    cdf:         &[u32],
+    freqs:       &[u32],
+    num_symbols: usize,
+    sym_table:   &mut [u8],
+    freq_table:  &mut [u32],
+    bias_table:  &mut [u32],
+) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let table_len = sym_table.len();
+        for s in 0..num_symbols {
+            let start = cdf[s] as usize;
+            let end   = (cdf[s + 1] as usize).min(table_len);
+            if start >= end { continue; }
+            let count = end - start;
+
+            // sym_table: byte broadcast.
+            let v_sym = _mm_set1_epi8(s as i8);
+            let sym_ptr = sym_table.as_mut_ptr().add(start);
+            let mut off = 0usize;
+            while off + 16 <= count {
+                _mm_storeu_si128(sym_ptr.add(off) as *mut __m128i, v_sym);
+                off += 16;
+            }
+            for i in off..count {
+                *sym_ptr.add(i) = s as u8;
+            }
+
+            // freq_table + bias_table: u32 broadcast, 4 lanes per store.
+            let v_freq = _mm_set1_epi32(freqs[s] as i32);
+            let v_bias = _mm_set1_epi32(cdf[s] as i32);
+            let freq_ptr = freq_table.as_mut_ptr().add(start) as *mut __m128i;
+            let bias_ptr = bias_table.as_mut_ptr().add(start) as *mut __m128i;
+            let mut off4 = 0usize;
+            while off4 + 4 <= count {
+                _mm_storeu_si128(freq_ptr.add(off4 / 4), v_freq);
+                _mm_storeu_si128(bias_ptr.add(off4 / 4), v_bias);
+                off4 += 4;
+            }
+            for i in off4..count {
+                freq_table[start + i] = freqs[s];
+                bias_table[start + i] = cdf[s];
+            }
+        }
+    }
+}
+
+/// SSE2 per-vertex dequantize. 4 lanes per xmm covers nc=1..=4 with the
+/// unused lanes safely overlapping into the next vertex's read (and
+/// store-mask-out for the trailing vertex). Replaces a per-channel
+/// scalar division + add with one `_mm_cvtepi32_ps` + clamp + FMA-style
+/// mul+add chain per vertex.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn dequantize_vertices_sse2(
+    decoded:        &[i32],
+    out:            &mut [f32],
+    npoints:        usize,
+    nc:             usize,
+    clamp_max:      i32,
+    combined_scale: f32,
+    min_values:     &[f32],
+) {
+    use std::arch::x86_64::*;
+    unsafe {
+        // Broadcast scalars across all lanes.
+        let v_scale = _mm_set1_ps(combined_scale);
+        let v_zero  = _mm_setzero_ps();
+        let v_max_f = _mm_set1_ps(clamp_max as f32);
+
+        // Per-channel min[c] packed into the first nc lanes of the xmm
+        // (rest set to 0 so they have no effect on lanes we don't store).
+        let m0 = min_values.first().copied().unwrap_or(0.0);
+        let m1 = min_values.get(1).copied().unwrap_or(0.0);
+        let m2 = min_values.get(2).copied().unwrap_or(0.0);
+        let m3 = min_values.get(3).copied().unwrap_or(0.0);
+        let v_min = _mm_set_ps(m3, m2, m1, m0);
+
+        // Walk all-but-last vertex with full 4-lane SIMD (safe because
+        // we have at least `npoints * nc` valid input slots).
+        let main_pts = if nc == 4 { npoints } else { npoints.saturating_sub(1) };
+        for i in 0..main_pts {
+            let src = decoded.as_ptr().add(i * nc) as *const __m128i;
+            let dst = out.as_mut_ptr().add(i * nc);
+            // Load 4 i32 lanes (over-reads 4-nc lanes into the next
+            // vertex's data — fine since they're discarded by the store).
+            let q_i = _mm_loadu_si128(src);
+            let q_f = _mm_cvtepi32_ps(q_i);
+            // Clamp to [0, clamp_max] — float clamp via min/max.
+            let clamped = _mm_max_ps(_mm_min_ps(q_f, v_max_f), v_zero);
+            // q_norm * scale + min  →  combined_scale absorbs 1/normalize_div.
+            let scaled  = _mm_mul_ps(clamped, v_scale);
+            let result  = _mm_add_ps(scaled, v_min);
+            // Store only the first nc lanes. We use sequences of
+            // _mm_store_ss + shuffles because the SSE2 partial-store
+            // intrinsics that take a `*mut __m64` are MMX-only.
+            match nc {
+                4 => _mm_storeu_ps(dst, result),
+                3 => {
+                    _mm_store_ss(dst,           result);
+                    let r1 = _mm_shuffle_ps(result, result, 0b_00_00_00_01);
+                    _mm_store_ss(dst.add(1), r1);
+                    let r2 = _mm_movehl_ps(result, result);
+                    _mm_store_ss(dst.add(2), r2);
+                }
+                2 => {
+                    _mm_store_ss(dst,           result);
+                    let r1 = _mm_shuffle_ps(result, result, 0b_00_00_00_01);
+                    _mm_store_ss(dst.add(1), r1);
+                }
+                1 => _mm_store_ss(dst, result),
+                _ => unreachable!(),
+            }
+        }
+        // Tail vertex (if nc < 4) — same maths, scalar to avoid over-read.
+        if nc != 4 && npoints > 0 {
+            let i = npoints - 1;
+            for c in 0..nc {
+                let q_val = (decoded[i * nc + c]).clamp(0, clamp_max) as f32;
+                let m = *min_values.get(c).unwrap_or(&0.0);
+                out[i * nc + c] = m + q_val * combined_scale;
+            }
+        }
+    }
 }
 
 fn decode_attr_values_eb(
@@ -1313,5 +1481,45 @@ mod tests {
         assert_eq!(ct.right(4), 3);
         assert_eq!(ct.next(4),  5);
         assert_eq!(ct.prev(4),  3);
+    }
+
+    /// SSE2 per-vertex dequantize must produce byte-identical output to
+    /// the scalar reference across every channel count (nc = 1..=4).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn dequantize_simd_matches_scalar() {
+        for nc in 1..=4 {
+            let npoints = 7;
+            let total = npoints * nc;
+            let decoded: Vec<i32> = (0..total)
+                .map(|i| (i as i32 * 17 - 11).clamp(-200, 300))
+                .collect();
+            let clamp_max = 200i32;
+            let combined_scale = 0.125f32;
+            let min_values: Vec<f32> = (0..nc).map(|c| (c as f32) * -2.5).collect();
+
+            // Scalar reference.
+            let mut scalar_out = vec![0.0f32; total];
+            for i in 0..npoints {
+                for c in 0..nc {
+                    let q = decoded[i * nc + c].clamp(0, clamp_max) as f32;
+                    let m = min_values[c];
+                    scalar_out[i * nc + c] = m + q * combined_scale;
+                }
+            }
+            // SIMD path.
+            let mut simd_out = vec![0.0f32; total];
+            unsafe {
+                dequantize_vertices_sse2(
+                    &decoded, &mut simd_out, npoints, nc,
+                    clamp_max, combined_scale, &min_values,
+                );
+            }
+            for i in 0..total {
+                assert!((scalar_out[i] - simd_out[i]).abs() < 1e-5,
+                    "nc={} i={}: scalar={} simd={}",
+                    nc, i, scalar_out[i], simd_out[i]);
+            }
+        }
     }
 }
