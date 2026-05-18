@@ -1000,6 +1000,24 @@ fn decode_attr_values(
     Ok(out)
 }
 
+/// Bench-only public entry point that drives the SIMD per-vertex
+/// dequantize directly (the production caller in `decode_attr_values`
+/// hides it behind several layers of glTF + Draco header parsing). The
+/// shape mirrors the inner kernel; clamp + scale + min are fixed so
+/// the bench measures the loop, not parameter setup.
+#[cfg(target_arch = "x86_64")]
+pub fn bench_dequantize_helper(decoded: &[i32], out: &mut [f32], npoints: usize, nc: usize) {
+    let clamp_max = 0xFFFi32;
+    let combined_scale = 0.125f32;
+    let min_values = [-1.0f32, 0.0, 1.0, 0.0];
+    unsafe {
+        dequantize_vertices_sse2(
+            decoded, out, npoints, nc,
+            clamp_max, combined_scale, &min_values,
+        );
+    }
+}
+
 /// SSE2 rANS decode-table builder. For each symbol s, broadcast-fill
 /// the slot range `cdf[s] .. cdf[s+1]` of three parallel tables:
 ///   sym_table[slot]  = s     (u8 broadcast)
