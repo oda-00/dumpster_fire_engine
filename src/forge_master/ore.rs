@@ -85,6 +85,19 @@ pub enum OreKind {
     /// the GaussianSplat raster pipeline consumes.
     SplatBillboard,
 
+    /// EXT_mesh_gpu_instancing: per-instance (T, R, S) → mat4 expansion.
+    /// One thread per instance writes a column-major model matrix into
+    /// an output SSBO that ForwardLit / SkinnedForwardLit's vertex shader
+    /// reads at set 3 binding 0. Replaces the prior CPU `compose_trs`
+    /// hot loop with a single batched compute dispatch per frame for
+    /// dynamic-instanced assets (and a one-shot dispatch at load time
+    /// for static-instanced assets — see InstanceComputeState).
+    ///
+    /// APPENDED at the end of the compute variant list per the review's
+    /// serialization-safety mandate: existing variant indices (0..=12)
+    /// stay frozen.
+    InstanceTransforms,
+
     // Rasterization — sub-kind selects the draw pipeline.
     Graphics(GraphicsOreKind),
 }
@@ -92,7 +105,7 @@ pub enum OreKind {
 impl OreKind {
     /// Compute-only kinds, in `index()` order. Use this to size the compute
     /// forge cache — graphics variants live in their own arena.
-    pub const COMPUTE_ALL: [OreKind; 13] = [
+    pub const COMPUTE_ALL: [OreKind; 14] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -106,12 +119,13 @@ impl OreKind {
         OreKind::MorphBlend,
         OreKind::SplatSort,
         OreKind::SplatBillboard,
+        OreKind::InstanceTransforms,
     ];
 
     pub const COMPUTE_COUNT: usize = Self::COMPUTE_ALL.len();
 
     /// Every kind, compute + every graphics sub-kind, in `index()` order.
-    pub const ALL: [OreKind; 17] = [
+    pub const ALL: [OreKind; 18] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -125,6 +139,7 @@ impl OreKind {
         OreKind::MorphBlend,
         OreKind::SplatSort,
         OreKind::SplatBillboard,
+        OreKind::InstanceTransforms,
         OreKind::Graphics(GraphicsOreKind::ForwardLit),
         OreKind::Graphics(GraphicsOreKind::SkinnedForwardLit),
         OreKind::Graphics(GraphicsOreKind::Ui),
@@ -150,6 +165,7 @@ impl OreKind {
             OreKind::MorphBlend          => 10,
             OreKind::SplatSort           => 11,
             OreKind::SplatBillboard      => 12,
+            OreKind::InstanceTransforms  => 13,
             OreKind::Graphics(g)         => Self::COMPUTE_COUNT + g.index(),
         }
     }

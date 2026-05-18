@@ -45,6 +45,9 @@ pub enum GltfPipelineKind {
     VisibilityPass,
     SkinPalette,
     MorphBlend,
+    SplatSort,
+    SplatBillboard,
+    InstanceTransforms,
     Graphics(GltfGraphicsKind),
 }
 
