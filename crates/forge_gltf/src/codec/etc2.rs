@@ -262,29 +262,118 @@ fn decode_etc1_subblocks(
     let row1 = &INTEN_TABLE[(table1 & 7) as usize];
     let row2 = &INTEN_TABLE[(table2 & 7) as usize];
 
-    // Pixel index format (per spec): bit 16 + i = MSB of selector for texel
-    // i; bit i = LSB. Texel ordering is column-major within the 4×4 block:
-    //   i = x * 4 + y.
-    for tx in 0..16 {
-        let lsb = ((pixels >> tx) & 1) as u8;
-        let msb = ((pixels >> (tx + 16)) & 1) as u8;
-        let sel = (msb << 1) | lsb;
+    // Build 4-RGBA palettes per sub-block (base ± intensity modifier per
+    // selector). Once a block's palettes are known, every texel reduces
+    // to a 2-bit lookup → SIMD pshufb gather covers 4 texels per shuffle.
+    let pal1 = make_etc1_palette(c1, row1, default_alpha);
+    let pal2 = make_etc1_palette(c2, row2, default_alpha);
 
-        let x = tx >> 2;
-        let y = tx & 3;
-        // Sub-block 1 = upper half when flipbit=true, left half when false.
-        let in_sub1 = if flipbit { (y as u32) < 2 } else { (x as u32) < 2 };
-        let (base, table) = if in_sub1 { (c1, row1) } else { (c2, row2) };
-        let modifier = table[sel as usize];
-        let r = clamp_u8(base[0] as i32 + modifier as i32);
-        let g = clamp_u8(base[1] as i32 + modifier as i32);
-        let b = clamp_u8(base[2] as i32 + modifier as i32);
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        decode_etc1_subblocks_pshufb(&pal1, &pal2, flipbit, pixels, out);
+        return;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Pixel index format (per spec): bit 16 + i = MSB of selector for
+        // texel i; bit i = LSB. Texel ordering is column-major within the
+        // 4×4 block: i = x * 4 + y.
+        for tx in 0..16usize {
+            let lsb = ((pixels >> tx) & 1) as u8;
+            let msb = ((pixels >> (tx + 16)) & 1) as u8;
+            let sel = (msb << 1) | lsb;
+            let x = tx >> 2;
+            let y = tx & 3;
+            let in_sub1 = if flipbit { (y as u32) < 2 } else { (x as u32) < 2 };
+            let pal = if in_sub1 { &pal1 } else { &pal2 };
+            let src = (sel as usize) * 4;
+            let dst = (y * 4 + x) * 4;
+            out[dst]     = pal[src];
+            out[dst + 1] = pal[src + 1];
+            out[dst + 2] = pal[src + 2];
+            out[dst + 3] = pal[src + 3];
+        }
+    }
+}
 
-        let dst = ((y as usize) * 4 + (x as usize)) * 4;
-        out[dst]     = r;
-        out[dst + 1] = g;
-        out[dst + 2] = b;
-        out[dst + 3] = default_alpha;
+/// Build a 4-RGBA palette (16 bytes) for one ETC1 sub-block: each of the
+/// 4 selector values picks one of four base ± modifier intensities.
+fn make_etc1_palette(base: &[u8; 3], table: &[i16; 4], default_alpha: u8) -> [u8; 16] {
+    let mut p = [0u8; 16];
+    for sel in 0..4 {
+        let m = table[sel] as i32;
+        p[sel * 4    ] = clamp_u8(base[0] as i32 + m);
+        p[sel * 4 + 1] = clamp_u8(base[1] as i32 + m);
+        p[sel * 4 + 2] = clamp_u8(base[2] as i32 + m);
+        p[sel * 4 + 3] = default_alpha;
+    }
+    p
+}
+
+/// SSSE3 ETC1 subblock decode. Output rows are processed one at a time;
+/// for each row we know which 4 texels land in it and which sub-block
+/// each belongs to (determined by flipbit + texel column/row position).
+///
+/// flipbit=true  → entire row in one sub-block (horizontal split).
+/// flipbit=false → row mixes sub1 (cols 0-1) and sub2 (cols 2-3) per
+///                 texel (vertical split); two pshufbs + byte-blend.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn decode_etc1_subblocks_pshufb(
+    pal1: &[u8; 16], pal2: &[u8; 16],
+    flipbit: bool, pixels: u32, out: &mut [u8; 64],
+) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let p1_v = _mm_loadu_si128(pal1.as_ptr() as *const __m128i);
+        let p2_v = _mm_loadu_si128(pal2.as_ptr() as *const __m128i);
+
+        // Selector for texel tx = x*4 + y: lsb = bit tx, msb = bit (tx+16).
+        // For output row y, we want texels at (x=0..3, y) → tx values
+        // 0+y, 4+y, 8+y, 12+y.
+        let sel = |tx: usize| -> u8 {
+            let lsb = ((pixels >> tx) & 1) as u8;
+            let msb = ((pixels >> (tx + 16)) & 1) as u8;
+            (msb << 1) | lsb
+        };
+
+        for y in 0..4usize {
+            let s0 = sel(0 + y) as i8;
+            let s1 = sel(4 + y) as i8;
+            let s2 = sel(8 + y) as i8;
+            let s3 = sel(12 + y) as i8;
+            let shuf = _mm_setr_epi8(
+                s0 * 4, s0 * 4 + 1, s0 * 4 + 2, s0 * 4 + 3,
+                s1 * 4, s1 * 4 + 1, s1 * 4 + 2, s1 * 4 + 3,
+                s2 * 4, s2 * 4 + 1, s2 * 4 + 2, s2 * 4 + 3,
+                s3 * 4, s3 * 4 + 1, s3 * 4 + 2, s3 * 4 + 3,
+            );
+
+            // Pick palette (or blend two) for this row.
+            let row_v = if flipbit {
+                // Whole row in one sub-block: y < 2 → sub1, else sub2.
+                if y < 2 { _mm_shuffle_epi8(p1_v, shuf) }
+                else     { _mm_shuffle_epi8(p2_v, shuf) }
+            } else {
+                // Per-texel split at column 2. Gather from both palettes,
+                // mask-blend the four 4-byte pixels: pixels 0,1 from sub1,
+                // pixels 2,3 from sub2.
+                let from_p1 = _mm_shuffle_epi8(p1_v, shuf);
+                let from_p2 = _mm_shuffle_epi8(p2_v, shuf);
+                // Mask: 0x00 for sub1 bytes (pixels 0,1 = bytes 0..7),
+                //       0xFF for sub2 bytes (pixels 2,3 = bytes 8..15).
+                let mask = _mm_setr_epi8(
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    -1, -1, -1, -1, -1, -1, -1, -1,
+                );
+                // result = (from_p1 & ~mask) | (from_p2 & mask) using
+                // SSE2 ops (no SSE4.1 _mm_blendv_epi8 dependency).
+                let keep_p1 = _mm_andnot_si128(mask, from_p1);
+                let keep_p2 = _mm_and_si128(mask, from_p2);
+                _mm_or_si128(keep_p1, keep_p2)
+            };
+            _mm_storeu_si128(out.as_mut_ptr().add(y * 16) as *mut __m128i, row_v);
+        }
     }
 }
 
