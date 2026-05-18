@@ -163,14 +163,12 @@ fn decode_bc1_block(block: &[u8]) -> [u8; 64] {
     let c0 = rgb565_to_rgb8(c0_raw);
     let c1 = rgb565_to_rgb8(c1_raw);
     let (c2, c3, alpha_for_3): ([u8; 3], [u8; 3], u8) = if c0_raw > c1_raw {
-        // 4-colour mode: c2 = 2/3 c0 + 1/3 c1, c3 = 1/3 c0 + 2/3 c1.
         (
             [lerp_u8(c0[0], c1[0], 1, 3), lerp_u8(c0[1], c1[1], 1, 3), lerp_u8(c0[2], c1[2], 1, 3)],
             [lerp_u8(c0[0], c1[0], 2, 3), lerp_u8(c0[1], c1[1], 2, 3), lerp_u8(c0[2], c1[2], 2, 3)],
             255,
         )
     } else {
-        // 3-colour + 1-bit-alpha mode: c2 = 1/2 c0+c1, c3 = transparent black.
         (
             [lerp_u8(c0[0], c1[0], 1, 2), lerp_u8(c0[1], c1[1], 1, 2), lerp_u8(c0[2], c1[2], 1, 2)],
             [0, 0, 0],
@@ -178,22 +176,62 @@ fn decode_bc1_block(block: &[u8]) -> [u8; 64] {
         )
     };
 
-    let mut out = [0u8; 64];
-    for i in 0..16 {
-        let sel = ((bits >> (i * 2)) & 0x3) as u8;
-        let (rgb, a) = match sel {
-            0 => (c0, 255u8),
-            1 => (c1, 255u8),
-            2 => (c2, 255u8),
-            _ => (c3, alpha_for_3),
-        };
-        let dst = i * 4;
-        out[dst]     = rgb[0];
-        out[dst + 1] = rgb[1];
-        out[dst + 2] = rgb[2];
-        out[dst + 3] = a;
+    // Pack a 16-byte palette: 4 RGBA entries.
+    let palette: [u8; 16] = [
+        c0[0], c0[1], c0[2], 255,
+        c1[0], c1[1], c1[2], 255,
+        c2[0], c2[1], c2[2], 255,
+        c3[0], c3[1], c3[2], alpha_for_3,
+    ];
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe { return decode_bc1_block_pshufb(&palette, bits); }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut out = [0u8; 64];
+        for i in 0..16 {
+            let sel = ((bits >> (i * 2)) & 0x3) as usize;
+            let dst = i * 4;
+            out[dst]     = palette[sel * 4];
+            out[dst + 1] = palette[sel * 4 + 1];
+            out[dst + 2] = palette[sel * 4 + 2];
+            out[dst + 3] = palette[sel * 4 + 3];
+        }
+        out
     }
-    out
+}
+
+/// SSSE3 palette gather for any 4-entry indexed-block decoder (BC1/BC3
+/// colour subblocks, ETC1S, ETC2 individual mode). `palette` is 4 RGBA
+/// entries packed into 16 bytes; `bits` holds 16 × 2-bit selectors in
+/// row-major LSB-first order. One `_mm_shuffle_epi8` per row produces
+/// 4 texels' worth of RGBA in 16 bytes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn decode_bc1_block_pshufb(palette: &[u8; 16], bits: u32) -> [u8; 64] {
+    use std::arch::x86_64::*;
+    unsafe {
+        let pal_v = _mm_loadu_si128(palette.as_ptr() as *const __m128i);
+        let mut out = [0u8; 64];
+        for row in 0..4 {
+            let sel_byte = (bits >> (row * 8)) as u8;
+            let s0 = ((sel_byte     ) & 3) as i8;
+            let s1 = ((sel_byte >> 2) & 3) as i8;
+            let s2 = ((sel_byte >> 4) & 3) as i8;
+            let s3 = ((sel_byte >> 6) & 3) as i8;
+            // Build per-byte palette offsets: 4 texels × 4 channel bytes.
+            // Each selector contributes [s*4, s*4+1, s*4+2, s*4+3].
+            let shuf = _mm_setr_epi8(
+                s0 * 4, s0 * 4 + 1, s0 * 4 + 2, s0 * 4 + 3,
+                s1 * 4, s1 * 4 + 1, s1 * 4 + 2, s1 * 4 + 3,
+                s2 * 4, s2 * 4 + 1, s2 * 4 + 2, s2 * 4 + 3,
+                s3 * 4, s3 * 4 + 1, s3 * 4 + 2, s3 * 4 + 3,
+            );
+            let row_v = _mm_shuffle_epi8(pal_v, shuf);
+            _mm_storeu_si128(out.as_mut_ptr().add(row * 16) as *mut __m128i, row_v);
+        }
+        out
+    }
 }
 
 fn decode_bc2_block(block: &[u8]) -> [u8; 64] {
@@ -238,15 +276,36 @@ fn decode_bc3_block(block: &[u8]) -> [u8; 64] {
     let c2 = [lerp_u8(c0[0], c1[0], 1, 3), lerp_u8(c0[1], c1[1], 1, 3), lerp_u8(c0[2], c1[2], 1, 3)];
     let c3 = [lerp_u8(c0[0], c1[0], 2, 3), lerp_u8(c0[1], c1[1], 2, 3), lerp_u8(c0[2], c1[2], 2, 3)];
 
-    let mut out = [0u8; 64];
+    // Decode RGB via the same SSSE3 palette gather BC1 uses, then overlay the
+    // independently-decoded 8-bit alpha channel byte-by-byte. The colour pass
+    // writes alpha = 255; the second pass overwrites it with the BC4-derived
+    // alpha. Net cost: one SIMD palette gather + 16 byte writes vs 16 full
+    // scalar texel writes.
+    let palette: [u8; 16] = [
+        c0[0], c0[1], c0[2], 255,
+        c1[0], c1[1], c1[2], 255,
+        c2[0], c2[1], c2[2], 255,
+        c3[0], c3[1], c3[2], 255,
+    ];
+    let mut out = {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { decode_bc1_block_pshufb(&palette, bits) }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let mut tmp = [0u8; 64];
+            for i in 0..16 {
+                let sel = ((bits >> (i * 2)) & 0x3) as usize;
+                let dst = i * 4;
+                tmp[dst]     = palette[sel * 4];
+                tmp[dst + 1] = palette[sel * 4 + 1];
+                tmp[dst + 2] = palette[sel * 4 + 2];
+                tmp[dst + 3] = 255;
+            }
+            tmp
+        }
+    };
     for i in 0..16 {
-        let sel = ((bits >> (i * 2)) & 0x3) as u8;
-        let rgb = match sel { 0 => c0, 1 => c1, 2 => c2, _ => c3 };
-        let dst = i * 4;
-        out[dst]     = rgb[0];
-        out[dst + 1] = rgb[1];
-        out[dst + 2] = rgb[2];
-        out[dst + 3] = alpha[i];
+        out[i * 4 + 3] = alpha[i];
     }
     out
 }
