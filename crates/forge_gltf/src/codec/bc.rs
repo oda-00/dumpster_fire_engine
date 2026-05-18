@@ -249,16 +249,35 @@ fn decode_bc2_block(block: &[u8]) -> [u8; 64] {
     let c2 = [lerp_u8(c0[0], c1[0], 1, 3), lerp_u8(c0[1], c1[1], 1, 3), lerp_u8(c0[2], c1[2], 1, 3)];
     let c3 = [lerp_u8(c0[0], c1[0], 2, 3), lerp_u8(c0[1], c1[1], 2, 3), lerp_u8(c0[2], c1[2], 2, 3)];
 
-    let mut out = [0u8; 64];
+    // SIMD palette gather for RGB via the BC1 helper; alpha overlay per
+    // texel using the 4-bit packed stream (4 → 8 bits via byte
+    // replication: a8 = (a4 << 4) | a4).
+    let palette: [u8; 16] = [
+        c0[0], c0[1], c0[2], 255,
+        c1[0], c1[1], c1[2], 255,
+        c2[0], c2[1], c2[2], 255,
+        c3[0], c3[1], c3[2], 255,
+    ];
+    let mut out = {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { decode_bc1_block_pshufb(&palette, bits) }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let mut tmp = [0u8; 64];
+            for i in 0..16 {
+                let sel = ((bits >> (i * 2)) & 0x3) as usize;
+                let dst = i * 4;
+                tmp[dst]     = palette[sel * 4];
+                tmp[dst + 1] = palette[sel * 4 + 1];
+                tmp[dst + 2] = palette[sel * 4 + 2];
+                tmp[dst + 3] = 255;
+            }
+            tmp
+        }
+    };
     for i in 0..16 {
-        let sel = ((bits >> (i * 2)) & 0x3) as u8;
-        let rgb = match sel { 0 => c0, 1 => c1, 2 => c2, _ => c3 };
         let a4  = ((alpha_bits >> (i * 4)) & 0xf) as u8;
-        let dst = i * 4;
-        out[dst]     = rgb[0];
-        out[dst + 1] = rgb[1];
-        out[dst + 2] = rgb[2];
-        out[dst + 3] = (a4 << 4) | a4;
+        out[i * 4 + 3] = (a4 << 4) | a4;
     }
     out
 }
