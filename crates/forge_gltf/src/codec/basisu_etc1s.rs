@@ -88,8 +88,17 @@ fn expand5(v: u8) -> u8 {
 /// Decode one ETC1S 4×4 block to 64 bytes of packed RGBA8 (alpha = 255).
 ///
 /// Texels are written in row-major order (x varies fastest inside each row).
-#[inline(always)]
+#[inline]
 pub fn decode_etc1s_block(ep: &EndpointEntry, sel: &SelectorEntry) -> [u8; 64] {
+    #[cfg(target_arch = "x86_64")]
+    unsafe { return decode_etc1s_block_sse2(ep, sel); }
+    #[cfg(not(target_arch = "x86_64"))]
+    decode_etc1s_block_scalar(ep, sel)
+}
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+#[inline(always)]
+pub(crate) fn decode_etc1s_block_scalar(ep: &EndpointEntry, sel: &SelectorEntry) -> [u8; 64] {
     let base_r = expand5(ep.r5) as i32;
     let base_g = expand5(ep.g5) as i32;
     let base_b = expand5(ep.b5) as i32;
@@ -116,6 +125,70 @@ pub fn decode_etc1s_block(ep: &EndpointEntry, sel: &SelectorEntry) -> [u8; 64] {
         y += 1;
     }
     out
+}
+
+/// SSE2 ETC1S block decoder. Process all four texels of one row in
+/// parallel inside an xmm register (4 × i16 lanes per channel, then pack
+/// to u8). The selector→intensity-modifier lookup stays scalar (4 entries
+/// per row, gather-style) but the per-channel add + saturating clamp
+/// runs as `_mm_adds_epi16` + `_mm_packus_epi16` for all 16 texels.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn decode_etc1s_block_sse2(ep: &EndpointEntry, sel: &SelectorEntry) -> [u8; 64] {
+    use std::arch::x86_64::*;
+    unsafe {
+        let base_r = expand5(ep.r5) as i16;
+        let base_g = expand5(ep.g5) as i16;
+        let base_b = expand5(ep.b5) as i16;
+        let row    = &INTENSITY_TABLE[(ep.inten_table & 7) as usize];
+
+        // Broadcast the base RGB into i16x8 registers — we'll only use
+        // the first four lanes per row but `_mm_set1_epi16` is fine.
+        let v_r = _mm_set1_epi16(base_r);
+        let v_g = _mm_set1_epi16(base_g);
+        let v_b = _mm_set1_epi16(base_b);
+
+        let mut out = [0u8; 64];
+        for y in 0..4 {
+            // Per-texel modifiers for this row, packed into an i16x8 with
+            // the high 4 lanes zero.
+            let m0 = row[(sel.selectors[y][0] & 3) as usize] as i16;
+            let m1 = row[(sel.selectors[y][1] & 3) as usize] as i16;
+            let m2 = row[(sel.selectors[y][2] & 3) as usize] as i16;
+            let m3 = row[(sel.selectors[y][3] & 3) as usize] as i16;
+            let mods = _mm_setr_epi16(m0, m1, m2, m3, 0, 0, 0, 0);
+
+            // Saturating-add into each channel — values land in [-32k, +32k]
+            // but with a base of ≤ 248 and modifier ≤ 183, the result fits
+            // in i16 long before saturation kicks in. The eventual packus
+            // clamps to [0, 255].
+            let row_r = _mm_adds_epi16(v_r, mods);
+            let row_g = _mm_adds_epi16(v_g, mods);
+            let row_b = _mm_adds_epi16(v_b, mods);
+
+            // Pack each channel to u8 (saturating). Take only the low 4
+            // lanes since the high four were zero-padded.
+            let pr = _mm_packus_epi16(row_r, _mm_setzero_si128());
+            let pg = _mm_packus_epi16(row_g, _mm_setzero_si128());
+            let pb = _mm_packus_epi16(row_b, _mm_setzero_si128());
+            let mut tmpr = [0u8; 16]; _mm_storeu_si128(tmpr.as_mut_ptr() as *mut __m128i, pr);
+            let mut tmpg = [0u8; 16]; _mm_storeu_si128(tmpg.as_mut_ptr() as *mut __m128i, pg);
+            let mut tmpb = [0u8; 16]; _mm_storeu_si128(tmpb.as_mut_ptr() as *mut __m128i, pb);
+
+            // Scatter to RGBA8 layout. (Interleaving 4 i16 channels into
+            // RGBA8 inline would need pshufb / SSSE3; we keep this path
+            // SSE2-only and let the compiler optimise the four small
+            // stores.)
+            for x in 0..4 {
+                let dst = (y * 4 + x) * 4;
+                out[dst]     = tmpr[x];
+                out[dst + 1] = tmpg[x];
+                out[dst + 2] = tmpb[x];
+                out[dst + 3] = 255;
+            }
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +229,12 @@ impl<'a> BitStream<'a> {
         }
     }
 
-    /// Read exactly `n` bits (n ≤ 16) in LSB-first order.
+    /// Read exactly `n` bits (n ≤ 16) in LSB-first order. The Huffman
+    /// decoder inlines peek-and-consume directly against `window` /
+    /// `bits_in` to avoid the redundant refill the general `read` would
+    /// re-issue, so this method is only reachable from the bit-stream
+    /// unit tests in this module.
+    #[cfg(test)]
     #[inline(always)]
     fn read(&mut self, n: u32) -> GltfResult<u32> {
         self.refill();
@@ -289,6 +367,11 @@ impl HuffTable {
 }
 
 /// Reverse the lowest `bits` bits of `v`, producing a `bits`-wide integer.
+/// Kept under `cfg(test)` because the production Huffman decoder uses LSB-
+/// first canonical codes (no reversal needed) — the helper is retained for
+/// the bit-reversal unit tests so future MSB-first variants can be
+/// validated against a known-correct reference.
+#[cfg(test)]
 #[inline(always)]
 fn reverse_bits(v: u32, bits: u32) -> u32 {
     if bits == 0 {
@@ -972,5 +1055,30 @@ mod tests {
         level.push(0x00);
         let px = transcode_to_rgba8(&sgd, &level, 5, 3).unwrap();
         assert_eq!(px.len(), 5 * 3 * 4, "expected 60 bytes for 5×3 RGBA8");
+    }
+
+    /// SSE2 block decoder must produce byte-identical output to the
+    /// scalar reference across a representative spread of endpoint
+    /// colours, intensity-table indices, and selector patterns.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn block_decode_simd_matches_scalar() {
+        let cases: [(u8, u8, u8, u8); 5] = [
+            (0, 0, 0, 0),
+            (31, 31, 31, 7),
+            (16, 8, 24, 3),
+            (5, 17, 23, 5),
+            (12, 12, 12, 6),
+        ];
+        let patterns: [[u8; 4]; 4] = [[0, 1, 2, 3], [3, 3, 3, 3], [0, 0, 0, 0], [1, 2, 1, 2]];
+        for &(r, g, b, t) in &cases {
+            for &pat in &patterns {
+                let sel = SelectorEntry { selectors: [pat, pat, pat, pat] };
+                let endpoint = ep(r, g, b, t);
+                let scalar = decode_etc1s_block_scalar(&endpoint, &sel);
+                let simd = unsafe { decode_etc1s_block_sse2(&endpoint, &sel) };
+                assert_eq!(scalar, simd, "SIMD vs scalar mismatch for ep ({r},{g},{b},{t}) pat {pat:?}");
+            }
+        }
     }
 }

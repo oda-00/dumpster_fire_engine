@@ -83,15 +83,29 @@ pub struct GltfAsset {
     pub animations:    ThinVec<Animation>,
     pub cameras:       ThinVec<Camera>,
     pub lights:        ThinVec<Light>,
+    /// KHR_gaussian_splatting (Khronos baseline Feb 2026) — zero or more
+    /// per-node splat sets. Empty for every asset that doesn't carry the
+    /// extension, which is the vast majority today.
+    pub gaussian_splats: ThinVec<crate::splat::GaussianSplatSet>,
 }
 
 impl GltfAsset {
     pub fn load(path: impl AsRef<Path>) -> GltfResult<Self> {
         // Read the bytes first so we can pre-process KHR_animation_pointer.
-        let bytes = std::fs::read(path).map_err(|e| {
+        let p = path.as_ref();
+        let bytes = std::fs::read(p).map_err(|e| {
             GltfError::Io(gltf::Error::Io(e))
         })?;
-        Self::load_slice(&bytes)
+        // Set the base directory so external .png / .bin URIs can resolve
+        // relative to the file we just read. Threading this through every
+        // call site cleanly is more invasive than we want here, so we stash
+        // it in a per-thread cell that `load_images_custom` consults
+        // when it sees a non-data:// URI.
+        let parent = p.parent().unwrap_or_else(|| Path::new("."));
+        let prev = set_image_base_dir(Some(parent.to_path_buf()));
+        let result = Self::load_slice(&bytes);
+        set_image_base_dir(prev);
+        result
     }
 
     pub fn load_slice(bytes: &[u8]) -> GltfResult<Self> {
@@ -115,8 +129,16 @@ impl GltfAsset {
         // Step 2: Parse document and load buffer data.
         let gltf_obj = gltf::Gltf::from_slice(effective_bytes.as_ref())
             .map_err(GltfError::Io)?;
-        let mut buffer_data = gltf::import_buffers(&gltf_obj.document, None, gltf_obj.blob)
-            .map_err(GltfError::Io)?;
+        // Pass the base directory (set by `GltfAsset::load`) so external
+        // `.bin` URI references in plain `.gltf` files resolve against the
+        // file's parent dir. `.glb` files have all buffers inline so the
+        // base dir is irrelevant; `load_slice` callers without filesystem
+        // context get `None` and external URIs error cleanly inside the
+        // gltf crate.
+        let base = image_base_dir();
+        let mut buffer_data = gltf::import_buffers(
+            &gltf_obj.document, base.as_deref(), gltf_obj.blob,
+        ).map_err(GltfError::Io)?;
 
         // Step 3: Pre-decompress any EXT_meshopt_compression buffer views.
         preprocess_meshopt_buffer_views(effective_bytes.as_ref(), &mut buffer_data);
@@ -197,6 +219,7 @@ fn extract_asset_with_patches(
         animations:    extract_animations(doc, buffers, patches)?,
         cameras:       extract_cameras(doc),
         lights:        extract_lights(doc),
+        gaussian_splats: crate::splat::extract_splats(doc, buffers),
     })
 }
 
@@ -282,6 +305,7 @@ fn extract_nodes(doc: &gltf::Document) -> ThinVec<Node> {
                 skin:        n.skin().map(|s| s.index() as u32),
                 light:       n.light().map(|l| l.index() as u32),
                 weights:     n.weights().map(|ws| ws.iter().copied().collect()).unwrap_or_default(),
+                instances:   extract_node_instances(doc, &n),
             }
         })
         .collect();
@@ -294,6 +318,52 @@ fn extract_nodes(doc: &gltf::Document) -> ThinVec<Node> {
         }
     }
     nodes
+}
+
+/// Pull EXT_mesh_gpu_instancing data off a node's extensions block.
+/// Spec: the extension stores per-instance TRANSLATION / ROTATION / SCALE
+/// as accessor references; each accessor is `instance_count` long. The
+/// gltf crate surfaces the raw extension value as JSON; we walk it
+/// ourselves (the crate doesn't have first-class support).
+fn extract_node_instances(
+    doc:  &gltf::Document,
+    node: &gltf::Node<'_>,
+) -> Option<NodeInstances> {
+    let ext = node.extension_value("EXT_mesh_gpu_instancing")?.as_object()?;
+    let attrs = ext.get("attributes")?.as_object()?;
+
+    // We capture the accessor indices the JSON references and resize the
+    // per-instance arrays to the accessor `count`. The actual TRS values
+    // start at sensible defaults (identity); a future gather pass that
+    // owns the buffer_data can overwrite them.
+    let mut translation: thin_vec::ThinVec<[f32; 3]> = thin_vec::ThinVec::new();
+    let mut rotation:    thin_vec::ThinVec<[f32; 4]> = thin_vec::ThinVec::new();
+    let mut scale:       thin_vec::ThinVec<[f32; 3]> = thin_vec::ThinVec::new();
+
+    if let Some(idx_val) = attrs.get("TRANSLATION") {
+        if let Some(idx) = idx_val.as_u64() {
+            if let Some(acc) = doc.accessors().nth(idx as usize) {
+                translation.resize(acc.count(), [0.0_f32; 3]);
+            }
+        }
+    }
+    if let Some(idx_val) = attrs.get("ROTATION") {
+        if let Some(idx) = idx_val.as_u64() {
+            if let Some(acc) = doc.accessors().nth(idx as usize) {
+                rotation.resize(acc.count(), [0.0_f32, 0.0, 0.0, 1.0]);
+            }
+        }
+    }
+    if let Some(idx_val) = attrs.get("SCALE") {
+        if let Some(idx) = idx_val.as_u64() {
+            if let Some(acc) = doc.accessors().nth(idx as usize) {
+                scale.resize(acc.count(), [1.0_f32; 3]);
+            }
+        }
+    }
+
+    let inst = NodeInstances { translation, rotation, scale };
+    if inst.is_empty() { None } else { Some(inst) }
 }
 
 // ── Meshes ──────────────────────────────────────────────────────────────────
@@ -855,91 +925,122 @@ fn preprocess_meshopt_buffer_views(
 /// for PNG and JPEG. Images that fail to decode are replaced with a 1×1
 /// black-transparent dummy so the rest of the asset loads normally.
 /// Decoding is done in parallel (one rayon task per image).
+/// Parallel-friendly owned form of a glTF image source. Built sequentially
+/// from `gltf::image::Source<'_>` (which borrows the document and isn't
+/// `Send`) and consumed in parallel by `load_single_image_custom` from a
+/// rayon worker.
+pub(crate) enum RawSource {
+    /// Inline bytes pulled from a buffer view or a `data:` URI. `mime`
+    /// disambiguates WebP / KTX2 / PNG / JPEG when the file's magic isn't
+    /// authoritative.
+    Bytes { bytes: Vec<u8>, mime: Option<String> },
+    /// Relative path resolved against the per-thread `IMAGE_BASE_DIR`
+    /// (set by `GltfAsset::load`). Falls back to an error if `load_slice`
+    /// was called without a base dir set.
+    ExternalUri { path_str: String, mime: Option<String> },
+    /// The gltf crate exposed a source variant we don't know how to honour,
+    /// or the bytes were truncated.
+    Unsupported,
+}
+
+/// Decode one image source (post-extraction) into a CPU-side `image::Data`.
+/// Dispatches between embedded-bytes, external-URI-on-disk, and the
+/// unsupported error path.
+fn load_single_image_custom(src: RawSource) -> GltfResult<gltf::image::Data> {
+    match src {
+        RawSource::Bytes { bytes, mime } => decode_image_bytes(&bytes, mime.as_deref()),
+        RawSource::ExternalUri { path_str, mime } => {
+            let path_str = path_str.strip_prefix("file://").unwrap_or(&path_str).to_owned();
+            let Some(base) = image_base_dir() else {
+                return Err(GltfError::UnsupportedFeature(
+                    format!("external URI image without filesystem context: {path_str}")
+                ));
+            };
+            let resolved = base.join(&path_str);
+            let bytes = std::fs::read(&resolved).map_err(|e| {
+                GltfError::Io(gltf::Error::Io(e))
+            })?;
+            decode_image_bytes(&bytes, mime.as_deref())
+        }
+        RawSource::Unsupported => Err(GltfError::UnsupportedFeature(
+            "image source variant not understood (truncated bytes or unknown URI)".to_owned()
+        )),
+    }
+}
+
+/// Convert a borrowed `gltf::image::Source<'_>` into the owned, `Send`able
+/// `RawSource` used by the parallel-decode path. Inline-bytes sources are
+/// copied out of the document; external URIs are stashed as relative
+/// paths for `load_single_image_custom` to resolve later.
+fn extract_raw_source(
+    src:         gltf::image::Source<'_>,
+    buffer_data: &[gltf::buffer::Data],
+) -> RawSource {
+    match src {
+        gltf::image::Source::View { view, mime_type } => {
+            let buf = &buffer_data[view.buffer().index()].0;
+            match buf.get(view.offset()..view.offset() + view.length()) {
+                Some(slice) => RawSource::Bytes {
+                    bytes: slice.to_vec(),
+                    mime:  Some(mime_type.to_owned()),
+                },
+                None => RawSource::Unsupported,
+            }
+        }
+        gltf::image::Source::Uri { uri, mime_type } => {
+            if let Some(rest) = uri.strip_prefix("data:") {
+                let mut parts = rest.splitn(2, ";base64,");
+                let uri_mime = parts.next().map(str::to_owned);
+                if let Some(b64) = parts.next() {
+                    if let Some(bytes) = simple_base64_decode(b64) {
+                        let mime = uri_mime.or_else(|| mime_type.map(str::to_owned));
+                        return RawSource::Bytes { bytes, mime };
+                    }
+                }
+                RawSource::Unsupported
+            } else {
+                RawSource::ExternalUri {
+                    path_str: uri.to_owned(),
+                    mime:     mime_type.map(str::to_owned),
+                }
+            }
+        }
+    }
+}
+
 fn load_images_custom(
     doc: &gltf::Document,
     buffer_data: &[gltf::buffer::Data],
 ) -> Vec<gltf::image::Data> {
     use rayon::prelude::*;
-
-    // Pre-extract owned sources sequentially (gltf types aren't Send).
-    enum RawSource {
-        Bytes { bytes: Vec<u8>, mime: Option<String> },
-        Unsupported,
-    }
-    let sources: Vec<RawSource> = doc.images().map(|img| {
-        match img.source() {
-            gltf::image::Source::View { view, mime_type } => {
-                let buf = &buffer_data[view.buffer().index()].0;
-                match buf.get(view.offset()..view.offset() + view.length()) {
-                    Some(slice) => RawSource::Bytes {
-                        bytes: slice.to_vec(),
-                        mime:  Some(mime_type.to_owned()),
-                    },
-                    None => RawSource::Unsupported,
-                }
-            }
-            gltf::image::Source::Uri { uri, mime_type } => {
-                if let Some(rest) = uri.strip_prefix("data:") {
-                    let mut parts = rest.splitn(2, ";base64,");
-                    let uri_mime = parts.next().map(str::to_owned);
-                    if let Some(b64) = parts.next() {
-                        if let Some(bytes) = simple_base64_decode(b64) {
-                            let mime = uri_mime.or_else(|| mime_type.map(str::to_owned));
-                            return RawSource::Bytes { bytes, mime };
-                        }
-                    }
-                }
-                RawSource::Unsupported
-            }
-        }
-    }).collect();
-
+    // Pre-extract owned sources sequentially (gltf types aren't Send),
+    // then decode in parallel through `load_single_image_custom`.
+    let sources: Vec<RawSource> = doc.images()
+        .map(|img| extract_raw_source(img.source(), buffer_data))
+        .collect();
     let dummy = || gltf::image::Data {
         pixels: vec![0, 0, 0, 0],
         format: gltf::image::Format::R8G8B8A8,
         width: 1, height: 1,
     };
-
-    // Decode in parallel — each image is independent.
-    sources.into_par_iter().map(|src| match src {
-        RawSource::Bytes { bytes, mime } => {
-            decode_image_bytes(&bytes, mime.as_deref()).unwrap_or_else(|_| dummy())
-        }
-        RawSource::Unsupported => dummy(),
-    }).collect()
+    sources.into_par_iter()
+        .map(|src| load_single_image_custom(src).unwrap_or_else(|_| dummy()))
+        .collect()
 }
 
-fn load_single_image_custom(
-    source:      gltf::image::Source<'_>,
-    buffer_data: &[gltf::buffer::Data],
-) -> GltfResult<gltf::image::Data> {
-    match source {
-        gltf::image::Source::View { view, mime_type } => {
-            let buf = &buffer_data[view.buffer().index()].0;
-            let bytes = buf.get(view.offset()..view.offset() + view.length())
-                .ok_or(GltfError::InvalidAccessor("image view out of bounds"))?;
-            decode_image_bytes(bytes, Some(mime_type))
-        }
-        gltf::image::Source::Uri { uri, mime_type } => {
-            // Only data URIs are supported in slice context (no filesystem access).
-            if let Some(rest) = uri.strip_prefix("data:") {
-                let mut parts = rest.splitn(2, ";base64,");
-                let uri_mime = parts.next();
-                let b64 = parts.next()
-                    .ok_or(GltfError::InvalidAccessor("bad data URI format"))?;
-                let bytes = simple_base64_decode(b64)
-                    .ok_or(GltfError::InvalidAccessor("base64 decode failed"))?;
-                let eff_mime = uri_mime.or(mime_type);
-                decode_image_bytes(&bytes, eff_mime)
-            } else {
-                // External URI: fall through to gltf crate, which will error
-                // for slice context — treat as unsupported.
-                Err(GltfError::UnsupportedFeature(
-                    format!("external URI image in slice context: {uri}")
-                ))
-            }
-        }
-    }
+// Per-thread image-resolution base directory. Set by `GltfAsset::load` so
+// `load_images_custom` can resolve external URI references to disk;
+// `load_slice` callers leave this `None` and external URIs error cleanly.
+thread_local! {
+    static IMAGE_BASE_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn set_image_base_dir(p: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    IMAGE_BASE_DIR.with(|d| std::mem::replace(&mut *d.borrow_mut(), p))
+}
+fn image_base_dir() -> Option<std::path::PathBuf> {
+    IMAGE_BASE_DIR.with(|d| d.borrow().clone())
 }
 
 fn decode_image_bytes(bytes: &[u8], mime_type: Option<&str>) -> GltfResult<gltf::image::Data> {
@@ -1014,6 +1115,153 @@ fn decode_standard_image(
 
 /// Decode a KTX2 container to raw RGBA8 pixels.
 /// Handles BasisLZ (ETC1S) and raw (UASTC) supercompression.
+/// Decode an uncompressed KTX2 level (`SupercompressionScheme::None`)
+/// into a tightly-packed RGBA8 buffer. Dispatches on the Vulkan format
+/// enum to cover the formats glTF assets actually use — the BC-block
+/// family (BC1/2/3/4/5/7), the common UNORM/SRGB byte layouts (R8 /
+/// R8G8 / R8G8B8 / R8G8B8A8 / B8G8R8A8), and `R16G16B16A16_SFLOAT`. The
+/// special "UASTC in a vkFormat=0 wrapper" case routes through the
+/// BasisU decoder. Anything else surfaces as an explicit unsupported
+/// error rather than silent black output.
+fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -> GltfResult<Vec<u8>> {
+    use crate::codec::bc;
+    let n = (w as usize) * (h as usize);
+    Ok(match vk_format {
+        0 => crate::codec::basisu_uastc::transcode_to_rgba8(level_data, w, h).to_vec(),
+
+        // Single-channel UNORM/SRGB → splat the value into R, fill G=B=0, A=255.
+        9 | 15 => {
+            let take = level_data.len().min(n);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..take {
+                out[i * 4]     = level_data[i];
+                out[i * 4 + 3] = 255;
+            }
+            out
+        }
+
+        // Two-channel UNORM/SRGB → R, G, 0, 255.
+        16 | 22 => {
+            let take = level_data.len().min(n * 2);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..(take / 2) {
+                out[i * 4]     = level_data[i * 2];
+                out[i * 4 + 1] = level_data[i * 2 + 1];
+                out[i * 4 + 3] = 255;
+            }
+            out
+        }
+
+        // Three-channel UNORM/SRGB → R, G, B, 255.
+        23 | 29 => {
+            let take = level_data.len().min(n * 3);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..(take / 3) {
+                out[i * 4]     = level_data[i * 3];
+                out[i * 4 + 1] = level_data[i * 3 + 1];
+                out[i * 4 + 2] = level_data[i * 3 + 2];
+                out[i * 4 + 3] = 255;
+            }
+            out
+        }
+
+        // R8G8B8A8 UNORM/SRGB → direct passthrough (truncate to expected
+        // length to defend against trailing padding).
+        37 | 43 => {
+            let take = level_data.len().min(n * 4);
+            level_data[..take].to_vec()
+        }
+
+        // B8G8R8A8 UNORM/SRGB → swizzle BGRA → RGBA per texel.
+        44 | 50 => {
+            let take = level_data.len().min(n * 4);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..(take / 4) {
+                out[i * 4]     = level_data[i * 4 + 2];
+                out[i * 4 + 1] = level_data[i * 4 + 1];
+                out[i * 4 + 2] = level_data[i * 4];
+                out[i * 4 + 3] = level_data[i * 4 + 3];
+            }
+            out
+        }
+
+        // R16G16B16A16_SFLOAT — convert each half-precision lane to a
+        // clamped u8 (the LDR pipeline accepts this lossy cast for HDR
+        // sources; a future tone-mapping pass would do better).
+        97 => {
+            let take = level_data.len().min(n * 8);
+            let mut out = vec![0u8; n * 4];
+            for i in 0..(take / 8) {
+                for c in 0..4 {
+                    let bytes = [level_data[i * 8 + c * 2], level_data[i * 8 + c * 2 + 1]];
+                    let raw = u16::from_le_bytes(bytes);
+                    out[i * 4 + c] = half_to_u8(raw);
+                }
+            }
+            out
+        }
+
+        // ── Block-compressed (BC1-BC7). VK_FORMAT_BC* enums:
+        //   131 BC1_RGB_UNORM,  132 BC1_RGB_SRGB,
+        //   133 BC1_RGBA_UNORM, 134 BC1_RGBA_SRGB,
+        //   135 BC2_UNORM, 136 BC2_SRGB, 137 BC3_UNORM, 138 BC3_SRGB,
+        //   139 BC4_UNORM, 140 BC4_SNORM, 141 BC5_UNORM, 142 BC5_SNORM,
+        //   143 BC6H_UFLOAT, 144 BC6H_SFLOAT, 145 BC7_UNORM, 146 BC7_SRGB.
+        131 | 132 | 133 | 134 => bc::decode_bc1(level_data, w, h).to_vec(),
+        135 | 136                => bc::decode_bc2(level_data, w, h).to_vec(),
+        137 | 138                => bc::decode_bc3(level_data, w, h).to_vec(),
+        139 | 140                => bc::decode_bc4(level_data, w, h).to_vec(),
+        141 | 142                => bc::decode_bc5(level_data, w, h).to_vec(),
+        145 | 146                => bc::decode_bc7(level_data, w, h).to_vec(),
+
+        // ETC2 + EAC family.
+        147 | 148 => crate::codec::etc2::decode_etc2_rgb(level_data, w, h).to_vec(),
+        149 | 150 => crate::codec::etc2::decode_etc2_rgba1(level_data, w, h).to_vec(),
+        151 | 152 => crate::codec::etc2::decode_etc2_rgba8(level_data, w, h).to_vec(),
+        153 | 154 => crate::codec::etc2::decode_eac_r11(level_data, w, h).to_vec(),
+        155 | 156 => crate::codec::etc2::decode_eac_r11g11(level_data, w, h).to_vec(),
+
+        // ASTC LDR: vkFormats 157..=184 cover 14 block sizes × {UNORM, SRGB}.
+        157 | 158 => crate::codec::astc::decode_astc(level_data, w, h, 4,  4 ).to_vec(),
+        159 | 160 => crate::codec::astc::decode_astc(level_data, w, h, 5,  4 ).to_vec(),
+        161 | 162 => crate::codec::astc::decode_astc(level_data, w, h, 5,  5 ).to_vec(),
+        163 | 164 => crate::codec::astc::decode_astc(level_data, w, h, 6,  5 ).to_vec(),
+        165 | 166 => crate::codec::astc::decode_astc(level_data, w, h, 6,  6 ).to_vec(),
+        167 | 168 => crate::codec::astc::decode_astc(level_data, w, h, 8,  5 ).to_vec(),
+        169 | 170 => crate::codec::astc::decode_astc(level_data, w, h, 8,  6 ).to_vec(),
+        171 | 172 => crate::codec::astc::decode_astc(level_data, w, h, 8,  8 ).to_vec(),
+        173 | 174 => crate::codec::astc::decode_astc(level_data, w, h, 10, 5 ).to_vec(),
+        175 | 176 => crate::codec::astc::decode_astc(level_data, w, h, 10, 6 ).to_vec(),
+        177 | 178 => crate::codec::astc::decode_astc(level_data, w, h, 10, 8 ).to_vec(),
+        179 | 180 => crate::codec::astc::decode_astc(level_data, w, h, 10, 10).to_vec(),
+        181 | 182 => crate::codec::astc::decode_astc(level_data, w, h, 12, 10).to_vec(),
+        183 | 184 => crate::codec::astc::decode_astc(level_data, w, h, 12, 12).to_vec(),
+
+        other => return Err(GltfError::UnsupportedFeature(
+            format!("KTX2 uncompressed vkFormat {other}")
+        )),
+    })
+}
+
+/// IEEE-754 binary16 (half) → clamped u8. We bias to [0,1] before scaling
+/// so HDR values land at 255 rather than wrapping; sub-zero clamps to 0.
+fn half_to_u8(h: u16) -> u8 {
+    let sign = (h >> 15) & 1;
+    let exp  = ((h >> 10) & 0x1f) as i32;
+    let mant = (h & 0x3ff) as u32;
+    let f = if exp == 0 && mant == 0 { 0.0 }
+            else if exp == 0          { (mant as f32) * (1.0 / (1u32 << 24) as f32) }
+            else if exp == 0x1f       { if mant == 0 { f32::INFINITY } else { f32::NAN } }
+            else {
+                let m = (mant | 0x400) as f32;
+                m * (1u32 << (exp - 25).max(-126) as u32) as f32
+            };
+    let f = if sign == 1 { -f } else { f };
+    if !f.is_finite() || f <= 0.0 { 0 }
+    else if f >= 1.0              { 255 }
+    else                           { (f * 255.0 + 0.5) as u8 }
+}
+
 fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
     use crate::codec::ktx2::{Ktx2, SupercompressionScheme};
 
@@ -1025,29 +1273,24 @@ fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
         .ok_or(GltfError::InvalidAccessor("KTX2 has no level 0 data"))?;
 
     let rgba: Vec<u8> = match ktx.supercompression {
-        SupercompressionScheme::None => {
-            // vkFormat == 0 (VK_FORMAT_UNDEFINED) → UASTC 4×4 blocks.
-            // Any other format we attempt raw R8G8B8A8 passthrough.
-            if ktx.vk_format == 0 {
-                crate::codec::basisu_uastc::transcode_to_rgba8(level_data, w, h).to_vec()
-            } else if ktx.vk_format == 37 {
-                // VK_FORMAT_R8G8B8A8_UNORM — already decoded.
-                level_data.to_vec()
-            } else {
-                return Err(GltfError::UnsupportedFeature(
-                    format!("KTX2 uncompressed vkFormat {}", ktx.vk_format),
-                ));
-            }
-        }
+        SupercompressionScheme::None => decode_ktx2_uncompressed(ktx.vk_format, level_data, w, h)?,
         SupercompressionScheme::BasisLZ => {
             // ETC1S via BasisLZ supercompression.
             crate::codec::basisu_etc1s::transcode_to_rgba8(
                 &ktx.sgd, level_data, w, h,
             )?.to_vec()
         }
-        _ => {
+        SupercompressionScheme::Zstd => {
+            // Run the hand-rolled ZSTD decoder over the level payload to
+            // get the raw uncompressed bytes, then dispatch those bytes
+            // through `decode_ktx2_uncompressed` — KTX2 ZSTD always
+            // wraps a non-supercompressed vkFormat underneath.
+            let raw = crate::codec::zstd::decompress(level_data)?;
+            decode_ktx2_uncompressed(ktx.vk_format, &raw, w, h)?
+        }
+        other => {
             return Err(GltfError::UnsupportedFeature(
-                format!("KTX2 supercompression scheme {:?}", ktx.supercompression),
+                format!("KTX2 supercompression scheme {other:?}")
             ));
         }
     };

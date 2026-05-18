@@ -143,12 +143,9 @@ impl Ktx2 {
             Vec::new()
         };
 
-        // We don't use DFD directly but validate it's present for BasisLZ.
-        if matches!(supercomp, SupercompressionScheme::Zstd) {
-            return Err(GltfError::UnsupportedFeature(
-                "KTX2 ZSTD supercompression".to_owned(),
-            ));
-        }
+        // ZSTD supercompression is decoded by `crate::codec::zstd` when
+        // the level payload is consumed in `asset.rs` — the parser
+        // doesn't need to do anything special here.
 
         let _ = (dfd_byte_offset, dfd_byte_length); // validated above
 

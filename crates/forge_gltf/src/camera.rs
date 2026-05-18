@@ -129,3 +129,70 @@ impl Camera {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Per spec §3.10.3.4 the orthographic projection matrix for
+    /// (x_mag = 2, y_mag = 1.5, z_near = 1, z_far = 100) lays out as:
+    ///   [ 1/2     0       0           0
+    ///     0       1/1.5   0           0
+    ///     0       0       2/(zn-zf)   0
+    ///     0       0       (zn+zf)/(zn-zf)  1 ]
+    /// Column-major (each column listed top-to-bottom in the 16-array).
+    #[test]
+    fn orthographic_projection_matrix_matches_spec_3_10_3_4() {
+        let cam = Camera::Orthographic {
+            name: None,
+            x_mag: 2.0, y_mag: 1.5,
+            z_near: 1.0, z_far: 100.0,
+        };
+        let m = cam.orthographic_matrix().expect("ortho matrix");
+        let expected = [
+            1.0 / 2.0, 0.0,        0.0,                       0.0,
+            0.0,       1.0 / 1.5,  0.0,                       0.0,
+            0.0,       0.0,        2.0 / (1.0 - 100.0),       0.0,
+            0.0,       0.0,        (100.0 + 1.0) / (1.0 - 100.0), 1.0,
+        ];
+        for i in 0..16 {
+            assert!((m[i] - expected[i]).abs() < 1e-5,
+                "lane {i}: got {} expected {}", m[i], expected[i]);
+        }
+    }
+
+    /// Per spec §3.10.2 the view matrix is built from the camera node's
+    /// world transform with scale STRIPPED. A non-uniform-scale input
+    /// must still produce a rotation-only result.
+    #[test]
+    fn view_matrix_strips_scale_per_spec_3_10_2() {
+        // World matrix = T(5, 0, 0) * S(2, 3, 4) — column-major.
+        // (translation last column; non-uniform scale on the diagonal of
+        // the rotation block.)
+        let world = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 3.0, 0.0, 0.0,
+            0.0, 0.0, 4.0, 0.0,
+            5.0, 0.0, 0.0, 1.0,
+        ];
+        let view = Camera::view_matrix(&world);
+        // Basis vectors of the view's upper-3x3 (transpose of the
+        // scale-stripped rotation) must be unit-length and orthogonal —
+        // i.e. each column has |v| ≈ 1.
+        for col in 0..3 {
+            let x = view[col * 4 + 0];
+            let y = view[col * 4 + 1];
+            let z = view[col * 4 + 2];
+            let len = (x*x + y*y + z*z).sqrt();
+            assert!((len - 1.0).abs() < 1e-5,
+                "view column {col} length {len} (should be 1.0 — scale not stripped)");
+        }
+        // Translation column applies the world's -t expressed in the
+        // stripped basis. Translation is [-5, 0, 0, 1] (identity rotation
+        // ⇒ view * world_translation = -world_translation).
+        assert!((view[12] - (-5.0)).abs() < 1e-5);
+        assert!((view[13] -   0.0).abs() < 1e-5);
+        assert!((view[14] -   0.0).abs() < 1e-5);
+        assert!((view[15] -   1.0).abs() < 1e-5);
+    }
+}

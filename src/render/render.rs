@@ -82,25 +82,53 @@ impl Renderer {
     pub fn build_compute_factory(
         &mut self,
         window_h: WindowHandle,
-        proto: Proto<ComputeTag>,
+        proto:    Proto<ComputeTag>,
     ) -> ForgeResult<FactoryHandle> {
+        let device = self.forge.device.clone();
         let window = self
             .windows
             .get_mut(window_h)
             .expect("window handle is stale or was never valid");
-        window.build_compute_factory(proto, &mut self.forge)
+        window.build_compute_factory(proto, &mut self.forge, &device)
+    }
+
+    /// Async batched compute. Returns the factory handle + the semaphore
+    /// the downstream graphics submit must wait on at vertex stages.
+    pub fn build_compute_factory_async(
+        &mut self,
+        window_h: WindowHandle,
+        proto:    Proto<ComputeTag>,
+    ) -> ForgeResult<(FactoryHandle, ash::vk::Semaphore)> {
+        let device = self.forge.device.clone();
+        let window = self
+            .windows
+            .get_mut(window_h)
+            .expect("window handle is stale or was never valid");
+        window.build_compute_factory_async(proto, &mut self.forge, &device)
     }
 
     pub fn build_graphics_factory(
         &mut self,
         window_h: WindowHandle,
-        proto: Proto<GraphicsTag>,
+        proto:    Proto<GraphicsTag>,
     ) -> FactoryHandle {
+        let device = self.forge.device.clone();
         let window = self
             .windows
             .get_mut(window_h)
             .expect("window handle is stale or was never valid");
-        window.build_graphics_factory(proto)
+        window.build_graphics_factory(proto, &device)
+    }
+
+    /// Wait on the most-recently-submitted frame fence for `window_h`.
+    /// Use this in per-frame setup code to guarantee the previous frame's
+    /// resources are no longer in flight before recycling/destroying them.
+    /// Replaces `device_wait_idle` for single-window apps.
+    pub fn wait_for_last_submission(&self, window_h: WindowHandle) -> ForgeResult<()> {
+        let device = self.forge.device.clone();
+        let window = self.windows.get(window_h)
+            .expect("window handle is stale or was never valid");
+        window.wait_for_last_submission(&device)
     }
 }
 

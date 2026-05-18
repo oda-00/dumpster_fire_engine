@@ -312,14 +312,11 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
 
     // Phase 2: prefix-sum each stripe in-place. Sequential access — one
     // contiguous vertex_count-byte stripe per byte-position; the entire
-    // stripe stays hot in L1.
+    // stripe stays hot in L1. SIMD-vectorised on x86_64 (SSE2) and aarch64
+    // (NEON) with a scalar fallback for everything else.
     for b in 0..vertex_size {
         let stripe = &mut stripes[b * vertex_count .. (b + 1) * vertex_count];
-        let mut prev: u8 = 0;
-        for slot in stripe.iter_mut() {
-            *slot = slot.wrapping_add(prev);
-            prev = *slot;
-        }
+        prefix_sum_u8(stripe);
     }
 
     // Phase 3: interleave stripes → vertex-major output, written straight
@@ -352,6 +349,125 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
 #[inline(always)]
 fn decode_zigzag8(v: u8) -> u8 {
     (v >> 1) ^ (0u8.wrapping_sub(v & 1))
+}
+
+/// In-place wrapping-add prefix-sum over a byte slice — the bottleneck of
+/// the meshopt vertex codec's delta-decode pass. SIMD-vectorised where the
+/// runtime CPU supports it (SSE2 on x86_64, NEON on aarch64); scalar
+/// fallback handles the tail and every other target.
+#[inline]
+fn prefix_sum_u8(data: &mut [u8]) {
+    // x86_64 SSE2 (universally available on the architecture per Rust's
+    // baseline; no runtime detection required).
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        prefix_sum_u8_sse2(data);
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        prefix_sum_u8_neon(data);
+        return;
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        prefix_sum_u8_scalar(data);
+    }
+}
+
+#[allow(dead_code)] // used on non-SIMD targets and as the SIMD tail handler
+#[inline(always)]
+fn prefix_sum_u8_scalar(data: &mut [u8]) {
+    let mut prev: u8 = 0;
+    for slot in data.iter_mut() {
+        prev = slot.wrapping_add(prev);
+        *slot = prev;
+    }
+}
+
+/// SSE2 byte-wise prefix-sum. Processes 16 bytes per iteration using the
+/// classic 4-step shift-and-add reduction, then folds in the carry from
+/// the previous chunk via a broadcast. Modular u8 arithmetic falls out of
+/// `_mm_add_epi8` for free.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn prefix_sum_u8_sse2(data: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let len = data.len();
+    let ptr = data.as_mut_ptr();
+    let mut i = 0usize;
+    let mut carry = _mm_setzero_si128();
+
+    while i + 16 <= len {
+        unsafe {
+            let mut v = _mm_loadu_si128(ptr.add(i) as *const __m128i);
+            // 4-step doubling prefix-sum within the 128-bit register.
+            v = _mm_add_epi8(v, _mm_slli_si128(v, 1));
+            v = _mm_add_epi8(v, _mm_slli_si128(v, 2));
+            v = _mm_add_epi8(v, _mm_slli_si128(v, 4));
+            v = _mm_add_epi8(v, _mm_slli_si128(v, 8));
+            // Add carry (broadcast of the previous chunk's last byte).
+            v = _mm_add_epi8(v, carry);
+            _mm_storeu_si128(ptr.add(i) as *mut __m128i, v);
+            // New carry = top byte broadcast across all lanes.
+            let top = _mm_extract_epi16(v, 7) as u32; // high u16 in lane 7
+            let last_byte = (top >> 8) as i8;
+            carry = _mm_set1_epi8(last_byte);
+        }
+        i += 16;
+    }
+
+    // Scalar tail.
+    if i < len {
+        // Already inside an `unsafe fn`; the surrounding contract allows
+        // raw SSE intrinsics without an additional `unsafe` block.
+        let mut prev = _mm_extract_epi16(carry, 0) as u8;
+        while i < len {
+            unsafe {
+                let v = *ptr.add(i);
+                prev = v.wrapping_add(prev);
+                *ptr.add(i) = prev;
+            }
+            i += 1;
+        }
+    }
+}
+
+/// NEON byte-wise prefix-sum — same algorithm as the SSE2 version.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn prefix_sum_u8_neon(data: &mut [u8]) {
+    use std::arch::aarch64::*;
+    let len = data.len();
+    let ptr = data.as_mut_ptr();
+    let mut i = 0usize;
+    let mut carry: u8 = 0;
+
+    while i + 16 <= len {
+        unsafe {
+            let mut v = vld1q_u8(ptr.add(i));
+            // Shift-and-add doubling — `vextq_u8(zero, v, 16 - shift)` shifts
+            // v left by `shift` lanes (filling with zeros from the left).
+            let z = vdupq_n_u8(0);
+            v = vaddq_u8(v, vextq_u8(z, v, 16 - 1));
+            v = vaddq_u8(v, vextq_u8(z, v, 16 - 2));
+            v = vaddq_u8(v, vextq_u8(z, v, 16 - 4));
+            v = vaddq_u8(v, vextq_u8(z, v, 16 - 8));
+            v = vaddq_u8(v, vdupq_n_u8(carry));
+            vst1q_u8(ptr.add(i), v);
+            carry = vgetq_lane_u8(v, 15);
+        }
+        i += 16;
+    }
+    // Scalar tail.
+    while i < len {
+        unsafe {
+            let v = *ptr.add(i);
+            carry = v.wrapping_add(carry);
+            *ptr.add(i) = carry;
+        }
+        i += 1;
+    }
 }
 
 // ─── Index codec: TRIANGLES ──────────────────────────────────────────────────

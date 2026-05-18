@@ -22,6 +22,13 @@ layout(set = 2, binding = 0, std430) readonly buffer SkinPalette {
     mat4 joints[];
 } palette;
 
+// Set 3 binding 0 — per-instance mat4 offsets (EXT_mesh_gpu_instancing).
+// Single identity for non-instanced draws; per-instance offsets for
+// instanced draws. Composed with the skinning result before MVP.
+layout(set = 3, binding = 0, std430) readonly buffer Instances {
+    mat4 m[];
+} instances;
+
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outUv;
 
@@ -43,12 +50,13 @@ void main() {
          + inWeights.w * palette.joints[j.w])
         : mat4(1.0);
 
-    vec4 posed_pos = skin * vec4(inPosition, 1.0);
+    mat4 instance_offset = instances.m[gl_InstanceIndex];
+    vec4 posed_pos = instance_offset * skin * vec4(inPosition, 1.0);
     gl_Position    = pc.mvp * posed_pos;
 
-    // Transform normal by the upper-left 3x3 of the skin matrix. For uniform
+    // Transform normal by the upper-left 3x3 of (instance * skin). For uniform
     // scale this is exact; for non-uniform scale the engine would need to
     // pass an inverse-transpose palette — out of scope here.
-    outNormal = mat3(skin) * inNormal;
+    outNormal = mat3(instance_offset) * mat3(skin) * inNormal;
     outUv     = inUv;
 }

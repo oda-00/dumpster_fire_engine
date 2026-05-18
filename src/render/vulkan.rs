@@ -38,6 +38,10 @@ pub struct VulkanContext {
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub depth_format: vk::Format,
     pub device_name: Arc<str>,
+    /// Maximum MSAA sample count the chosen device supports for both
+    /// colour and depth framebuffer attachments. `TYPE_1` when the
+    /// driver (e.g. lavapipe) doesn't expose multi-sample storage.
+    pub msaa_samples: vk::SampleCountFlags,
 }
 
 impl VulkanContext {
@@ -84,7 +88,11 @@ impl VulkanContext {
             .application_version(0)
             .engine_name(&engine_name_c)
             .engine_version(0)
-            .api_version(vk::API_VERSION_1_2);
+            // Vulkan 1.3 baseline: needed for synchronization2 + dynamic
+            // rendering. Lavapipe (Mesa software Vulkan) reports 1.3 since
+            // Mesa 23.0; real GPUs likewise. The KHR ext fallback isn't
+            // worth maintaining when 1.3 is universally available.
+            .api_version(vk::API_VERSION_1_3);
 
         let instance_extensions: Vec<*const i8> = match display_handle {
             Some(dh) => ash_window::enumerate_required_extensions(dh)
@@ -134,27 +142,68 @@ impl VulkanContext {
             vk::QueueFlags::COMPUTE
         };
 
-        let mut chosen: Option<(vk::PhysicalDevice, u32)> = None;
-        let mut best_score: (u8, u64) = (0, 0);
+        // Optional manual override: pick a specific physical device by its
+        // index in the enumeration order. Useful in WSL where the loader
+        // may surface both /dev/dxg (DZN/D3D12 — a real GPU) and lavapipe
+        // (CPU); the user can force the GPU even when our heuristic loses.
+        let override_idx: Option<usize> = std::env::var("DUMPSTER_VK_DEVICE_INDEX")
+            .ok().and_then(|s| s.parse().ok());
 
-        for pd in physicals {
+        // WSL detection — `/proc/version` carries "microsoft" / "WSL" on
+        // WSL1+2 kernels. Cached to a single read; missing or unreadable
+        // means "not WSL", which is fine for the diagnostic-only use.
+        let is_wsl = std::fs::read_to_string("/proc/version")
+            .map(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.contains("microsoft") || lower.contains("wsl")
+            })
+            .unwrap_or(false);
+        if is_wsl {
+            println!("vulkan: detected WSL host");
+            // Warn if the user has forced lavapipe on WSL — that's almost
+            // certainly a mistake; the dzn ICD (real D3D12-backed GPU) is
+            // what they actually want.
+            if let Ok(icds) = std::env::var("VK_ICD_FILENAMES") {
+                if icds.to_ascii_lowercase().contains("lvp_icd") {
+                    eprintln!(
+                        "vulkan: VK_ICD_FILENAMES={icds} forces lavapipe on a WSL host\n\
+                         vulkan: DZN (the real D3D12-backed GPU) will NOT be considered.\n\
+                         vulkan: unset VK_ICD_FILENAMES (or point it at dzn_icd.x86_64.json)\n\
+                         vulkan: to let the loader pick the GPU."
+                    );
+                }
+            }
+        }
+
+        let mut chosen: Option<(vk::PhysicalDevice, u32)> = None;
+        let mut best_score: (u8, u64, u8) = (0, 0, 0);
+
+        println!("vulkan: enumerating {} physical device(s)", physicals.len());
+        for (pd_idx, pd) in physicals.into_iter().enumerate() {
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(pd) };
-            let Some((qfi, _)) = families
+            let qfi_opt = families
                 .iter()
                 .enumerate()
                 .find(|(_, f)| f.queue_flags.contains(required_flags))
-            else {
-                continue;
-            };
+                .map(|(i, _)| i as u32);
 
             let props = unsafe { instance.get_physical_device_properties(pd) };
+            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+                .to_string_lossy();
             let type_tier: u8 = match props.device_type {
                 vk::PhysicalDeviceType::DISCRETE_GPU   => 4,
                 vk::PhysicalDeviceType::INTEGRATED_GPU => 3,
                 vk::PhysicalDeviceType::VIRTUAL_GPU    => 2,
                 vk::PhysicalDeviceType::CPU            => 1,
                 _                                      => 0,
+            };
+            let type_str = match props.device_type {
+                vk::PhysicalDeviceType::DISCRETE_GPU   => "DISCRETE_GPU",
+                vk::PhysicalDeviceType::INTEGRATED_GPU => "INTEGRATED_GPU",
+                vk::PhysicalDeviceType::VIRTUAL_GPU    => "VIRTUAL_GPU",
+                vk::PhysicalDeviceType::CPU            => "CPU",
+                _                                      => "OTHER",
             };
 
             let mem = unsafe { instance.get_physical_device_memory_properties(pd) };
@@ -165,10 +214,43 @@ impl VulkanContext {
                 .map(|i| mem.memory_heaps[i].size)
                 .sum();
 
-            let score = (type_tier, vram);
+            let usable = qfi_opt.is_some();
+            // On WSL, the DZN driver reports the underlying physical GPU's
+            // name verbatim (e.g. "NVIDIA GeForce …", "Microsoft …",
+            // "Direct3D 12 …") rather than lavapipe's "llvmpipe …". A
+            // tertiary score component favours those when two devices
+            // share the same tier, so DZN wins over lavapipe when both
+            // surface as the loader's enumeration.
+            let dzn_pref: u8 = {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("microsoft")
+                    || lower.contains("direct3d")
+                    || lower.contains("d3d12")
+                    || lower.contains("dzn") { 2 }
+                else if lower.contains("llvmpipe")
+                    || lower.contains("swiftshader") { 0 }
+                else { 1 }
+            };
+            println!(
+                "vulkan:   [{pd_idx}] {name} — {type_str} (tier {type_tier}), \
+                 {:.0} MB DEVICE_LOCAL, queue_ok={usable}, dzn_pref={dzn_pref}",
+                vram as f64 / 1_048_576.0,
+            );
+            let Some(qfi) = qfi_opt else { continue };
+
+            // Manual override beats heuristic.
+            if Some(pd_idx) == override_idx {
+                chosen = Some((pd, qfi));
+                best_score = (u8::MAX, u64::MAX, u8::MAX);
+                println!("vulkan: device [{pd_idx}] forced via DUMPSTER_VK_DEVICE_INDEX");
+                continue;
+            }
+            if override_idx.is_some() { continue; }
+
+            let score = (type_tier, vram, dzn_pref);
             if score > best_score {
                 best_score = score;
-                chosen = Some((pd, qfi as u32));
+                chosen = Some((pd, qfi));
             }
         }
 
@@ -232,14 +314,23 @@ impl VulkanContext {
         }
 
         let swapchain_ext = ash::khr::swapchain::NAME.as_ptr();
-        let device_extensions: Vec<*const i8> = if want_graphics {
-            vec![swapchain_ext]
-        } else {
-            Vec::new()
-        };
+        let sync2_ext     = ash::khr::synchronization2::NAME.as_ptr();
+        let mut device_extensions: Vec<*const i8> = Vec::new();
+        if want_graphics {
+            device_extensions.push(swapchain_ext);
+        }
+        device_extensions.push(sync2_ext);
+
+        // Enable the synchronization2 feature — required by every
+        // cmd_pipeline_barrier2 / queue_submit2 / VK_KHR_synchronization2
+        // call. Baked into Vulkan 1.3 but we explicitly request the KHR
+        // extension so the loader pulls it in on 1.2 drivers too.
+        let mut sync2_features = vk::PhysicalDeviceSynchronization2Features::default()
+            .synchronization2(true);
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
-            .enabled_extension_names(&device_extensions);
+            .enabled_extension_names(&device_extensions)
+            .push_next(&mut sync2_features);
 
         let device = match unsafe { instance.create_device(physical_device, &device_info, None) } {
             Ok(d) => d,
@@ -308,6 +399,24 @@ impl VulkanContext {
         )
         .unwrap_or(vk::Format::D32_SFLOAT);
 
+        // Maximum MSAA we can use for the swapchain colour pass: take the
+        // intersection of the device's per-framebuffer colour + depth
+        // sample-count masks and pick the highest set bit. Most discrete
+        // GPUs report at least 8×; lavapipe is `TYPE_1`-only.
+        let dev_props = unsafe {
+            instance.get_physical_device_properties(physical_device)
+        };
+        let supported = dev_props.limits.framebuffer_color_sample_counts
+            & dev_props.limits.framebuffer_depth_sample_counts;
+        let msaa_samples = if supported.contains(vk::SampleCountFlags::TYPE_64) { vk::SampleCountFlags::TYPE_64 }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_32) { vk::SampleCountFlags::TYPE_32 }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_16) { vk::SampleCountFlags::TYPE_16 }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_8 ) { vk::SampleCountFlags::TYPE_8  }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_4 ) { vk::SampleCountFlags::TYPE_4  }
+                      else if supported.contains(vk::SampleCountFlags::TYPE_2 ) { vk::SampleCountFlags::TYPE_2  }
+                      else                                                       { vk::SampleCountFlags::TYPE_1  };
+        println!("vulkan: MSAA capability — using {msaa_samples:?}");
+
         Ok(Self {
             entry,
             instance,
@@ -322,6 +431,7 @@ impl VulkanContext {
             memory_properties,
             depth_format,
             device_name,
+            msaa_samples,
         })
     }
 }

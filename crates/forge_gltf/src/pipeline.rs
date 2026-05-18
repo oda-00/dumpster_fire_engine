@@ -45,6 +45,9 @@ pub enum GltfPipelineKind {
     VisibilityPass,
     SkinPalette,
     MorphBlend,
+    SplatSort,
+    SplatBillboard,
+    InstanceTransforms,
     Graphics(GltfGraphicsKind),
 }
 
@@ -93,11 +96,18 @@ pub struct GraphicsDraw {
     /// Index into the node array — the source of this draw's world matrix.
     pub node:           u32,
     /// Column-major world matrix to push as model-or-MVP constant.
+    /// For instanced draws this is the base node world matrix; the
+    /// per-instance offset matrices live in `instance_matrices`.
     pub world_matrix:   [f32; 16],
     pub topology:       PrimitiveTopology,
     pub material:       Option<u32>,
     pub vertex_count:   u32,
     pub index_count:    u32,
+    /// `EXT_mesh_gpu_instancing`: when populated, the draw uses
+    /// `vkCmdDrawIndexed(idx, instance_count = matrices.len(), ...)`
+    /// and `instance_matrices[i] * world_matrix` is the per-instance
+    /// model transform. Empty → single instance with `world_matrix`.
+    pub instance_matrices: ThinVec<[f32; 16]>,
 }
 
 // ── Vertex layout the ForwardLit pipeline reads ─────────────────────────────
@@ -204,6 +214,25 @@ pub fn build_graphics_draws_with_matrices(
         } else {
             world.get(node_idx).copied().unwrap_or(IDENTITY_M4)
         };
+
+        // EXT_mesh_gpu_instancing: build the per-instance offset matrix
+        // list. Each instance's offset is composed from its T, R, S
+        // components (defaulting individually when missing) per spec.
+        let instance_matrices: ThinVec<[f32; 16]> = match &node.instances {
+            Some(inst) if !inst.is_empty() => {
+                let count = inst.len();
+                let mut v: ThinVec<[f32; 16]> = ThinVec::with_capacity(count);
+                for i in 0..count {
+                    let t = inst.translation.get(i).copied().unwrap_or([0.0, 0.0, 0.0]);
+                    let r = inst.rotation   .get(i).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                    let s = inst.scale      .get(i).copied().unwrap_or([1.0, 1.0, 1.0]);
+                    v.push(crate::scene::compose_trs(t, r, s));
+                }
+                v
+            }
+            _ => ThinVec::new(),
+        };
+
         for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
             out.push(GraphicsDraw {
                 kind:         GltfGraphicsKind::ForwardLit,
@@ -215,6 +244,7 @@ pub fn build_graphics_draws_with_matrices(
                 material:     prim.material,
                 vertex_count: prim.streams.positions.len() as u32,
                 index_count:  prim.indices.len() as u32,
+                instance_matrices: instance_matrices.clone(),
             });
         }
     }
@@ -673,5 +703,106 @@ impl GltfPipelineKind {
             GltfPipelineKind::MorphBlend          => None,
             GltfPipelineKind::Graphics(_)         => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::{Node, Scene};
+    use crate::skin::Skin;
+    use thin_vec::ThinVec;
+
+    /// glTF spec §3.7.3.2: a node with a `skin` MUST NOT apply its own
+    /// world transform to the mesh — the skin's joint palette already
+    /// contains every transform needed. `build_graphics_draws` must
+    /// reflect this by setting `world_matrix` to identity for skinned
+    /// draws.
+    #[test]
+    fn skinned_node_transform_is_ignored_in_draws() {
+        // Build a minimal asset: 1 mesh with 1 primitive, 1 node that
+        // references the mesh AND has skin index 0 set. The node's local
+        // matrix is non-identity (translation only); the skinned-draw
+        // path should ignore that and emit identity.
+        let mut asset = GltfAsset {
+            asset_metadata:      Default::default(),
+            extensions_used:     ThinVec::new(),
+            extensions_required: ThinVec::new(),
+            material_variants:   ThinVec::new(),
+            scenes:              ThinVec::new(),
+            default_scene:       None,
+            nodes:               ThinVec::new(),
+            meshes:              ThinVec::new(),
+            materials:           ThinVec::new(),
+            textures:            ThinVec::new(),
+            images:              ThinVec::new(),
+            samplers:            ThinVec::new(),
+            skins:               ThinVec::new(),
+            animations:          ThinVec::new(),
+            cameras:             ThinVec::new(),
+            lights:              ThinVec::new(),
+            gaussian_splats:     ThinVec::new(),
+        };
+
+        let mut streams = crate::mesh::VertexStreams::default();
+        streams.positions = ThinVec::from(&[[0.0_f32, 0.0, 0.0]][..]);
+        let prim = crate::mesh::Primitive {
+            topology:        crate::mesh::PrimitiveTopology::Triangles,
+            streams,
+            indices:         ThinVec::new(),
+            material:        None,
+            morph_targets:   ThinVec::new(),
+            bounds:          crate::mesh::Aabb { min: [0.0; 3], max: [0.0; 3] },
+            custom_attrs:    ThinVec::new(),
+            variant_mappings: ThinVec::new(),
+        };
+        let mesh = crate::mesh::Mesh {
+            name:       None,
+            primitives: ThinVec::from(&[prim][..]),
+            weights:    ThinVec::new(),
+        };
+        asset.meshes.push(mesh);
+
+        asset.skins.push(Skin {
+            name: None,
+            joints: ThinVec::from(&[0u32][..]),
+            inverse_bind_matrices: ThinVec::new(),
+            skeleton_root: None,
+        });
+
+        let node = Node {
+            name:        None,
+            parent:      None,
+            children:    ThinVec::new(),
+            translation: [10.0, 20.0, 30.0], // non-identity translation
+            rotation:    [0.0, 0.0, 0.0, 1.0],
+            scale:       [1.0, 1.0, 1.0],
+            local_matrix: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                10.0, 20.0, 30.0, 1.0,
+            ],
+            mesh:        Some(0),
+            camera:      None,
+            skin:        Some(0),
+            light:       None,
+            weights:     ThinVec::new(),
+            instances:   None,
+        };
+        asset.nodes.push(node);
+
+        asset.scenes.push(Scene {
+            name: None,
+            roots: ThinVec::from(&[0u32][..]),
+        });
+        asset.default_scene = Some(0);
+
+        let draws = build_graphics_draws(&asset);
+        assert_eq!(draws.len(), 1, "expected 1 draw, got {}", draws.len());
+        // Per spec §3.7.3.2 the skinned draw's world_matrix MUST be identity.
+        assert_eq!(draws[0].world_matrix, IDENTITY_M4,
+            "skinned-node world matrix should be identity (spec §3.7.3.2); got {:?}",
+            draws[0].world_matrix);
     }
 }

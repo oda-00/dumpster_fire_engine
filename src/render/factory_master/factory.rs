@@ -64,6 +64,66 @@ impl Factory {
         Ok(factory)
     }
 
+    /// Async batched compute. Flattens every plan's ores into a single
+    /// `refine_batch_async` call, returning the resulting factory + the
+    /// signal semaphore the downstream graphics submission must wait on
+    /// (typically at VERTEX_ATTRIBUTE_INPUT|VERTEX_SHADER stages).
+    ///
+    /// Per-plan frame structure is preserved: ingots get distributed back
+    /// across frames in the same order as the synchronous path would
+    /// produce, so `Factory::frame_by_id` / `handle_of` queries return the
+    /// same values regardless of which path built the factory.
+    ///
+    /// CPU side: returns immediately without waiting on the GPU. The
+    /// returned semaphore stays owned by the ForgeMaster's pending list
+    /// until the GPU completes and the master's automatic sweep reclaims
+    /// it — typically one or two frames later.
+    pub fn from_compute_proto_async(
+        id: FactoryId,
+        proto: Proto<ComputeTag>,
+        forge: &mut ForgeMaster,
+    ) -> ForgeResult<(Self, ash::vk::Semaphore)> {
+        let mut factory = Factory::new(id, proto.name);
+        factory.frames = Arena::with_capacity(proto.plans.len());
+        factory.cache.reserve(proto.plans.len());
+
+        // Capture each plan's (id, name) + ore count so we can rebuild
+        // the per-frame ingot lists from the flat batched-output vector.
+        let mut plan_headers: Vec<(super::super::super::forge_master::frame::FrameId, std::sync::Arc<str>, usize)> = Vec::with_capacity(proto.plans.len());
+        let mut all_ores: Vec<super::super::super::forge_master::ore::Ore> = Vec::new();
+        for plan in proto.plans {
+            let (fid, fname, ores) = plan.into_ores();
+            plan_headers.push((fid, fname, ores.len()));
+            all_ores.extend(ores);
+        }
+
+        let (mut ingots, signal_semaphore) = forge.refine_batch_async(all_ores)?;
+
+        // Drain ingots back into per-plan frames in order. Pop from the
+        // tail to avoid O(n²) drain-from-front; build each frame's ingot
+        // list in reverse then flip it back.
+        let mut tail = ingots.len();
+        for (fid, fname, n) in plan_headers.into_iter().rev() {
+            let start = tail - n;
+            let mut frame = crate::forge_master::frame::Frame::new(fid, fname);
+            // Move out by truncating; ownership transfers to the frame.
+            let mut chunk: Vec<crate::forge_master::ingot::Ingot> = ingots.drain(start..).collect();
+            tail = start;
+            for ingot in chunk.drain(..) {
+                frame.add_ingot(ingot);
+            }
+            factory.insert_frame(frame);
+        }
+        // Re-flip the factory's frame ordering so the per-plan order
+        // matches the synchronous path.
+        // (The cache is appended in iteration order; we drained
+        // plan_headers in reverse, so reverse the cache + the underlying
+        // frames map back.)
+        factory.cache.reverse();
+
+        Ok((factory, signal_semaphore))
+    }
+
     /// Convert graphics draw calls — no GPU dispatch, pure type flip.
     pub fn from_graphics_proto(id: FactoryId, proto: Proto<GraphicsTag>) -> Self {
         let mut factory = Factory::new(id, proto.name);

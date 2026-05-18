@@ -100,17 +100,32 @@ pub struct GraphicsForgeCacheEntry {
     pub handle: GraphicsForgeHandle,
 }
 
+/// Per-async-batch state tracked until the batch's fence has signalled.
+/// At that point the resources can be returned to their pools.
+struct PendingBatch {
+    fence:           vk::Fence,
+    semaphore:       vk::Semaphore,
+    command_buffer:  vk::CommandBuffer,
+    descriptor_sets: Vec<vk::DescriptorSet>,
+    staged_inputs:   Vec<super::ore::StagedOre>,
+}
+
 pub struct ForgeMaster {
     pub device: ash::Device,
     pub queue: vk::Queue,
     pub command_pool: vk::CommandPool,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     descriptor_pool: vk::DescriptorPool,
+    /// Legacy fence used by the synchronous `refine()` path. The async
+    /// path allocates a dedicated fence per submitted batch.
     fence: vk::Fence,
     forges: Arena<ForgeTag, Forge>,
     cache: [Option<ForgeCacheEntry>; OreKind::COMPUTE_COUNT],
     graphics_forges: Arena<GraphicsForgeTag, GraphicsForge>,
     graphics_cache: [Option<GraphicsForgeCacheEntry>; GraphicsOreKind::COUNT],
+    /// Batches submitted via `refine_batch_async`. Front = oldest. At
+    /// every async-call entry we drain completed batches from the front.
+    pending: std::collections::VecDeque<PendingBatch>,
 }
 
 impl ForgeMaster {
@@ -145,6 +160,7 @@ impl ForgeMaster {
             cache: [None; OreKind::COMPUTE_COUNT],
             graphics_forges: Arena::with_capacity(GraphicsOreKind::COUNT),
             graphics_cache: [None; GraphicsOreKind::COUNT],
+            pending: std::collections::VecDeque::new(),
         })
     }
 
@@ -258,6 +274,10 @@ impl ForgeMaster {
     }
 
     pub fn refine(&mut self, ore: Ore) -> ForgeResult<Ingot> {
+        // The sync path's `reset_descriptor_pool` at the bottom would
+        // invalidate any descriptor sets still owned by pending async
+        // batches. Drain them all here so the two modes can coexist.
+        self.await_pending()?;
         let forge_handle = self
             .handle_for_kind(ore.kind)
             .ok_or(ForgeError::MissingForge(ore.kind))?;
@@ -312,6 +332,188 @@ impl ForgeMaster {
         self.refine(Ore::new(kind, input, output, workgroups))
     }
 
+    /// Async batched compute: records every Ore in `ores` into a SINGLE
+    /// command buffer, submits it with a freshly-allocated signal
+    /// semaphore, and returns `(ingots, signal_semaphore)` without
+    /// waiting on the GPU. The returned semaphore is owned by the
+    /// `PendingBatch` tracked internally — callers MUST consume it on
+    /// the wait-side of a subsequent submission (typically the per-frame
+    /// graphics submit) within the next `FRAMES_IN_FLIGHT` frames so the
+    /// pending sweep can free it.
+    ///
+    /// Cleanup happens automatically on the next `refine_batch_async`
+    /// call OR `await_pending()` — any pending batches whose fence has
+    /// signalled are reclaimed (command buffer freed, descriptor sets
+    /// returned to the pool, staged inputs destroyed).
+    ///
+    /// Ingots returned here are GPU-resident handles. Reading them back
+    /// to the CPU (`finish_readback`) before the semaphore signals is
+    /// undefined; the caller should treat them as opaque until the
+    /// semaphore's downstream wait completes.
+    pub fn refine_batch_async(
+        &mut self,
+        ores: Vec<Ore>,
+    ) -> ForgeResult<(Vec<Ingot>, vk::Semaphore)> {
+        self.sweep_pending()?;
+
+        // Per-batch resources.
+        let fence = unsafe {
+            self.device.create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(ForgeError::Vk)?
+        };
+        let semaphore = unsafe {
+            self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                .map_err(ForgeError::Vk)?
+        };
+        let command_buffer = self.allocate_command_buffer()?;
+
+        let mut ingots:          Vec<Ingot>             = Vec::with_capacity(ores.len());
+        let mut descriptor_sets: Vec<vk::DescriptorSet> = Vec::with_capacity(ores.len());
+        let mut staged_inputs:   Vec<super::ore::StagedOre> = Vec::with_capacity(ores.len());
+
+        // Stage every ore's input and pre-allocate every ore's output.
+        // Any failure here cleanly tears down only the resources we've
+        // already allocated.
+        let prepared: Result<
+            Vec<(ForgeHandle, super::ore::StagedOre, Ingot, vk::DescriptorSet, [u32; 3])>,
+            ForgeError,
+        > = ores
+            .into_iter()
+            .map(|ore| {
+                let forge_handle = self
+                    .handle_for_kind(ore.kind)
+                    .ok_or(ForgeError::MissingForge(ore.kind))?;
+                let staged = ore.stage(&self.device, &self.memory_properties)?;
+                let ingot = Ingot::create(ore.kind, &ore.output, &self.device, &self.memory_properties)?;
+                let descriptor_set =
+                    self.allocate_descriptor_set(self.forges[forge_handle].descriptor_layout())?;
+                write_forge_descriptors(&self.device, descriptor_set, &staged, &ingot);
+                Ok((forge_handle, staged, ingot, descriptor_set, ore.workgroups))
+            })
+            .collect();
+        let prepared = match prepared {
+            Ok(v) => v,
+            Err(e) => {
+                unsafe {
+                    self.device.destroy_fence(fence, None);
+                    self.device.destroy_semaphore(semaphore, None);
+                    self.device.free_command_buffers(self.command_pool, &[command_buffer]);
+                }
+                return Err(e);
+            }
+        };
+
+        // Record every dispatch into the single CB. Each ore gets
+        // upload → prepare → dispatch (NO per-ore readback — the
+        // semaphore models a GPU-internal handoff; CPU readback would
+        // require a different completion model).
+        unsafe {
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device.begin_command_buffer(command_buffer, &begin)
+                .map_err(ForgeError::Vk)?;
+
+            for (forge_handle, staged, ingot, descriptor_set, workgroups) in &prepared {
+                staged.record_upload(&self.device, command_buffer);
+                ingot.record_prepare_for_compute(&self.device, command_buffer);
+                self.forges[*forge_handle].record_dispatch(
+                    &self.device,
+                    command_buffer,
+                    *descriptor_set,
+                    *workgroups,
+                );
+            }
+
+            self.device.end_command_buffer(command_buffer)
+                .map_err(ForgeError::Vk)?;
+
+            // Submit via Sync2: signal the semaphore at COMPUTE_SHADER
+            // stage so any downstream graphics wait at
+            // VERTEX_ATTRIBUTE_INPUT|VERTEX_SHADER gets correct ordering.
+            let cb_infos = [vk::CommandBufferSubmitInfo::default()
+                .command_buffer(command_buffer)];
+            let sig_infos = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .value(0)];
+            let submits = [vk::SubmitInfo2::default()
+                .command_buffer_infos(&cb_infos)
+                .signal_semaphore_infos(&sig_infos)];
+            self.device
+                .queue_submit2(self.queue, &submits, fence)
+                .map_err(ForgeError::Vk)?;
+        }
+
+        // Decompose prepared into the per-batch tracking lists +
+        // user-facing ingots.
+        for (_, staged, ingot, descriptor_set, _) in prepared {
+            staged_inputs.push(staged);
+            descriptor_sets.push(descriptor_set);
+            ingots.push(ingot);
+        }
+
+        self.pending.push_back(PendingBatch {
+            fence,
+            semaphore,
+            command_buffer,
+            descriptor_sets,
+            staged_inputs,
+        });
+
+        Ok((ingots, semaphore))
+    }
+
+    /// Drain every pending batch whose fence has already signalled,
+    /// returning its resources to the pool. Called automatically at the
+    /// start of each `refine_batch_async` and on `await_pending` /
+    /// `destroy`.
+    fn sweep_pending(&mut self) -> ForgeResult<()> {
+        while let Some(front) = self.pending.front() {
+            let signalled = unsafe { self.device.get_fence_status(front.fence) };
+            match signalled {
+                Ok(true) => {
+                    let batch = self.pending.pop_front().unwrap();
+                    unsafe { self.destroy_pending_batch(batch); }
+                }
+                Ok(false) => break,
+                Err(e) => return Err(ForgeError::Vk(e)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Block until every in-flight batch has completed and every
+    /// resource has been freed. Used at shutdown and from synchronous
+    /// fence-mode `refine()` so the legacy path doesn't observe stale
+    /// async state.
+    pub fn await_pending(&mut self) -> ForgeResult<()> {
+        if self.pending.is_empty() { return Ok(()); }
+        let fences: Vec<vk::Fence> = self.pending.iter().map(|p| p.fence).collect();
+        unsafe { self.device.wait_for_fences(&fences, true, u64::MAX).map_err(ForgeError::Vk)? };
+        while let Some(batch) = self.pending.pop_front() {
+            unsafe { self.destroy_pending_batch(batch); }
+        }
+        Ok(())
+    }
+
+    unsafe fn destroy_pending_batch(&self, mut batch: PendingBatch) {
+        unsafe {
+            self.device.free_command_buffers(self.command_pool, &[batch.command_buffer]);
+            if !batch.descriptor_sets.is_empty() {
+                let _ = self.device.free_descriptor_sets(self.descriptor_pool, &batch.descriptor_sets);
+            }
+            for staged in batch.staged_inputs.iter_mut() {
+                staged.destroy(&self.device);
+            }
+            if batch.semaphore != vk::Semaphore::null() {
+                self.device.destroy_semaphore(batch.semaphore, None);
+            }
+            if batch.fence != vk::Fence::null() {
+                self.device.destroy_fence(batch.fence, None);
+            }
+        }
+    }
+
     unsafe fn submit_and_wait(&self, command_buffer: vk::CommandBuffer) -> ForgeResult<()> {
         unsafe { self.device.reset_fences(&[self.fence])? };
         let command_buffers = [command_buffer];
@@ -345,6 +547,10 @@ impl ForgeMaster {
     }
 
     pub unsafe fn destroy(&mut self) {
+        // Drain any in-flight async batches BEFORE tearing down the
+        // device-owned resources they reference. await_pending blocks
+        // on every batch's fence and frees the per-batch state.
+        let _ = self.await_pending();
         for forge in self.forges.values_mut() {
             unsafe { forge.destroy(&self.device); }
         }
@@ -380,7 +586,12 @@ fn create_descriptor_pool(device: &ash::Device, max_sets: u32) -> ForgeResult<vk
             descriptor_count: max_sets,
         },
     ];
+    // FREE_DESCRIPTOR_SET so individual sets can be returned to the pool
+    // once their owning async batch's fence has signalled, without
+    // resetting the whole pool (which would invalidate in-flight sets
+    // from concurrently-pending batches).
     let info = vk::DescriptorPoolCreateInfo::default()
+        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
         .max_sets(max_sets)
         .pool_sizes(&pool_sizes);
     Ok(unsafe { device.create_descriptor_pool(&info, None)? })

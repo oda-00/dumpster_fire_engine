@@ -24,13 +24,20 @@ pub enum GraphicsOreKind {
     SkinnedForwardLit,
     /// Immediate-mode UI overlay rendered on top of the scene.
     Ui,
+    /// KHR_gaussian_splatting raster. Reads pre-computed splat billboard
+    /// vertices (clip-space pos + per-vertex ellipse_uv + colour) from a
+    /// compute-shader output and alpha-blends them with depth test on,
+    /// depth write off. Back-to-front order is enforced by the
+    /// SplatSort compute Ore that runs ahead.
+    GaussianSplat,
 }
 
 impl GraphicsOreKind {
-    pub const ALL: [GraphicsOreKind; 3] = [
+    pub const ALL: [GraphicsOreKind; 4] = [
         GraphicsOreKind::ForwardLit,
         GraphicsOreKind::SkinnedForwardLit,
         GraphicsOreKind::Ui,
+        GraphicsOreKind::GaussianSplat,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -68,6 +75,29 @@ pub enum OreKind {
     /// Applies weighted morph-target deltas to a rest-pose vertex buffer.
     MorphBlend,
 
+    /// KHR_gaussian_splatting: bitonic sort of N splats by view-z. Run
+    /// log²(N) times per frame to fully sort the splat list back-to-front
+    /// before the GaussianSplat raster reads them.
+    SplatSort,
+    /// KHR_gaussian_splatting: per-splat projection + 2D covariance +
+    /// 6-vertex billboard quad emission. Reads sorted splat indices from
+    /// SplatSort output, emits one quad per splat into a vertex buffer
+    /// the GaussianSplat raster pipeline consumes.
+    SplatBillboard,
+
+    /// EXT_mesh_gpu_instancing: per-instance (T, R, S) → mat4 expansion.
+    /// One thread per instance writes a column-major model matrix into
+    /// an output SSBO that ForwardLit / SkinnedForwardLit's vertex shader
+    /// reads at set 3 binding 0. Replaces the prior CPU `compose_trs`
+    /// hot loop with a single batched compute dispatch per frame for
+    /// dynamic-instanced assets (and a one-shot dispatch at load time
+    /// for static-instanced assets — see InstanceComputeState).
+    ///
+    /// APPENDED at the end of the compute variant list per the review's
+    /// serialization-safety mandate: existing variant indices (0..=12)
+    /// stay frozen.
+    InstanceTransforms,
+
     // Rasterization — sub-kind selects the draw pipeline.
     Graphics(GraphicsOreKind),
 }
@@ -75,7 +105,7 @@ pub enum OreKind {
 impl OreKind {
     /// Compute-only kinds, in `index()` order. Use this to size the compute
     /// forge cache — graphics variants live in their own arena.
-    pub const COMPUTE_ALL: [OreKind; 11] = [
+    pub const COMPUTE_ALL: [OreKind; 14] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -87,12 +117,15 @@ impl OreKind {
         OreKind::VisibilityPass,
         OreKind::SkinPalette,
         OreKind::MorphBlend,
+        OreKind::SplatSort,
+        OreKind::SplatBillboard,
+        OreKind::InstanceTransforms,
     ];
 
     pub const COMPUTE_COUNT: usize = Self::COMPUTE_ALL.len();
 
     /// Every kind, compute + every graphics sub-kind, in `index()` order.
-    pub const ALL: [OreKind; 14] = [
+    pub const ALL: [OreKind; 18] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -104,9 +137,13 @@ impl OreKind {
         OreKind::VisibilityPass,
         OreKind::SkinPalette,
         OreKind::MorphBlend,
+        OreKind::SplatSort,
+        OreKind::SplatBillboard,
+        OreKind::InstanceTransforms,
         OreKind::Graphics(GraphicsOreKind::ForwardLit),
         OreKind::Graphics(GraphicsOreKind::SkinnedForwardLit),
         OreKind::Graphics(GraphicsOreKind::Ui),
+        OreKind::Graphics(GraphicsOreKind::GaussianSplat),
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -126,6 +163,9 @@ impl OreKind {
             OreKind::VisibilityPass      => 8,
             OreKind::SkinPalette         => 9,
             OreKind::MorphBlend          => 10,
+            OreKind::SplatSort           => 11,
+            OreKind::SplatBillboard      => 12,
+            OreKind::InstanceTransforms  => 13,
             OreKind::Graphics(g)         => Self::COMPUTE_COUNT + g.index(),
         }
     }
@@ -204,6 +244,12 @@ pub enum OreInput {
     Bytes(ThinVec<u8>),
     Mesh(MeshOre),
     Texture(TextureOre),
+    /// Two raw byte buffers — primary goes to binding 0, secondary to
+    /// binding 1. Used by compute pipelines whose secondary input is
+    /// neither an index list nor mesh-shaped (e.g. SkinPalette: primary =
+    /// joint world matrices, secondary = inverse-bind matrices; both are
+    /// `mat4[]` SSBOs, neither matches the `MeshOre` shape).
+    DualBytes { primary: ThinVec<u8>, secondary: ThinVec<u8> },
     Empty,
 }
 
@@ -249,6 +295,7 @@ impl Ore {
 
     pub fn primary_bytes(&self) -> ThinVec<u8> {
         match &self.input {
+            OreInput::DualBytes { primary, .. } => primary.clone(),
             OreInput::Bytes(bytes) => bytes.clone(),
             OreInput::Mesh(mesh) => vertices_as_bytes(&mesh.vertices).iter().copied().collect(),
             OreInput::Texture(texture) => texture.pixels.clone(),
@@ -258,6 +305,7 @@ impl Ore {
 
     pub fn secondary_bytes(&self) -> ThinVec<u8> {
         match &self.input {
+            OreInput::DualBytes { secondary, .. } if !secondary.is_empty() => secondary.clone(),
             OreInput::Mesh(mesh) if !mesh.indices.is_empty() => {
                 indices_as_bytes(&mesh.indices).iter().copied().collect()
             }
@@ -360,16 +408,10 @@ impl StagedOre {
             storage_buffer_upload_barrier(self.primary.handle, self.primary.size),
             storage_buffer_upload_barrier(self.secondary.handle, self.secondary.size),
         ];
+        let dep_info = vk::DependencyInfo::default()
+            .buffer_memory_barriers(&barriers);
         unsafe {
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &barriers,
-                &[],
-            );
+            device.cmd_pipeline_barrier2(command_buffer, &dep_info);
         }
     }
 
@@ -480,6 +522,10 @@ pub struct ForgeImage {
     pub memory: vk::DeviceMemory,
     pub format: vk::Format,
     pub extent: vk::Extent3D,
+    /// Mip level count baked into the image at creation time. `1` for
+    /// single-mip / depth / storage images; > 1 for sampled textures that
+    /// went through `create_2d_mip`.
+    pub mip_levels: u32,
 }
 
 /// Infer the correct `ImageAspectFlags` from a format.
@@ -557,6 +603,123 @@ impl ForgeImage {
             memory,
             format,
             extent,
+            mip_levels: 1,
+        })
+    }
+
+    /// Same as `create_2d` but with a caller-chosen sample count. When
+    /// `samples == TYPE_1` this is identical to `create_2d`; otherwise the
+    /// resulting image is multi-sampled (no mips, one array layer). Used
+    /// for MSAA colour + depth render-pass attachments.
+    pub fn create_2d_msaa(
+        device: &ash::Device,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        properties: vk::MemoryPropertyFlags,
+        samples: vk::SampleCountFlags,
+    ) -> ForgeResult<Self> {
+        let extent = vk::Extent3D { width: width.max(1), height: height.max(1), depth: 1 };
+        let info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(extent)
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(samples)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let handle = unsafe { device.create_image(&info, None)? };
+        let req = unsafe { device.get_image_memory_requirements(handle) };
+        let memory_type_index = find_memory_type(memory_properties, req.memory_type_bits, properties)?;
+        let alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { device.allocate_memory(&alloc, None)? };
+        unsafe { device.bind_image_memory(handle, memory, 0)? };
+        let aspect_mask = aspect_mask_for_format(format);
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(handle)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect_mask)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+        Ok(Self { handle, view, memory, format, extent, mip_levels: 1 })
+    }
+
+    /// Same as `create_2d` but allocates the full mip chain
+    /// (`1 + floor(log2(max(w,h)))` levels). The image view covers every
+    /// level so the sampler can blend across them when `max_lod` permits.
+    /// Caller is responsible for writing each level (`upload_texture_rgba`
+    /// generates the lower levels via `vkCmdBlitImage` from level 0).
+    pub fn create_2d_mip(
+        device: &ash::Device,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        properties: vk::MemoryPropertyFlags,
+    ) -> ForgeResult<Self> {
+        let w = width.max(1);
+        let h = height.max(1);
+        let mip_levels = 1 + (w.max(h) as f32).log2().floor() as u32;
+        let extent = vk::Extent3D { width: w, height: h, depth: 1 };
+        let info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(extent)
+            .mip_levels(mip_levels)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let handle = unsafe { device.create_image(&info, None)? };
+        let req = unsafe { device.get_image_memory_requirements(handle) };
+        let memory_type_index =
+            find_memory_type(memory_properties, req.memory_type_bits, properties)?;
+        let alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { device.allocate_memory(&alloc, None)? };
+        unsafe { device.bind_image_memory(handle, memory, 0)? };
+
+        let aspect_mask = aspect_mask_for_format(format);
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(handle)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect_mask)
+                    .base_mip_level(0)
+                    .level_count(mip_levels)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+
+        Ok(Self {
+            handle,
+            view,
+            memory,
+            format,
+            extent,
+            mip_levels,
         })
     }
 
@@ -699,31 +862,32 @@ impl GpuMesh {
             );
 
             // Release ownership to graphics family if they differ.
-            // src_access=TRANSFER_WRITE, dst_access=0 on the release side.
+            // Sync2: src_stage=COPY, dst_stage=NONE on the release half;
+            // the acquire half on graphics queue restates the stages.
             if need_ownership_xfer {
                 let release = [
-                    vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::empty())
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .dst_access_mask(vk::AccessFlags2::NONE)
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(vertex_buffer.handle)
                         .offset(0).size(vb_size),
-                    vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::empty())
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .dst_access_mask(vk::AccessFlags2::NONE)
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(index_buffer.handle)
                         .offset(0).size(ib_size),
                 ];
-                device.cmd_pipeline_barrier(
-                    transfer_cb,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                    vk::DependencyFlags::empty(),
-                    &[], &release, &[],
-                );
+                let dep_info = vk::DependencyInfo::default()
+                    .buffer_memory_barriers(&release);
+                device.cmd_pipeline_barrier2(transfer_cb, &dep_info);
             }
 
             device.end_command_buffer(transfer_cb).map_err(ForgeError::Vk)?;
@@ -755,28 +919,28 @@ impl GpuMesh {
                 ).map_err(ForgeError::Vk)?;
 
                 let acquire = [
-                    vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .src_access_mask(vk::AccessFlags2::NONE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT)
+                        .dst_access_mask(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ)
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(vertex_buffer.handle)
                         .offset(0).size(vb_size),
-                    vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::INDEX_READ)
+                    vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .src_access_mask(vk::AccessFlags2::NONE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::INDEX_INPUT)
+                        .dst_access_mask(vk::AccessFlags2::INDEX_READ)
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(index_buffer.handle)
                         .offset(0).size(ib_size),
                 ];
-                device.cmd_pipeline_barrier(
-                    gfx_cb,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::VERTEX_INPUT,
-                    vk::DependencyFlags::empty(),
-                    &[], &acquire, &[],
-                );
+                let dep_info = vk::DependencyInfo::default()
+                    .buffer_memory_barriers(&acquire);
+                device.cmd_pipeline_barrier2(gfx_cb, &dep_info);
 
                 device.end_command_buffer(gfx_cb).map_err(ForgeError::Vk)?;
 
@@ -932,10 +1096,12 @@ pub fn non_zero_size(size: vk::DeviceSize) -> vk::DeviceSize {
 pub fn storage_buffer_upload_barrier(
     buffer: vk::Buffer,
     size: vk::DeviceSize,
-) -> vk::BufferMemoryBarrier<'static> {
-    vk::BufferMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+) -> vk::BufferMemoryBarrier2<'static> {
+    vk::BufferMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .buffer(buffer)
@@ -946,10 +1112,12 @@ pub fn storage_buffer_upload_barrier(
 pub fn storage_buffer_readback_barrier(
     buffer: vk::Buffer,
     size: vk::DeviceSize,
-) -> vk::BufferMemoryBarrier<'static> {
-    vk::BufferMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+) -> vk::BufferMemoryBarrier2<'static> {
+    vk::BufferMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .buffer(buffer)

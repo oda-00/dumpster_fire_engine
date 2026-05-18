@@ -15,6 +15,7 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use forge_gltf::codec;
+use forge_gltf::{GltfAsset, Pose};
 
 // ─── UASTC (basisu_uastc) ───────────────────────────────────────────────────
 //
@@ -162,7 +163,7 @@ fn synth_vp8l_2x2_black() -> Vec<u8> {
     let mut buf: u64 = 0;
     let mut nbits: u32 = 0;
     let mut bits: Vec<u8> = Vec::new();
-    let mut put = |val: u64, n: u32, buf: &mut u64, nbits: &mut u32, out: &mut Vec<u8>| {
+    let put = |val: u64, n: u32, buf: &mut u64, nbits: &mut u32, out: &mut Vec<u8>| {
         *buf |= (val & ((1u64 << n) - 1)) << *nbits;
         *nbits += n;
         while *nbits >= 8 {
@@ -228,6 +229,178 @@ fn synth_draco_header_only() -> Vec<u8> {
     b
 }
 
+// ─── Pose sample (animation evaluator hot path) ─────────────────────────────
+//
+// Pose::sample drives the CPU side of every animated glTF asset every
+// frame. The inner cost is dominated by compose_trs (quat→mat4 expansion)
+// per animated joint + a recursive world-matrix composition pass. Bench it
+// against the largest local skinned asset (BrainStem, 57 joints) so future
+// regressions show up. Throughput is published in joints/sec via
+// Throughput::Elements.
+fn bench_pose_sample(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pose");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/models/BrainStem.glb");
+    if !path.exists() {
+        eprintln!("bench skipped: {} not found", path.display());
+        return;
+    }
+    let asset = GltfAsset::load(&path).expect("load BrainStem");
+    if asset.animations.is_empty() { return; }
+    let anim_idx = 0;
+    let total_joints = asset.skins.first().map_or(0, |s| s.joints.len());
+    let anim_duration = asset.animations[anim_idx].duration().max(1e-3);
+
+    group.throughput(Throughput::Elements(total_joints as u64));
+    group.bench_function("sample_brainstem", |b| {
+        let mut pose = Pose::rest(&asset);
+        let mut t = 0.0f32;
+        b.iter(|| {
+            t = (t + 0.016) % anim_duration; // ~60 Hz advance
+            pose.sample(black_box(&asset), black_box(&asset.animations[anim_idx]), black_box(t));
+            black_box(&pose.world);
+        });
+    });
+    group.finish();
+}
+
+// ─── BC family (codec/bc) ───────────────────────────────────────────────────
+//
+// One bench per BC1/2/3/4/5/6H/7 against a 64×64 fixture (256 blocks ×
+// {8 or 16}-byte block size). Throughput measured against the
+// uncompressed RGBA8 OUTPUT size — what the user ultimately sees.
+fn bench_bc(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bc");
+    let out_bytes = (64u64 * 64 * 4);
+    let bc1_input = vec![0xAAu8; 256 * 8];  // 256 blocks × 8 bytes
+    let bc7_input = vec![0xAAu8; 256 * 16]; // 256 blocks × 16 bytes
+    group.throughput(Throughput::Bytes(out_bytes));
+    group.bench_function("bc1_64x64", |b| {
+        b.iter(|| black_box(codec::bc::decode_bc1(black_box(&bc1_input), 64, 64)));
+    });
+    group.bench_function("bc3_64x64", |b| {
+        b.iter(|| black_box(codec::bc::decode_bc3(black_box(&bc7_input), 64, 64)));
+    });
+    group.bench_function("bc4_64x64", |b| {
+        b.iter(|| black_box(codec::bc::decode_bc4(black_box(&bc1_input), 64, 64)));
+    });
+    group.bench_function("bc5_64x64", |b| {
+        b.iter(|| black_box(codec::bc::decode_bc5(black_box(&bc7_input), 64, 64)));
+    });
+    group.bench_function("bc7_64x64", |b| {
+        b.iter(|| black_box(codec::bc::decode_bc7(black_box(&bc7_input), 64, 64)));
+    });
+    group.finish();
+}
+
+// ─── ETC2 + EAC family (codec/etc2) ─────────────────────────────────────────
+fn bench_etc2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("etc2");
+    let out_bytes = (64u64 * 64 * 4);
+    let rgb_input    = vec![0xAAu8; 256 * 8];  // 256 blocks × 8 bytes
+    let rgba8_input  = vec![0xAAu8; 256 * 16];
+    let r11_input    = vec![0xAAu8; 256 * 8];
+    let r11g11_input = vec![0xAAu8; 256 * 16];
+    group.throughput(Throughput::Bytes(out_bytes));
+    group.bench_function("etc2_rgb_64x64", |b| {
+        b.iter(|| black_box(codec::etc2::decode_etc2_rgb(black_box(&rgb_input), 64, 64)));
+    });
+    group.bench_function("etc2_rgba8_64x64", |b| {
+        b.iter(|| black_box(codec::etc2::decode_etc2_rgba8(black_box(&rgba8_input), 64, 64)));
+    });
+    group.bench_function("eac_r11_64x64", |b| {
+        b.iter(|| black_box(codec::etc2::decode_eac_r11(black_box(&r11_input), 64, 64)));
+    });
+    group.bench_function("eac_r11g11_64x64", |b| {
+        b.iter(|| black_box(codec::etc2::decode_eac_r11g11(black_box(&r11g11_input), 64, 64)));
+    });
+    group.finish();
+}
+
+// ─── ASTC (codec/astc) — 4x4 / 8x8 / 12x12 block sizes ──────────────────────
+fn bench_astc(c: &mut Criterion) {
+    let mut group = c.benchmark_group("astc");
+    let out_bytes = (64u64 * 64 * 4);
+    let input = vec![0xAAu8; 256 * 16]; // 256 blocks × 16 bytes
+    group.throughput(Throughput::Bytes(out_bytes));
+    group.bench_function("astc_4x4_64x64", |b| {
+        b.iter(|| black_box(codec::astc::decode_astc(black_box(&input), 64, 64, 4, 4)));
+    });
+    // 64×64 image with 8×8 blocks = 8×8 = 64 blocks (1024 B input).
+    let input_8x8 = vec![0xAAu8; 64 * 16];
+    group.bench_function("astc_8x8_64x64", |b| {
+        b.iter(|| black_box(codec::astc::decode_astc(black_box(&input_8x8), 64, 64, 8, 8)));
+    });
+    // 64×64 with 12×12 blocks: ceil(64/12) = 6, so 6×6 = 36 blocks.
+    let input_12x12 = vec![0xAAu8; 36 * 16];
+    group.bench_function("astc_12x12_64x64", |b| {
+        b.iter(|| black_box(codec::astc::decode_astc(black_box(&input_12x12), 64, 64, 12, 12)));
+    });
+    group.finish();
+}
+
+// ─── ZSTD (codec/zstd) ──────────────────────────────────────────────────────
+//
+// Constructs a synthetic RLE-block ZSTD frame: header + one block of N
+// RLE-encoded zero bytes. Measures the decode-side throughput against
+// the uncompressed output size.
+fn bench_zstd(c: &mut Criterion) {
+    let mut group = c.benchmark_group("zstd");
+    // Frame: magic + frame header (1 byte: FCS=u32, content size known) +
+    //        u32 frame content size + 1 RLE block (3 byte hdr + 1 byte).
+    let mut frame = Vec::with_capacity(13);
+    frame.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD]); // ZSTD magic
+    // Frame header descriptor:
+    //   FCS_Flag           = 0b10 (4-byte FCS field)
+    //   Single_Segment_flag = 1   (no window descriptor; FCS is mandatory)
+    //   Unused              = 0
+    //   Reserved            = 0
+    //   Content_Checksum_Flag = 0
+    //   Dictionary_ID_Flag  = 0b00
+    // → FHD = 0b10_1_0_0_0_00 = 0xA0.
+    frame.push(0xA0);
+    // 4 bytes for content size (1 MiB).
+    let cs = 1024u64 * 1024;
+    frame.extend_from_slice(&(cs as u32).to_le_bytes());
+    // Block header: last=1, block_type=01 (RLE), block_size = cs.
+    let block_hdr = (1u32) | (0b01 << 1) | ((cs as u32) << 3);
+    frame.extend_from_slice(&block_hdr.to_le_bytes()[..3]);
+    frame.push(0x00); // single RLE byte
+
+    group.throughput(Throughput::Bytes(cs));
+    group.bench_function("decompress_synthetic_1MB", |b| {
+        b.iter(|| black_box(codec::zstd::decompress(black_box(&frame))));
+    });
+    group.finish();
+}
+
+// ─── Draco attribute dequantize (codec/draco) ───────────────────────────────
+//
+// Direct bench of the SSE2 dequantize path against a 64K-vertex stream
+// (3 channels — typical POSITION accessor). The scalar reference lives
+// behind the same internal entry point and gets exercised by tests.
+fn bench_draco_dequantize(c: &mut Criterion) {
+    let npoints = 64 * 1024;
+    let nc      = 3;
+    let total   = npoints * nc;
+    let decoded: Vec<i32> = (0..total).map(|i| (i as i32) & 0xFFF).collect();
+    let mut out = vec![0.0f32; total];
+    let mut group = c.benchmark_group("draco");
+    group.throughput(Throughput::Bytes((total * 4) as u64));
+    group.bench_function("attr_dequantize_64K_vertices_nc3", |b| {
+        b.iter(|| {
+            for f in out.iter_mut() { *f = 0.0; }
+            // Use the SIMD path directly; nc=3 → 4-lane SSE2 body.
+            #[cfg(target_arch = "x86_64")]
+            codec::draco::bench_dequantize_helper(
+                black_box(&decoded), black_box(&mut out), npoints, nc,
+            );
+            black_box(&out);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_uastc,
@@ -235,5 +408,11 @@ criterion_group!(
     bench_webp_vp8l,
     bench_ktx2_parse,
     bench_draco_header,
+    bench_pose_sample,
+    bench_bc,
+    bench_etc2,
+    bench_astc,
+    bench_zstd,
+    bench_draco_dequantize,
 );
 criterion_main!(benches);

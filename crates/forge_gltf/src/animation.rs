@@ -245,3 +245,61 @@ pub fn sample_quat(s: &AnimSampler, t: f32) -> [f32; 4] {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Per spec §C.4 slerp must take the SHORT arc when `dot(a, b) < 0`
+    /// — i.e. negate `b` before interpolating so the resulting quaternion
+    /// sweeps less than 180°. Without this, animations flip 360° around.
+    #[test]
+    fn slerp_takes_short_path_when_dot_negative() {
+        // a = identity quaternion. b = ~135° around X (positive form).
+        let a = [0.0_f32, 0.0, 0.0, 1.0];
+        let theta = 135.0_f32.to_radians();
+        let b_pos = [(theta * 0.5).sin(), 0.0, 0.0, (theta * 0.5).cos()];
+        let b_neg = [-b_pos[0], -b_pos[1], -b_pos[2], -b_pos[3]];
+
+        // Mid-way through the slerp — the result should be the same
+        // regardless of whether b is given as `b_pos` (positive form) or
+        // `b_neg` (long-arc form). Equality is exact modulo sign because
+        // q and -q represent the same rotation.
+        let mid_pos = slerp_quat(a, b_pos, 0.5);
+        let mid_neg = slerp_quat(a, b_neg, 0.5);
+        let same_or_negated = mid_pos
+            .iter()
+            .zip(mid_neg.iter())
+            .all(|(p, n)| (p - n).abs() < 1e-5)
+        || mid_pos
+            .iter()
+            .zip(mid_neg.iter())
+            .all(|(p, n)| (p + n).abs() < 1e-5);
+        assert!(same_or_negated, "slerp short-path violated: pos={:?} neg={:?}", mid_pos, mid_neg);
+    }
+
+    /// CubicSpline rotation tangents that produce a non-unit quaternion
+    /// post-hermite MUST be re-normalised — per spec §3.11 the rotation
+    /// stream is normalised after interpolation so the downstream matrix
+    /// composition stays orthogonal.
+    #[test]
+    fn cubicspline_quat_renormalises() {
+        // Build a 2-keyframe sampler with deliberately large tangents so
+        // the un-normalised hermite output is far from unit length.
+        let sampler = AnimSampler {
+            input: thin_vec::ThinVec::from(&[0.0_f32, 1.0][..]),
+            output: SamplerOutput::Vec4(thin_vec::ThinVec::from(&[
+                [0.0_f32, 0.0, 0.0, 0.0],  // in_tan_0
+                [0.0, 0.0, 0.0, 1.0],      // value_0   (identity)
+                [5.0, 5.0, 5.0, 5.0],      // out_tan_0 (huge)
+                [-5.0, -5.0, -5.0, -5.0],  // in_tan_1  (huge)
+                [1.0, 0.0, 0.0, 0.0],      // value_1   (180° around X)
+                [0.0, 0.0, 0.0, 0.0],      // out_tan_1
+            ][..])),
+            interpolation: Interpolation::CubicSpline,
+        };
+        let q = sample_quat(&sampler, 0.5);
+        let len2 = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
+        assert!((len2 - 1.0).abs() < 1e-4, "post-CubicSpline quat not unit: |q|²={len2}");
+    }
+}

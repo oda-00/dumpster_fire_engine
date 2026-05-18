@@ -24,7 +24,15 @@ pub type WindowId = Id<WindowMarker>;
 /// 2 = double-buffer the command recording — CPU records frame N+1 while
 /// the GPU is still consuming frame N. Higher (3) reduces stutter on input
 /// spikes but adds a frame of latency; 2 is the standard tradeoff.
-pub const FRAMES_IN_FLIGHT: usize = 2;
+/// Number of frames the CPU is allowed to record ahead of the GPU. Three
+/// matches the MAILBOX-mode swapchain image count (caps.min_image_count
+/// + 1 = typically 3) so we never CPU-stall waiting for an image while
+/// also providing headroom for the GPU to be one frame behind. Two would
+/// be the conservative pick but adds CPU-side fence waits on input-light
+/// frames; four+ buys little and burns more host-visible UBO / staging
+/// memory. Three is the standard Vulkan recommendation for real-time
+/// rendering with triple-buffered presents.
+pub const FRAMES_IN_FLIGHT: usize = 3;
 
 // ── Graphics plumbing ───────────────────────────────────────────────────────
 
@@ -49,8 +57,20 @@ pub struct GraphicsState {
 
     // One depth image per swapchain image. Per-image (not per-frame) so we
     // never race a depth write against a draw still reading from the
-    // previous frame's same image-index.
+    // previous frame's same image-index. Depth-stencil format + MSAA
+    // sample count matches the render pass's depth attachment.
     pub depth_images: ThinVec<ForgeImage>,
+
+    /// Per-image MSAA colour attachment. Empty when `msaa_samples == TYPE_1`
+    /// (lavapipe / D3D12 software path); populated otherwise so the
+    /// rasterizer writes into a multi-sample image that gets resolved to
+    /// the swapchain image at end-of-subpass.
+    pub msaa_color_images: ThinVec<ForgeImage>,
+
+    /// Render-pass sample count this swapchain was built against. The
+    /// pipeline's `rasterization_samples` and every framebuffer attachment
+    /// have to match.
+    pub msaa_samples: vk::SampleCountFlags,
 
     // pipeline + framebuffers
     pub mold: GraphicsMold,
@@ -103,6 +123,7 @@ impl Window {
     }
 
     /// Fully initialised graphics window (winit + Vulkan).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_surface(
         id: WindowId,
         name: impl Into<Arc<str>>,
@@ -114,6 +135,7 @@ impl Window {
         graphics_queue_family: u32,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
         depth_format: vk::Format,
+        msaa_samples: vk::SampleCountFlags,
         entry: &ash::Entry,
         forge: &GraphicsForge,
     ) -> ForgeResult<Self> {
@@ -152,7 +174,7 @@ impl Window {
 
         // Compile the pipeline. Uses dynamic viewport/scissor so we don't
         // need to recompile on resize.
-        let mold = forge.compile(device, swapchain_format, depth_format)?;
+        let mold = forge.compile(device, swapchain_format, depth_format, msaa_samples)?;
 
         // Build the swapchain + per-image resources via the shared helper.
         let (
@@ -161,6 +183,7 @@ impl Window {
             swapchain_image_views,
             swapchain_extent,
             depth_images,
+            msaa_color_images,
             framebuffers,
             render_finished_semaphores,
         ) = create_swapchain_resources(
@@ -173,6 +196,7 @@ impl Window {
             memory_properties,
             depth_format,
             swapchain_format,
+            msaa_samples,
             mold.render_pass,
             width,
             height,
@@ -238,6 +262,8 @@ impl Window {
                 swapchain_format,
                 swapchain_loader,
                 depth_images,
+                msaa_color_images,
+                msaa_samples,
                 mold,
                 skinned_mold: None,
                 framebuffers,
@@ -270,24 +296,55 @@ impl Window {
     ) -> ForgeResult<()> {
         let gfx = self.graphics.as_mut()
             .expect("attach_skinned_forge requires a graphics window");
-        let mold = forge.compile(device, gfx.swapchain_format, gfx.depth_format)?;
+        let mold = forge.compile(device, gfx.swapchain_format, gfx.depth_format, gfx.msaa_samples)?;
         gfx.skinned_mold = Some(mold);
         Ok(())
     }
 
+    /// Wait on the fence belonging to the most recently submitted frame.
+    /// After this returns, the GPU has finished that submission and any
+    /// resources it referenced (descriptor sets, compute output buffers,
+    /// vertex buffers) are safe to destroy or recycle. Substantially
+    /// lighter than `device_wait_idle` because it only blocks on the
+    /// single relevant fence rather than every queue.
+    ///
+    /// Returns `Ok(())` immediately on the very first frame (the fences
+    /// are created in the signalled state).
+    pub fn wait_for_last_submission(&self, device: &ash::Device) -> ForgeResult<()> {
+        let Some(gfx) = self.graphics.as_ref() else { return Ok(()); };
+        let prev = (gfx.current_frame + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT;
+        let fence = gfx.in_flight_fences[prev];
+        if fence == vk::Fence::null() { return Ok(()); }
+        unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }
+            .map_err(ForgeError::Vk)
+    }
+
     pub fn build_compute_factory(
         &mut self,
-        proto: Proto<ComputeTag>,
-        forge: &mut ForgeMaster,
+        proto:  Proto<ComputeTag>,
+        forge:  &mut ForgeMaster,
+        device: &ash::Device,
     ) -> ForgeResult<FactoryHandle> {
-        self.factory_master.build_compute_proto(proto, forge)
+        self.factory_master.build_compute_proto(proto, forge, device)
+    }
+
+    /// Async batched compute. The downstream graphics submission must
+    /// wait on the returned semaphore at vertex stages.
+    pub fn build_compute_factory_async(
+        &mut self,
+        proto:  Proto<ComputeTag>,
+        forge:  &mut ForgeMaster,
+        device: &ash::Device,
+    ) -> ForgeResult<(FactoryHandle, vk::Semaphore)> {
+        self.factory_master.build_compute_proto_async(proto, forge, device)
     }
 
     pub fn build_graphics_factory(
         &mut self,
-        proto: Proto<GraphicsTag>,
+        proto:  Proto<GraphicsTag>,
+        device: &ash::Device,
     ) -> FactoryHandle {
-        self.factory_master.build_graphics_proto(proto)
+        self.factory_master.build_graphics_proto(proto, device)
     }
 
     /// Destroy all Vulkan resources (if any) and the factory master.
@@ -329,6 +386,10 @@ impl Window {
                     img.destroy(device);
                 }
                 gfx.depth_images.clear();
+                for img in gfx.msaa_color_images.iter_mut() {
+                    img.destroy(device);
+                }
+                gfx.msaa_color_images.clear();
                 for iv in gfx.swapchain_image_views.iter() {
                     if *iv != vk::ImageView::null() {
                         device.destroy_image_view(*iv, None);
@@ -379,6 +440,10 @@ impl Window {
                 img.destroy(device);
             }
             gfx.depth_images.clear();
+            for img in gfx.msaa_color_images.iter_mut() {
+                img.destroy(device);
+            }
+            gfx.msaa_color_images.clear();
             for iv in gfx.swapchain_image_views.iter() {
                 if *iv != vk::ImageView::null() {
                     device.destroy_image_view(*iv, None);
@@ -396,6 +461,7 @@ impl Window {
             swapchain_image_views,
             swapchain_extent,
             depth_images,
+            msaa_color_images,
             framebuffers,
             render_finished_semaphores,
         ) = create_swapchain_resources(
@@ -408,6 +474,7 @@ impl Window {
             &gfx.memory_properties,
             gfx.depth_format,
             gfx.swapchain_format,
+            gfx.msaa_samples,
             gfx.mold.render_pass,
             size.width,
             size.height,
@@ -426,6 +493,7 @@ impl Window {
         gfx.swapchain_image_views = swapchain_image_views;
         gfx.swapchain_extent = swapchain_extent;
         gfx.depth_images = depth_images;
+        gfx.msaa_color_images = msaa_color_images;
         gfx.framebuffers = framebuffers;
         gfx.render_finished_semaphores = render_finished_semaphores;
         gfx.needs_resize = false;
@@ -441,6 +509,22 @@ impl Window {
         instance: &ash::Instance,
         device: &ash::Device,
         queue: vk::Queue,
+    ) -> ForgeResult<()> {
+        unsafe { self.draw_frame_with_compute_wait(instance, device, queue, &[]) }
+    }
+
+    /// Draw one frame, waiting on `compute_wait` semaphores before the
+    /// graphics submission's vertex stages execute. Used by callers that
+    /// dispatch compute work asynchronously (via
+    /// `ForgeMaster::refine_batch_async`) — the returned semaphore from
+    /// that call must be passed here so the graphics queue blocks
+    /// per-stage instead of the CPU blocking on a fence.
+    pub unsafe fn draw_frame_with_compute_wait(
+        &mut self,
+        instance: &ash::Instance,
+        device: &ash::Device,
+        queue: vk::Queue,
+        compute_wait: &[vk::Semaphore],
     ) -> ForgeResult<()> {
         // Resize check up front — covers explicit resize() calls.
         if self.graphics.as_ref().is_some_and(|g| g.needs_resize) {
@@ -528,6 +612,27 @@ impl Window {
                 .map_err(ForgeError::Vk)?;
             device.begin_command_buffer(command_buffer, &begin_info)
                 .map_err(ForgeError::Vk)?;
+
+            // Compute → graphics memory dependency. Same-queue submission
+            // ordering guarantees the compute dispatch FINISHES before this
+            // draw starts, but does NOT guarantee the compute writes are
+            // visible to the vertex stage's reads — that needs an explicit
+            // memory barrier. Sync2 per-stage masks let us scope this
+            // precisely to VERTEX_ATTRIBUTE_INPUT (for MorphBlend, read via
+            // vertex input) + VERTEX_SHADER (for SkinPalette, read as SSBO)
+            // instead of a coarse VERTEX_INPUT | VERTEX_SHADER.
+            let mem_barrier2 = vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
+                    | vk::PipelineStageFlags2::VERTEX_SHADER)
+                .dst_access_mask(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ
+                    | vk::AccessFlags2::SHADER_STORAGE_READ);
+            let memory_barriers = [mem_barrier2];
+            let dep_info = vk::DependencyInfo::default()
+                .memory_barriers(&memory_barriers);
+            device.cmd_pipeline_barrier2(command_buffer, &dep_info);
+
             device.cmd_begin_render_pass(command_buffer, &rp_begin, vk::SubpassContents::INLINE);
 
             // Dynamic viewport/scissor — pipeline is extent-agnostic, set here.
@@ -588,6 +693,21 @@ impl Window {
                             &[],
                         );
                     }
+                }
+                // Bind per-instance mat4 SSBO (set 3). Always bind something
+                // — the shader unconditionally reads `instances.m[gl_InstanceIndex]`
+                // so missing binding is undefined. Real per-instance sets land
+                // here when EXT_mesh_gpu_instancing is active; otherwise the
+                // dummy identity set from the cache.
+                if let Some(inst_set) = call.instance_set {
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        mold.pipeline_layout,
+                        3,
+                        &[inst_set],
+                        &[],
+                    );
                 }
 
                 if let Some(mesh) = &call.mesh {
@@ -653,23 +773,47 @@ impl Window {
             device.end_command_buffer(command_buffer).map_err(ForgeError::Vk)?;
         }
 
-        // Submit + present.
+        // Submit + present via Sync2 (queue_submit2): one
+        // SemaphoreSubmitInfo per wait with explicit per-semaphore
+        // stage masks. img_avail blocks COLOR_ATTACHMENT_OUTPUT (no
+        // earlier graphics stage needs the swapchain image), while
+        // each compute_wait semaphore blocks only the precise stages
+        // that read its compute output — VERTEX_ATTRIBUTE_INPUT (vertex
+        // buffer bound from MorphBlend output) + VERTEX_SHADER (SSBO
+        // bound from SkinPalette output).
         let render_done = gfx.render_finished_semaphores[image_index as usize];
-        let wait_semaphores  = [img_avail];
-        let signal_semaphores = [render_done];
-        let cmd_buffers = [command_buffer];
-        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let submit_info = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&cmd_buffers)
-            .signal_semaphores(&signal_semaphores);
 
+        let mut wait_infos: Vec<vk::SemaphoreSubmitInfo> = Vec::with_capacity(1 + compute_wait.len());
+        wait_infos.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(img_avail)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+        );
+        for &sem in compute_wait {
+            wait_infos.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(sem)
+                    .stage_mask(
+                        vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
+                            | vk::PipelineStageFlags2::VERTEX_SHADER,
+                    ),
+            );
+        }
+        let cb_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)];
+        let signal_infos = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(render_done)
+            .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS)];
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait_infos)
+            .command_buffer_infos(&cb_infos)
+            .signal_semaphore_infos(&signal_infos);
+
+        let signal_semaphores = [render_done];
         let present_swapchains = [gfx.swapchain];
         let present_image_indices = [image_index];
 
         unsafe {
-            device.queue_submit(queue, &[submit_info], in_flight)
+            device.queue_submit2(queue, &[submit_info], in_flight)
                 .map_err(ForgeError::Vk)?;
 
             let present_info = vk::PresentInfoKHR::default()
@@ -710,6 +854,7 @@ fn create_swapchain_resources(
     memory_properties: &vk::PhysicalDeviceMemoryProperties,
     depth_format: vk::Format,
     swapchain_format: vk::Format,
+    msaa_samples: vk::SampleCountFlags,
     render_pass: vk::RenderPass,
     width: u32,
     height: u32,
@@ -719,6 +864,7 @@ fn create_swapchain_resources(
     ThinVec<vk::Image>,
     ThinVec<vk::ImageView>,
     vk::Extent2D,
+    ThinVec<ForgeImage>,
     ThinVec<ForgeImage>,
     ThinVec<vk::Framebuffer>,
     ThinVec<vk::Semaphore>,
@@ -804,10 +950,10 @@ fn create_swapchain_resources(
         .collect::<Result<ThinVec<_>, _>>()
         .map_err(ForgeError::Vk)?;
 
-    // One depth image per swapchain image.
+    // Depth image per swapchain image, MSAA-sized to match the render pass.
     let mut depth_images: ThinVec<ForgeImage> = ThinVec::with_capacity(swapchain_images.len());
     for _ in 0..swapchain_images.len() {
-        let img = ForgeImage::create_2d(
+        let img = ForgeImage::create_2d_msaa(
             device,
             memory_properties,
             swapchain_extent.width,
@@ -815,20 +961,55 @@ fn create_swapchain_resources(
             depth_format,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            msaa_samples,
         )?;
         depth_images.push(img);
     }
 
+    // MSAA colour image per swapchain image — only allocated when the
+    // render pass actually rasterises into a multi-sample target.
+    let msaa_color_images: ThinVec<ForgeImage> = if msaa_samples != vk::SampleCountFlags::TYPE_1 {
+        let mut v = ThinVec::with_capacity(swapchain_images.len());
+        for _ in 0..swapchain_images.len() {
+            let img = ForgeImage::create_2d_msaa(
+                device,
+                memory_properties,
+                swapchain_extent.width,
+                swapchain_extent.height,
+                swapchain_format,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                msaa_samples,
+            )?;
+            v.push(img);
+        }
+        v
+    } else {
+        ThinVec::new()
+    };
+
+    // Framebuffer attachment order matches the render-pass attachment list.
+    // Sync1 path: when MSAA is off → [swapchain_color, depth].
+    // MSAA path:                    → [msaa_color, depth, swapchain_resolve].
     let framebuffers: ThinVec<vk::Framebuffer> = swapchain_image_views
         .iter()
-        .zip(depth_images.iter())
-        .map(|(&color_view, depth)| {
-            let attachments = [color_view, depth.view];
+        .enumerate()
+        .map(|(i, &color_view)| {
+            let depth = depth_images[i].view;
+            let mut atts: Vec<vk::ImageView> = Vec::with_capacity(3);
+            if msaa_samples != vk::SampleCountFlags::TYPE_1 {
+                atts.push(msaa_color_images[i].view);
+                atts.push(depth);
+                atts.push(color_view);
+            } else {
+                atts.push(color_view);
+                atts.push(depth);
+            }
             unsafe {
                 device.create_framebuffer(
                     &vk::FramebufferCreateInfo::default()
                         .render_pass(render_pass)
-                        .attachments(&attachments)
+                        .attachments(&atts)
                         .width(swapchain_extent.width)
                         .height(swapchain_extent.height)
                         .layers(1),
@@ -856,6 +1037,7 @@ fn create_swapchain_resources(
         swapchain_image_views,
         swapchain_extent,
         depth_images,
+        msaa_color_images,
         framebuffers,
         render_finished_semaphores,
     ))

@@ -109,6 +109,7 @@ impl ApplicationHandler for App {
             ctx.queue_family_index,
             &ctx.memory_properties,
             ctx.depth_format,
+            ctx.msaa_samples,
             &ctx.entry,
             graphics_forge,
         )
