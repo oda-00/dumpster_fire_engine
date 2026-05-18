@@ -540,13 +540,15 @@ impl GraphicsForge {
         };
 
         // Pipeline layout — ForwardLit / SkinnedForwardLit expose a mat4 push constant (MVP).
+        // GaussianSplat reads its pre-projected vertices straight from a
+        // compute-output buffer (no MVP needed in the shader).
         let push_ranges: &[vk::PushConstantRange] = match self.kind {
             GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit =>
                 &[vk::PushConstantRange::default()
                     .stage_flags(vk::ShaderStageFlags::VERTEX)
                     .offset(0)
                     .size(64)], // sizeof(mat4)
-            GraphicsOreKind::Ui => &[],
+            GraphicsOreKind::Ui | GraphicsOreKind::GaussianSplat => &[],
         };
         // Build set_layouts slice. ForwardLit / SkinnedForwardLit both
         // have 4 slots [camera_actor, material, skin/empty, instance];
@@ -653,10 +655,17 @@ impl GraphicsForge {
                 .stride(SKIN_VERTEX_STRIDE)
                 .input_rate(vk::VertexInputRate::VERTEX),
         ];
+        // SplatVertex: pre-projected clip-space pos (vec4) + ellipse UV (vec2) +
+        //              colour RGBA (vec4) = 40 bytes.
+        let bd_splat = [vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(40)
+            .input_rate(vk::VertexInputRate::VERTEX)];
         let binding_descs: &[vk::VertexInputBindingDescription] = match self.kind {
             GraphicsOreKind::ForwardLit        => &bd_forward,
             GraphicsOreKind::SkinnedForwardLit => &bd_skinned,
             GraphicsOreKind::Ui                => &[],
+            GraphicsOreKind::GaussianSplat     => &bd_splat,
         };
         // ForgeVertex layout: position[0..12], normal[12..24], tangent[24..40], uv[40..48]
         // SkinVertex   layout: joints_packed[0..8 = uvec2 = 4×u16], weights[8..24 = vec4]
@@ -694,10 +703,25 @@ impl GraphicsForge {
                 .location(5).binding(1)
                 .format(vk::Format::R32G32B32A32_SFLOAT).offset(8),
         ];
+        let ad_splat = [
+            // clip-space position vec4 — offset 0..16
+            vk::VertexInputAttributeDescription::default()
+                .location(0).binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT).offset(0),
+            // ellipse-local UV vec2 — offset 16..24
+            vk::VertexInputAttributeDescription::default()
+                .location(1).binding(0)
+                .format(vk::Format::R32G32_SFLOAT).offset(16),
+            // colour RGBA vec4 — offset 24..40
+            vk::VertexInputAttributeDescription::default()
+                .location(2).binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT).offset(24),
+        ];
         let attr_descs: &[vk::VertexInputAttributeDescription] = match self.kind {
             GraphicsOreKind::ForwardLit        => &ad_forward,
             GraphicsOreKind::SkinnedForwardLit => &ad_skinned,
             GraphicsOreKind::Ui                => &[],
+            GraphicsOreKind::GaussianSplat     => &ad_splat,
         };
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(binding_descs)
@@ -719,13 +743,33 @@ impl GraphicsForge {
             .front_face(vk::FrontFace::CLOCKWISE);
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(sample_count);
-        let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+        // GaussianSplat needs premultiplied-alpha blending so the per-
+        // splat opacity composites correctly back-to-front. Every other
+        // pipeline is opaque.
+        let opaque_blend = [vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
             .blend_enable(false)];
+        let premul_blend = [vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::ONE)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD)];
+        let color_blend_attachments: &[vk::PipelineColorBlendAttachmentState] = match self.kind {
+            GraphicsOreKind::GaussianSplat => &premul_blend,
+            _                              => &opaque_blend,
+        };
         let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(&color_blend_attachments);
+            .attachments(color_blend_attachments);
 
         // Depth-stencil: enabled for ForwardLit / SkinnedForwardLit, disabled for Ui.
+        // GaussianSplat: depth test on so opaque scene geometry occludes
+        // splats correctly, depth write off so back-to-front-sorted
+        // alpha blending stays correct (write would self-occlude later
+        // splats sorted further away).
         let depth_stencil = match self.kind {
             GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit =>
                 vk::PipelineDepthStencilStateCreateInfo::default()
@@ -737,6 +781,12 @@ impl GraphicsForge {
             GraphicsOreKind::Ui => vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(false)
                 .depth_write_enable(false)
+                .stencil_test_enable(false),
+            GraphicsOreKind::GaussianSplat => vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(true)
+                .depth_write_enable(false)
+                .depth_compare_op(vk::CompareOp::LESS)
+                .depth_bounds_test_enable(false)
                 .stencil_test_enable(false),
         };
 

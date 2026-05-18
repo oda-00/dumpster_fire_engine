@@ -24,13 +24,20 @@ pub enum GraphicsOreKind {
     SkinnedForwardLit,
     /// Immediate-mode UI overlay rendered on top of the scene.
     Ui,
+    /// KHR_gaussian_splatting raster. Reads pre-computed splat billboard
+    /// vertices (clip-space pos + per-vertex ellipse_uv + colour) from a
+    /// compute-shader output and alpha-blends them with depth test on,
+    /// depth write off. Back-to-front order is enforced by the
+    /// SplatSort compute Ore that runs ahead.
+    GaussianSplat,
 }
 
 impl GraphicsOreKind {
-    pub const ALL: [GraphicsOreKind; 3] = [
+    pub const ALL: [GraphicsOreKind; 4] = [
         GraphicsOreKind::ForwardLit,
         GraphicsOreKind::SkinnedForwardLit,
         GraphicsOreKind::Ui,
+        GraphicsOreKind::GaussianSplat,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -68,6 +75,16 @@ pub enum OreKind {
     /// Applies weighted morph-target deltas to a rest-pose vertex buffer.
     MorphBlend,
 
+    /// KHR_gaussian_splatting: bitonic sort of N splats by view-z. Run
+    /// log²(N) times per frame to fully sort the splat list back-to-front
+    /// before the GaussianSplat raster reads them.
+    SplatSort,
+    /// KHR_gaussian_splatting: per-splat projection + 2D covariance +
+    /// 6-vertex billboard quad emission. Reads sorted splat indices from
+    /// SplatSort output, emits one quad per splat into a vertex buffer
+    /// the GaussianSplat raster pipeline consumes.
+    SplatBillboard,
+
     // Rasterization — sub-kind selects the draw pipeline.
     Graphics(GraphicsOreKind),
 }
@@ -75,7 +92,7 @@ pub enum OreKind {
 impl OreKind {
     /// Compute-only kinds, in `index()` order. Use this to size the compute
     /// forge cache — graphics variants live in their own arena.
-    pub const COMPUTE_ALL: [OreKind; 11] = [
+    pub const COMPUTE_ALL: [OreKind; 13] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -87,12 +104,14 @@ impl OreKind {
         OreKind::VisibilityPass,
         OreKind::SkinPalette,
         OreKind::MorphBlend,
+        OreKind::SplatSort,
+        OreKind::SplatBillboard,
     ];
 
     pub const COMPUTE_COUNT: usize = Self::COMPUTE_ALL.len();
 
     /// Every kind, compute + every graphics sub-kind, in `index()` order.
-    pub const ALL: [OreKind; 14] = [
+    pub const ALL: [OreKind; 17] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -104,9 +123,12 @@ impl OreKind {
         OreKind::VisibilityPass,
         OreKind::SkinPalette,
         OreKind::MorphBlend,
+        OreKind::SplatSort,
+        OreKind::SplatBillboard,
         OreKind::Graphics(GraphicsOreKind::ForwardLit),
         OreKind::Graphics(GraphicsOreKind::SkinnedForwardLit),
         OreKind::Graphics(GraphicsOreKind::Ui),
+        OreKind::Graphics(GraphicsOreKind::GaussianSplat),
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -126,6 +148,8 @@ impl OreKind {
             OreKind::VisibilityPass      => 8,
             OreKind::SkinPalette         => 9,
             OreKind::MorphBlend          => 10,
+            OreKind::SplatSort           => 11,
+            OreKind::SplatBillboard      => 12,
             OreKind::Graphics(g)         => Self::COMPUTE_COUNT + g.index(),
         }
     }

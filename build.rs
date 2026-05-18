@@ -13,6 +13,10 @@ fn main() {
     compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/skinned_forward_lit.vert");
     compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/skin_palette.comp.glsl");
     compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/morph_blend.comp.glsl");
+    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/splat_sort.comp.glsl");
+    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/splat_billboard.comp.glsl");
+    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/gaussian_splat.vert");
+    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/gaussian_splat.frag");
 }
 
 struct Compiler {
