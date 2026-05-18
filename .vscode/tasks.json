@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build with Clang",
+      "type": "shell",
+      "command": "clang++",
+      "args": [
+        "-g",
+        "-o",
+        "${workspaceFolder}/build/output.exe",
+        "${file}"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Cargo Build",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build"],
+      "problemMatcher": ["$rustc"],
+      "group": {
+        "kind": "build"
+      }
+    },
+    {
+      "label": "Cargo Run",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["run"],
+      "problemMatcher": ["$rustc"],
+      "group": {
+        "kind": "test"
+      }
+    }
+  ]
+}

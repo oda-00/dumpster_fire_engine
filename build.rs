@@ -6,17 +6,18 @@ fn main() {
     let have_compiler = compiler.as_ref()
         .map(|c| Command::new(&c.binary).arg(c.version_flag).output().is_ok())
         .unwrap_or(false);
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/triangle.vert");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/triangle.frag");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/forward_lit.vert");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/forward_lit.frag");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/skinned_forward_lit.vert");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/skin_palette.comp.glsl");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/morph_blend.comp.glsl");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/splat_sort.comp.glsl");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/splat_billboard.comp.glsl");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/gaussian_splat.vert");
-    compile_shader(compiler.as_ref(), have_compiler, "assets/shaders/gaussian_splat.frag");
+    let cc = compiler.as_ref();
+    compile_shader(cc, have_compiler, "assets/shaders/triangle.vert");
+    compile_shader(cc, have_compiler, "assets/shaders/triangle.frag");
+    compile_shader(cc, have_compiler, "assets/shaders/forward_lit.vert");
+    compile_shader(cc, have_compiler, "assets/shaders/forward_lit.frag");
+    compile_shader(cc, have_compiler, "assets/shaders/skinned_forward_lit.vert");
+    compile_shader(cc, have_compiler, "assets/shaders/skin_palette.comp");
+    compile_shader(cc, have_compiler, "assets/shaders/morph_blend.comp");
+    compile_shader(cc, have_compiler, "assets/shaders/splat_sort.comp.glsl");
+    compile_shader(cc, have_compiler, "assets/shaders/splat_billboard.comp.glsl");
+    compile_shader(cc, have_compiler, "assets/shaders/gaussian_splat.vert");
+    compile_shader(cc, have_compiler, "assets/shaders/gaussian_splat.frag");
 }
 
 struct Compiler {

@@ -1,0 +1,31 @@
+{
+  "[llvm]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-llvm",
+    "editor.formatOnSave": true
+  },
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true
+  },
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.inlayHints.enable": true,
+  
+  "llvm.extension.enableSemanticHighlighting": true,
+
+  "files.associations": {
+    "*.ll": "llvm",
+    "*.mir": "llvm",
+    "*.mlir": "llvm"
+  },
+  "C_Cpp.clang_format_path": "C:\\Program Files\\LLVM\\bin\\clang-format.exe",
+  "C_Cpp.codeAnalysis.clangTidy.path": "C:\\Program Files\\LLVM\\bin\\clang-tidy.exe",
+  "C_Cpp.intelliSenseEngine": "Tag Parser",
+  "[c]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools",
+    "editor.formatOnSave": true
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools",
+    "editor.formatOnSave": true
+  }
+}
