@@ -8,9 +8,13 @@ fn main() {
     compile_shader(&glslc, have_glslc, "assets/shaders/triangle.frag");
     compile_shader(&glslc, have_glslc, "assets/shaders/forward_lit.vert");
     compile_shader(&glslc, have_glslc, "assets/shaders/forward_lit.frag");
-    compile_shader(&glslc, have_glslc, "assets/shaders/skinned_forward_lit.vert");
-    compile_shader(&glslc, have_glslc, "assets/shaders/skin_palette.comp.glsl");
-    compile_shader(&glslc, have_glslc, "assets/shaders/morph_blend.comp.glsl");
+    compile_shader(
+        &glslc,
+        have_glslc,
+        "assets/shaders/skinned_forward_lit.vert",
+    );
+    compile_shader(&glslc, have_glslc, "assets/shaders/skin_palette.comp");
+    compile_shader(&glslc, have_glslc, "assets/shaders/morph_blend.comp");
 }
 
 fn compile_shader(glslc: &str, have_glslc: bool, src: &str) {

@@ -9,7 +9,9 @@
   },
   "rust-analyzer.check.command": "clippy",
   "rust-analyzer.inlayHints.enable": true,
+  
   "llvm.extension.enableSemanticHighlighting": true,
+
   "files.associations": {
     "*.ll": "llvm",
     "*.mir": "llvm",
