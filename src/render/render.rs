@@ -92,6 +92,21 @@ impl Renderer {
         window.build_compute_factory(proto, &mut self.forge, &device)
     }
 
+    /// Async batched compute. Returns the factory handle + the semaphore
+    /// the downstream graphics submit must wait on at vertex stages.
+    pub fn build_compute_factory_async(
+        &mut self,
+        window_h: WindowHandle,
+        proto:    Proto<ComputeTag>,
+    ) -> ForgeResult<(FactoryHandle, ash::vk::Semaphore)> {
+        let device = self.forge.device.clone();
+        let window = self
+            .windows
+            .get_mut(window_h)
+            .expect("window handle is stale or was never valid");
+        window.build_compute_factory_async(proto, &mut self.forge, &device)
+    }
+
     pub fn build_graphics_factory(
         &mut self,
         window_h: WindowHandle,

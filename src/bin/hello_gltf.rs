@@ -361,6 +361,12 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // Per-frame compute-completion semaphore the async compute
+                // path signals; threaded into the graphics submission so
+                // the GPU side-orders compute → graphics without a CPU
+                // fence wait. Empty when no compute Ores were dispatched
+                // (asset with no skinning + no morph targets).
+                let mut compute_signal_outer: Option<vk::Semaphore> = None;
                 // If the asset is in, advance any animation and (re)build
                 // the per-frame draw list.
                 if let Some(state) = self.asset_loaded.as_mut() {
@@ -393,15 +399,22 @@ impl ApplicationHandler for App {
                         // The factory's ingots own the compute output buffers; we
                         // harvest morph-blended vertex buffers and skin palettes
                         // from it and feed them straight into the graphics draws.
+                        // Async path: refine_batch_async submits all compute
+                        // dispatches in one CB with a signal semaphore. The
+                        // CPU continues into graphics record without waiting
+                        // on a fence; the GPU side blocks the graphics
+                        // vertex stages on the returned semaphore at submit.
+                        let mut compute_signal: Option<vk::Semaphore> = None;
                         let (morph_buffers, palette_buffers):
                             (std::collections::HashMap<_, _>, std::collections::HashMap<_, _>) =
                             if let Some(compute_proto) = build_skin_morph_proto(
                                 &state.asset, &state.pose, ProtoId::new(2), 0,
                             ) {
-                                match live.renderer.build_compute_factory(
+                                match live.renderer.build_compute_factory_async(
                                     live.window_handle, compute_proto,
                                 ) {
-                                    Ok(handle) => {
+                                    Ok((handle, sem)) => {
+                                        compute_signal = Some(sem);
                                         let win = live.renderer.window(live.window_handle);
                                         let factory = win.and_then(|w| w.factory_master.get(handle));
                                         match factory {
@@ -511,12 +524,22 @@ impl ApplicationHandler for App {
                         for plan in plans { proto.push_call(plan); }
                         live.renderer.build_graphics_factory(live.window_handle, proto);
                         state.last_anim_time = t;
+                        // Pass the compute-completion semaphore upward so
+                        // the graphics submission waits on it.
+                        compute_signal_outer = compute_signal;
                     }
                 }
 
                 let window = live.renderer.window_mut(live.window_handle).expect("window live");
+                let waits: &[vk::Semaphore] = match compute_signal_outer.as_ref() {
+                    Some(s) => std::slice::from_ref(s),
+                    None    => &[],
+                };
                 let result = unsafe {
-                    window.draw_frame(&live.ctx.instance, &live.ctx.device, live.ctx.queue)
+                    window.draw_frame_with_compute_wait(
+                        &live.ctx.instance, &live.ctx.device, live.ctx.queue,
+                        waits,
+                    )
                 };
                 if let Err(e) = result {
                     eprintln!("draw_frame error: {e:?}");

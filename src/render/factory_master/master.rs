@@ -51,6 +51,21 @@ impl FactoryMaster {
         Ok(self.replace_or_insert(factory, device))
     }
 
+    /// Async compute build. Drives every plan through
+    /// `Factory::from_compute_proto_async` (one batched submit + signal
+    /// semaphore) and returns the resulting factory handle alongside
+    /// the semaphore the downstream graphics submission consumes.
+    pub fn build_compute_proto_async(
+        &mut self,
+        proto: Proto<ComputeTag>,
+        forge: &mut ForgeMaster,
+        device: &ash::Device,
+    ) -> ForgeResult<(FactoryHandle, ash::vk::Semaphore)> {
+        let id = FactoryId::new(proto.id.raw());
+        let (factory, sem) = Factory::from_compute_proto_async(id, proto, forge)?;
+        Ok((self.replace_or_insert(factory, device), sem))
+    }
+
     pub fn build_graphics_proto(
         &mut self,
         proto:  Proto<GraphicsTag>,

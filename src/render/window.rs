@@ -328,6 +328,17 @@ impl Window {
         self.factory_master.build_compute_proto(proto, forge, device)
     }
 
+    /// Async batched compute. The downstream graphics submission must
+    /// wait on the returned semaphore at vertex stages.
+    pub fn build_compute_factory_async(
+        &mut self,
+        proto:  Proto<ComputeTag>,
+        forge:  &mut ForgeMaster,
+        device: &ash::Device,
+    ) -> ForgeResult<(FactoryHandle, vk::Semaphore)> {
+        self.factory_master.build_compute_proto_async(proto, forge, device)
+    }
+
     pub fn build_graphics_factory(
         &mut self,
         proto:  Proto<GraphicsTag>,

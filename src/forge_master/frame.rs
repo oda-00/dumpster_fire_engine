@@ -42,6 +42,15 @@ impl FramePlan {
         }
         Ok(frame)
     }
+
+    /// Async variant: returns this plan's ores as a flat list ready to be
+    /// batched (across multiple plans) into a single `refine_batch_async`
+    /// submission. The plan metadata (id, name) is preserved alongside the
+    /// ingots so callers can reassemble them into the originally-named
+    /// frames after the batch returns.
+    pub fn into_ores(self) -> (super::frame::FrameId, std::sync::Arc<str>, Vec<super::ore::Ore>) {
+        (self.id, self.name, self.ores.into_iter().collect())
+    }
 }
 
 pub struct Frame {
