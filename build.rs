@@ -3,7 +3,8 @@ use std::process::Command;
 
 fn main() {
     let compiler = find_compiler();
-    let have_compiler = compiler.as_ref()
+    let have_compiler = compiler
+        .as_ref()
         .map(|c| Command::new(&c.binary).arg(c.version_flag).output().is_ok())
         .unwrap_or(false);
     let cc = compiler.as_ref();
@@ -12,22 +13,29 @@ fn main() {
     compile_shader(cc, have_compiler, "assets/shaders/forward_lit.vert");
     compile_shader(cc, have_compiler, "assets/shaders/forward_lit.frag");
     compile_shader(cc, have_compiler, "assets/shaders/skinned_forward_lit.vert");
-    compile_shader(cc, have_compiler, "assets/shaders/skin_palette.comp");
-    compile_shader(cc, have_compiler, "assets/shaders/morph_blend.comp");
+    compile_shader(cc, have_compiler, "assets/shaders/skin_palette.comp.glsl");
+    compile_shader(cc, have_compiler, "assets/shaders/morph_blend.comp.glsl");
     compile_shader(cc, have_compiler, "assets/shaders/splat_sort.comp.glsl");
-    compile_shader(cc, have_compiler, "assets/shaders/splat_billboard.comp.glsl");
+    compile_shader(
+        cc,
+        have_compiler,
+        "assets/shaders/splat_billboard.comp.glsl",
+    );
     compile_shader(cc, have_compiler, "assets/shaders/gaussian_splat.vert");
     compile_shader(cc, have_compiler, "assets/shaders/gaussian_splat.frag");
 }
 
 struct Compiler {
-    binary:       String,
+    binary: String,
     version_flag: &'static str,
-    kind:         CompilerKind,
+    kind: CompilerKind,
 }
 
 #[derive(Clone, Copy)]
-enum CompilerKind { Glslc, Glslang }
+enum CompilerKind {
+    Glslc,
+    Glslang,
+}
 
 fn compile_shader(compiler: Option<&Compiler>, have_compiler: bool, src: &str) {
     let out = format!("{src}.spv");
@@ -43,9 +51,20 @@ fn compile_shader(compiler: Option<&Compiler>, have_compiler: bool, src: &str) {
     let compiler = compiler.unwrap();
 
     let status = match compiler.kind {
-        CompilerKind::Glslc => Command::new(&compiler.binary)
-            .args([src, "-o", &out])
-            .status(),
+        CompilerKind::Glslc => {
+            let mut cmd = Command::new(&compiler.binary);
+
+            if src.ends_with(".vert.glsl") {
+                cmd.args(["-fshader-stage=vertex"]);
+            } else if src.ends_with(".frag.glsl") {
+                cmd.args(["-fshader-stage=fragment"]);
+            } else if src.ends_with(".comp.glsl") {
+                cmd.args(["-fshader-stage=compute"]);
+            }
+
+            cmd.args([src, "-o", &out]).status()
+        }
+
         CompilerKind::Glslang => Command::new(&compiler.binary)
             .args(["-V", src, "-o", &out])
             .status(),
@@ -78,7 +97,11 @@ fn find_compiler() -> Option<Compiler> {
             kind: CompilerKind::Glslc,
         });
     }
-    if Command::new("glslangValidator").arg("--version").output().is_ok() {
+    if Command::new("glslangValidator")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
         return Some(Compiler {
             binary: "glslangValidator".into(),
             version_flag: "--version",
