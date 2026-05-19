@@ -16,11 +16,17 @@ use std::time::Instant;
 
 use ash::vk;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::HasDisplayHandle;
-use winit::window::WindowId;
+use winit::window::{CursorGrabMode, WindowId};
 
+<<<<<<< HEAD
+=======
+use dumpster_fire_engine::render::camera::{Camera, CameraController, CameraId};
+
+>>>>>>> 5b1fd0af6298e447d49809a9dc2b0b7b85cd25b7
 use dumpster_fire_engine::forge_master::ore::{GpuMesh, GpuSkinBuffer};
 use dumpster_fire_engine::forge_master::{ForgeMaster, GraphicsForgeId, GraphicsOreKind};
 use dumpster_fire_engine::render::{
@@ -31,7 +37,11 @@ use dumpster_fire_engine::resource_manager::asset_manager::{
     collect_morph_output_buffers, collect_skin_palette_buffers, compute_asset_aabb,
     forge_gltf::{GltfAsset, Pose},
     pack_primitive_skin_attrs, primitive_is_skinned, register_skin_morph_forges,
+<<<<<<< HEAD
     upload_all_primitive_meshes, view_projection_from_aabb,
+=======
+    upload_all_primitive_meshes,
+>>>>>>> 5b1fd0af6298e447d49809a9dc2b0b7b85cd25b7
 };
 use dumpster_fire_engine::resource_manager::gltf_driver::{
     AsyncGltfLoader, GltfCache, GltfSampler, GltfUploadCtx, MaterialHandle, TEXTURE_SLOT_COUNT,
@@ -60,12 +70,24 @@ fn main() {
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
+    let now = Instant::now();
     let mut app = App {
         model_path: path,
         loader: None,
-        start: Instant::now(),
+        start: now,
         asset_loaded: None,
         live: None,
+        camera: Camera::new(
+            CameraId::new(1),
+            Arc::from("hello_gltf"),
+            [0.0, 0.0, 5.0],
+            0.0,
+            0.0,
+        ),
+        controller: CameraController::new(5.0, 0.005),
+        camera_fitted: false,
+        last_cursor: None,
+        last_frame: now,
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }
@@ -80,8 +102,20 @@ struct App {
     start: Instant,
     asset_loaded: Option<AssetState>,
     live: Option<LiveState>,
+<<<<<<< HEAD
 }
 
+=======
+    camera: Camera,
+    controller: CameraController,
+    /// True once the camera has been fitted to the asset AABB on first load.
+    camera_fitted: bool,
+    /// Last absolute cursor position for delta computation.
+    last_cursor: Option<(f32, f32)>,
+    /// Wall-clock instant of the previous frame, for controller dt.
+    last_frame: Instant,
+}
+>>>>>>> 5b1fd0af6298e447d49809a9dc2b0b7b85cd25b7
 struct AssetState {
     asset: GltfAsset,
     pose: Pose,
@@ -336,6 +370,34 @@ impl ApplicationHandler for App {
                     window.resize(new_size.width, new_size.height);
                 }
             }
+            WindowEvent::KeyboardInput { event: key_ev, .. } => {
+                if let PhysicalKey::Code(kc) = key_ev.physical_key {
+                    self.controller.handle_key(kc, key_ev.state);
+                    if kc == KeyCode::Escape && key_ev.state == ElementState::Pressed {
+                        let grabbed = self.controller.toggle_grab();
+                        set_grab_hello(live, grabbed);
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let px = position.x as f32;
+                let py = position.y as f32;
+                let (dx, dy) = match self.last_cursor {
+                    Some((lx, ly)) => (px - lx, py - ly),
+                    None => (0.0, 0.0),
+                };
+                self.last_cursor = Some((px, py));
+                if self.controller.is_grabbed() {
+                    let (dyaw, dpitch) = self.controller.handle_mouse(dx, dy);
+                    self.camera.rotate(dyaw, dpitch);
+                }
+            }
+            WindowEvent::MouseInput { button, state, .. } => {
+                if button == MouseButton::Left && state == ElementState::Pressed {
+                    let grabbed = self.controller.toggle_grab();
+                    set_grab_hello(live, grabbed);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 // First time we see the asset, install it and upload all GPU
                 // textures + materials.
@@ -410,7 +472,20 @@ impl ApplicationHandler for App {
                 let mut compute_signal_outer: Option<vk::Semaphore> = None;
                 // If the asset is in, advance any animation and (re)build
                 // the per-frame draw list.
+                // Advance camera velocity from held keys (capped to avoid
+                // spiral on first frame where dt could be huge).
+                let now = Instant::now();
+                let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+                self.last_frame = now;
+                self.controller.update(&mut self.camera, dt);
+
                 if let Some(state) = self.asset_loaded.as_mut() {
+                    // Auto-fit camera to asset on first load.
+                    if !self.camera_fitted {
+                        fit_camera_to_aabb(&mut self.camera, &state.rest_aabb);
+                        self.camera_fitted = true;
+                    }
+
                     let t = self.start.elapsed().as_secs_f32();
                     let advanced = if let Some(anim) = state.asset.animations.first() {
                         let dur = anim.duration().max(1e-3);
@@ -533,7 +608,7 @@ impl ApplicationHandler for App {
                                 height: 768,
                             });
                         let aspect = extent.width as f32 / extent.height.max(1) as f32;
-                        let view_proj = view_projection_from_aabb(&state.rest_aabb, aspect);
+                        let view_proj = self.camera.view_projection_matrix(aspect);
 
                         // Ensure the cache has a dummy material; pass it as
                         // the per-frame fallback so draws whose primitive has
@@ -760,3 +835,50 @@ fn upload_skin_vertex_buffers(
 
 // Touch TEXTURE_SLOT_COUNT so it's not flagged unused at the binary scope.
 const _SLOT_CHECK: usize = TEXTURE_SLOT_COUNT;
+
+/// Toggle OS cursor grab/visibility on the hello_gltf window.
+fn set_grab_hello(live: &LiveState, grabbed: bool) {
+    if let Some(window) = live.renderer.window(live.window_handle) {
+        if let Some(gfx) = &window.graphics {
+            let mode = if grabbed { CursorGrabMode::Locked } else { CursorGrabMode::None };
+            let _ = gfx.winit_window.set_cursor_grab(mode);
+            let _ = gfx.winit_window.set_cursor_visible(!grabbed);
+        }
+    }
+}
+
+/// Position and orient the camera to frame the given AABB using the same
+/// eye-point math as `view_projection_from_aabb`. Also scales near/far to
+/// the asset's size so clipping planes don't cut off large or tiny models.
+fn fit_camera_to_aabb(camera: &mut Camera, aabb: &([f32; 3], [f32; 3])) {
+    let (mn, mx) = aabb;
+    let center = [
+        0.5 * (mn[0] + mx[0]),
+        0.5 * (mn[1] + mx[1]),
+        0.5 * (mn[2] + mx[2]),
+    ];
+    let half = [
+        0.5 * (mx[0] - mn[0]).max(1e-3),
+        0.5 * (mx[1] - mn[1]).max(1e-3),
+        0.5 * (mx[2] - mn[2]).max(1e-3),
+    ];
+    let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
+    let dist = radius * 2.5;
+    let eye = [
+        center[0] + dist * 0.6,
+        center[1] + dist * 0.4,
+        center[2] + dist * 1.0,
+    ];
+    camera.position = eye;
+    // Yaw/pitch to look from eye toward center.
+    let dx = center[0] - eye[0];
+    let dy = center[1] - eye[1];
+    let dz = center[2] - eye[2];
+    let horiz = (dx * dx + dz * dz).sqrt();
+    camera.pitch = dy.atan2(horiz);
+    camera.yaw = dz.atan2(dx);
+    camera.near = (radius * 0.01).max(0.001);
+    camera.far = (radius * 10.0).max(100.0);
+    // Scale move speed to the asset so WASD feels right.
+    camera.fov = 50.0_f32.to_radians();
+}
