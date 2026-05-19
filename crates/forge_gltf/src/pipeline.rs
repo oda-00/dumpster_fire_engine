@@ -28,7 +28,9 @@ pub const IDENTITY_M4: [f32; 16] = [
 #[repr(u8)]
 pub enum GltfGraphicsKind {
     ForwardLit,
+    SkinnedForwardLit,
     Ui,
+    GaussianSplat,
 }
 
 /// Mirrors `crate::forge_master::ore::OreKind`.
@@ -701,6 +703,11 @@ impl GltfPipelineKind {
             // SkinPalette / MorphBlend require a Pose — use the dedicated builders.
             GltfPipelineKind::SkinPalette         => None,
             GltfPipelineKind::MorphBlend          => None,
+            // Splat compute Ores: use build_splat_sort_input / build_splat_billboard_input.
+            // InstanceTransforms: use build_instance_transforms_input (needs the full asset).
+            GltfPipelineKind::SplatSort           => None,
+            GltfPipelineKind::SplatBillboard      => None,
+            GltfPipelineKind::InstanceTransforms  => build_instance_transforms_input(asset),
             GltfPipelineKind::Graphics(_)         => None,
         }
     }
@@ -804,5 +811,98 @@ mod tests {
         assert_eq!(draws[0].world_matrix, IDENTITY_M4,
             "skinned-node world matrix should be identity (spec §3.7.3.2); got {:?}",
             draws[0].world_matrix);
+    }
+}
+
+// ── InstanceTransforms / SplatSort / SplatBillboard input builders ─────────
+
+/// Flatten every `EXT_mesh_gpu_instancing` node's per-instance TRS into a
+/// 48-byte/instance std430 stream the `instance_transforms.comp.glsl`
+/// shader consumes. Returns `None` when no node carries instances.
+///
+/// Std430 layout per instance:
+///   `vec4 translation_pad` (xyz = T, w pad), `vec4 rotation` (quat xyzw),
+///   `vec4 scale_pad` (xyz = S, w pad) = 48 bytes.
+pub fn build_instance_transforms_input(asset: &GltfAsset) -> Option<PipelineUpload> {
+    let mut primary: Vec<u8> = Vec::new();
+    let mut total = 0u32;
+    for node in &asset.nodes {
+        let Some(inst) = &node.instances else { continue };
+        let n = inst.len();
+        for i in 0..n {
+            let t = inst.translation.get(i).copied().unwrap_or([0.0, 0.0, 0.0]);
+            let r = inst.rotation.get(i).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            let s = inst.scale.get(i).copied().unwrap_or([1.0, 1.0, 1.0]);
+            for v in t { primary.extend_from_slice(&v.to_le_bytes()); }
+            primary.extend_from_slice(&0f32.to_le_bytes());           // pad
+            for v in r { primary.extend_from_slice(&v.to_le_bytes()); }
+            for v in s { primary.extend_from_slice(&v.to_le_bytes()); }
+            primary.extend_from_slice(&0f32.to_le_bytes());           // pad
+        }
+        total += n as u32;
+    }
+    if total == 0 { return None; }
+    Some(PipelineUpload {
+        kind:            GltfPipelineKind::InstanceTransforms,
+        primary_bytes:   primary.into_iter().collect(),
+        secondary_bytes: ThinVec::new(),
+        element_count:   total,
+        element_stride:  48,
+        workgroups:      [((total + 63) / 64).max(1), 1, 1],
+        is_mesh:         false,
+    })
+}
+
+/// SplatSort input: 8-byte (key, splat_index) pairs initialised with
+/// `f32::INFINITY` keys so the first sort puts them all at the tail until
+/// the per-frame view_z is computed and written.
+pub fn build_splat_sort_input(set: &crate::splat::GaussianSplatSet) -> PipelineUpload {
+    let n = set.len();
+    let mut primary: ThinVec<u8> = ThinVec::with_capacity(n * 8);
+    for i in 0..n {
+        let key = f32::INFINITY.to_bits();
+        primary.extend_from_slice(&key.to_le_bytes());
+        primary.extend_from_slice(&(i as u32).to_le_bytes());
+    }
+    PipelineUpload {
+        kind:            GltfPipelineKind::SplatSort,
+        primary_bytes:   primary,
+        secondary_bytes: ThinVec::new(),
+        element_count:   n as u32,
+        element_stride:  8,
+        workgroups:      [((n as u32 + 255) / 256).max(1), 1, 1],
+        is_mesh:         false,
+    }
+}
+
+/// SplatBillboard input: 68-byte/splat packed stream (pos vec4 + scale
+/// vec4 + rot vec4 + colour vec4 + opacity scalar) — matches the
+/// `splat_billboard.comp.glsl` 6-binding read pattern when split out
+/// engine-side into individual SSBO sub-ranges.
+pub fn build_splat_billboard_input(set: &crate::splat::GaussianSplatSet) -> PipelineUpload {
+    let n = set.len();
+    let mut primary: ThinVec<u8> = ThinVec::with_capacity(n * 68);
+    for i in 0..n {
+        let p = set.positions.get(i).copied().unwrap_or([0.0; 3]);
+        let s = set.scales.get(i).copied().unwrap_or([1.0; 3]);
+        let r = set.rotations.get(i).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        let c = set.colors.get(i).copied().unwrap_or([1.0; 4]);
+        let o = set.opacities.get(i).copied().unwrap_or(1.0);
+        for v in p { primary.extend_from_slice(&v.to_le_bytes()); }
+        primary.extend_from_slice(&0f32.to_le_bytes());
+        for v in s { primary.extend_from_slice(&v.to_le_bytes()); }
+        primary.extend_from_slice(&0f32.to_le_bytes());
+        for v in r { primary.extend_from_slice(&v.to_le_bytes()); }
+        for v in c { primary.extend_from_slice(&v.to_le_bytes()); }
+        primary.extend_from_slice(&o.to_le_bytes());
+    }
+    PipelineUpload {
+        kind:            GltfPipelineKind::SplatBillboard,
+        primary_bytes:   primary,
+        secondary_bytes: ThinVec::new(),
+        element_count:   n as u32,
+        element_stride:  68,
+        workgroups:      [((n as u32 + 255) / 256).max(1), 1, 1],
+        is_mesh:         false,
     }
 }

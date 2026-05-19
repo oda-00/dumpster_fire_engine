@@ -294,15 +294,22 @@ fn pipeline_kind_to_ore(kind: forge_gltf::GltfPipelineKind) -> OreKind {
         K::VisibilityPass      => OreKind::VisibilityPass,
         K::SkinPalette         => OreKind::SkinPalette,
         K::MorphBlend          => OreKind::MorphBlend,
-        K::Graphics(G::ForwardLit) => OreKind::Graphics(GraphicsOreKind::ForwardLit),
-        K::Graphics(G::Ui)         => OreKind::Graphics(GraphicsOreKind::Ui),
+        K::SplatSort           => OreKind::SplatSort,
+        K::SplatBillboard      => OreKind::SplatBillboard,
+        K::InstanceTransforms  => OreKind::InstanceTransforms,
+        K::Graphics(G::ForwardLit)        => OreKind::Graphics(GraphicsOreKind::ForwardLit),
+        K::Graphics(G::SkinnedForwardLit) => OreKind::Graphics(GraphicsOreKind::SkinnedForwardLit),
+        K::Graphics(G::Ui)                => OreKind::Graphics(GraphicsOreKind::Ui),
+        K::Graphics(G::GaussianSplat)     => OreKind::Graphics(GraphicsOreKind::GaussianSplat),
     }
 }
 
 fn graphics_kind_to_ore(kind: forge_gltf::GltfGraphicsKind) -> GraphicsOreKind {
     match kind {
-        forge_gltf::GltfGraphicsKind::ForwardLit => GraphicsOreKind::ForwardLit,
-        forge_gltf::GltfGraphicsKind::Ui         => GraphicsOreKind::Ui,
+        forge_gltf::GltfGraphicsKind::ForwardLit        => GraphicsOreKind::ForwardLit,
+        forge_gltf::GltfGraphicsKind::SkinnedForwardLit => GraphicsOreKind::SkinnedForwardLit,
+        forge_gltf::GltfGraphicsKind::Ui                => GraphicsOreKind::Ui,
+        forge_gltf::GltfGraphicsKind::GaussianSplat     => GraphicsOreKind::GaussianSplat,
     }
 }
 

@@ -101,6 +101,19 @@ impl<Tag, T> Arena<Tag, T> {
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.slots.iter_mut().filter_map(|s| s.val.as_mut())
     }
+
+    /// Iterate every live `(Handle, &T)` pair. Order matches slot index
+    /// (oldest-inserted first when no holes; otherwise re-fills fill the
+    /// earliest freed slot). Used by the App runner to map a winit
+    /// `WindowId` → `AppHandle` without keeping a parallel cache.
+    pub fn entries(&self) -> impl Iterator<Item = (Handle<Tag>, &T)> {
+        self.slots.iter().enumerate().filter_map(|(idx, s)| {
+            s.val.as_ref().map(|v| (
+                Handle { idx: idx as u32, generation: s.generation, _tag: PhantomData },
+                v,
+            ))
+        })
+    }
 }
 
 impl<Tag, T> Index<Handle<Tag>> for Arena<Tag, T> {
