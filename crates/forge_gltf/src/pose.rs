@@ -11,7 +11,9 @@
 use thin_vec::ThinVec;
 
 use crate::animation::{
-    AnimPath, Animation, sample_quat, sample_scalar, sample_vec3,
+    AnimPath, Animation,
+    sample_quat, sample_scalar, sample_vec3,
+    sample_quat_hinted, sample_scalar_hinted, sample_vec3_hinted,
 };
 use crate::asset::GltfAsset;
 use crate::material::{Material, TextureRef};
@@ -27,6 +29,11 @@ pub struct Pose {
     /// Per-node morph-target weight overrides. Empty `ThinVec` = "use the
     /// owning mesh's default weights".
     pub morph_weights: ThinVec<ThinVec<f32>>,
+    /// Per-channel monotonic-time hint into the channel's input timeline.
+    /// Sized lazily inside `sample()` to `anim.channels.len()`; reused
+    /// across frames so forward-running animation walks O(1) per channel
+    /// instead of O(log N) binary search. See `locate_segment_hinted`.
+    pub last_segments: ThinVec<u32>,
 }
 
 impl Pose {
@@ -50,28 +57,33 @@ impl Pose {
             Some(scene) => compose_world_matrices_from(&scene.roots, &asset.nodes, &local),
             None        => (0..n).map(|_| crate::pipeline::IDENTITY_M4).collect(),
         };
-        Self { translation, rotation, scale, local, world, morph_weights }
+        Self { translation, rotation, scale, local, world, morph_weights, last_segments: ThinVec::new() }
     }
 
     /// Sample one animation at time `t` seconds and refresh the pose. Times
     /// outside the animation's range clamp to the first/last keyframe.
     pub fn sample(&mut self, asset: &GltfAsset, anim: &Animation, t: f32) {
-        for ch in &anim.channels {
+        // Resize the per-channel hint cache to match this animation. We
+        // overwrite all hints if the cache size differs (anim swap or
+        // first call); else reuse from last frame for O(1) forward step.
+        if self.last_segments.len() != anim.channels.len() {
+            self.last_segments.clear();
+            self.last_segments.resize(anim.channels.len(), 0u32);
+        }
+        for (ch_i, ch) in anim.channels.iter().enumerate() {
             let sampler = &anim.samplers[ch.sampler as usize];
             let idx = ch.target_node as usize;
             if idx >= self.translation.len() { continue; }
+            let hint = &mut self.last_segments[ch_i];
             match ch.target_path {
-                AnimPath::Translation => self.translation[idx] = sample_vec3(sampler, t),
-                AnimPath::Rotation    => self.rotation[idx]    = sample_quat(sampler, t),
-                AnimPath::Scale       => self.scale[idx]       = sample_vec3(sampler, t),
+                AnimPath::Translation => self.translation[idx] = sample_vec3_hinted(sampler, t, hint),
+                AnimPath::Rotation    => self.rotation[idx]    = sample_quat_hinted(sampler, t, hint),
+                AnimPath::Scale       => self.scale[idx]       = sample_vec3_hinted(sampler, t, hint),
                 AnimPath::MorphWeights => {
-                    // Output is a flat list of N×k scalars (N keyframes × k
-                    // morph targets). The morph helper samples one scalar
-                    // at a time given a stride.
                     let stride = self.morph_weights[idx].len().max(1);
                     let mut out = ThinVec::with_capacity(stride);
                     for w_idx in 0..stride {
-                        out.push(sample_scalar(sampler, t, stride, w_idx));
+                        out.push(sample_scalar_hinted(sampler, t, stride, w_idx, hint));
                     }
                     self.morph_weights[idx] = out;
                 }

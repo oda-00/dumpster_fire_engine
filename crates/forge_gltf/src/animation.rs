@@ -76,16 +76,48 @@ impl Animation {
 // over (in-tangent, value, out-tangent) triplets.
 
 fn locate_segment(times: &[f32], t: f32) -> (usize, usize, f32) {
-    if times.is_empty() { return (0, 0, 0.0); }
-    if t <= times[0]    { return (0, 0, 0.0); }
+    let mut hint = 0u32;
+    locate_segment_hinted(times, t, &mut hint)
+}
+
+/// Monotonic-time hint variant of `locate_segment`. Fast path: when the
+/// caller's previously-cached segment index still bounds `t`, return in
+/// O(1). When `t` advanced past the hint, forward-scan one step at a
+/// time (typical of frame-by-frame animation playback). Falls back to
+/// binary search on backward seek or first call. `hint` is updated
+/// in-place so the next call benefits.
+pub fn locate_segment_hinted(times: &[f32], t: f32, hint: &mut u32) -> (usize, usize, f32) {
+    if times.is_empty() { *hint = 0; return (0, 0, 0.0); }
+    if t <= times[0]    { *hint = 0; return (0, 0, 0.0); }
     let last = times.len() - 1;
-    if t >= times[last] { return (last, last, 0.0); }
+    if t >= times[last] { *hint = last as u32; return (last, last, 0.0); }
+
+    // Fast path — hint still bounds `t`.
+    let h = (*hint as usize).min(last.saturating_sub(1));
+    if t >= times[h] && t <= times[h + 1] {
+        let span = (times[h + 1] - times[h]).max(1e-12);
+        return (h, h + 1, (t - times[h]) / span);
+    }
+
+    // Forward scan (monotonic time advanced past the hint).
+    if t > times[h + 1] {
+        let mut k = h + 1;
+        while k + 1 <= last && t > times[k + 1] { k += 1; }
+        if k < last && t >= times[k] && t <= times[k + 1] {
+            *hint = k as u32;
+            let span = (times[k + 1] - times[k]).max(1e-12);
+            return (k, k + 1, (t - times[k]) / span);
+        }
+    }
+
+    // Fall back to binary search (seek backward / first call).
     let mut lo = 0;
     let mut hi = last;
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
         if times[mid] <= t { lo = mid; } else { hi = mid; }
     }
+    *hint = lo as u32;
     let span = (times[hi] - times[lo]).max(1e-12);
     (lo, hi, (t - times[lo]) / span)
 }
@@ -140,9 +172,17 @@ fn hermite(p0: f32, m0: f32, p1: f32, m1: f32, u: f32) -> f32 {
 }
 
 pub fn sample_vec3(s: &AnimSampler, t: f32) -> [f32; 3] {
+    let mut hint = 0u32;
+    sample_vec3_hinted(s, t, &mut hint)
+}
+
+/// Hinted variant of `sample_vec3`. The `hint` cache lets monotonic-time
+/// playback (the common case) skip O(log N) binary search and step
+/// forward in O(1). See `locate_segment_hinted`.
+pub fn sample_vec3_hinted(s: &AnimSampler, t: f32, hint: &mut u32) -> [f32; 3] {
     let SamplerOutput::Vec3(out) = &s.output else { return [0.0; 3]; };
     if out.is_empty() { return [0.0; 3]; }
-    let (lo, hi, u) = locate_segment(&s.input, t);
+    let (lo, hi, u) = locate_segment_hinted(&s.input, t, hint);
     match s.interpolation {
         Interpolation::Step   => out[lo],
         Interpolation::Linear => lerp_vec3(out[lo], out[hi], u),
@@ -167,16 +207,19 @@ pub fn sample_vec3(s: &AnimSampler, t: f32) -> [f32; 3] {
 /// is the index within the keyframe. Used by morph-target weight tracks
 /// and by KHR_animation_pointer scalar tracks.
 pub fn sample_scalar(s: &AnimSampler, t: f32, stride: usize, k: usize) -> f32 {
+    let mut hint = 0u32;
+    sample_scalar_hinted(s, t, stride, k, &mut hint)
+}
+
+pub fn sample_scalar_hinted(s: &AnimSampler, t: f32, stride: usize, k: usize, hint: &mut u32) -> f32 {
     let SamplerOutput::Scalars(out) = &s.output else {
-        // Caller passed a vec-shaped sampler; degrade by reading element k
-        // of whatever vector form is available.
         return match &s.output {
             SamplerOutput::Vec3(_) => {
-                let v = sample_vec3(s, t);
+                let v = sample_vec3_hinted(s, t, hint);
                 v.get(k).copied().unwrap_or(0.0)
             }
             SamplerOutput::Vec4(_) => {
-                let v = sample_quat(s, t);
+                let v = sample_quat_hinted(s, t, hint);
                 v.get(k).copied().unwrap_or(0.0)
             }
             _ => 0.0,
@@ -186,9 +229,7 @@ pub fn sample_scalar(s: &AnimSampler, t: f32, stride: usize, k: usize) -> f32 {
     let frames = out.len() / stride;
     if frames == 0 { return 0.0; }
 
-    // Slice `out` as one element per "keyframe-slot". `locate_segment`
-    // operates on the input timeline (always one entry per keyframe).
-    let (lo, hi, u) = locate_segment(&s.input, t);
+    let (lo, hi, u) = locate_segment_hinted(&s.input, t, hint);
     let pick = |frame: usize, slot: usize| -> f32 {
         let i = frame * stride + slot;
         out.get(i).copied().unwrap_or(0.0)
@@ -220,9 +261,14 @@ pub fn slerp_quat_pub(a: [f32; 4], b: [f32; 4], u: f32) -> [f32; 4] {
 }
 
 pub fn sample_quat(s: &AnimSampler, t: f32) -> [f32; 4] {
+    let mut hint = 0u32;
+    sample_quat_hinted(s, t, &mut hint)
+}
+
+pub fn sample_quat_hinted(s: &AnimSampler, t: f32, hint: &mut u32) -> [f32; 4] {
     let SamplerOutput::Vec4(out) = &s.output else { return [0.0, 0.0, 0.0, 1.0]; };
     if out.is_empty() { return [0.0, 0.0, 0.0, 1.0]; }
-    let (lo, hi, u) = locate_segment(&s.input, t);
+    let (lo, hi, u) = locate_segment_hinted(&s.input, t, hint);
     match s.interpolation {
         Interpolation::Step   => out[lo],
         Interpolation::Linear => slerp_quat(out[lo], out[hi], u),
