@@ -102,7 +102,10 @@ impl Camera {
     }
 
     pub fn projection_matrix(&self, aspect: f32) -> [f32; 16] {
-        let proj = Mat4::perspective_rh(self.fov, aspect, self.near, self.far);
+        // perspective_rh uses Z ∈ [0, 1] depth (correct for Vulkan).
+        // Negate Y to flip the clip-space Y axis for Vulkan NDC (Y points down).
+        let mut proj = Mat4::perspective_rh(self.fov, aspect, self.near, self.far);
+        proj.y_axis.y = -proj.y_axis.y;
         proj.to_cols_array()
     }
 

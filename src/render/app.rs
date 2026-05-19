@@ -24,10 +24,10 @@
 //!   own descriptor allocation + semaphore threading, NOT this binary.
 
 use ash::vk;
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::time::Instant;
-use thin_vec::ThinVec;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -36,17 +36,31 @@ use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::{CursorGrabMode, Window as WinitWindow, WindowId};
 
 use crate::forge_master::master::{ForgeError, ForgeResult};
-use crate::forge_master::{ForgeMaster, GraphicsOreKind};
+use crate::forge_master::{ForgeMaster, GraphicsForgeId, GraphicsOreKind};
 use crate::render::camera::{Camera, CameraArena, CameraController, CameraHandle};
 use crate::render::{Renderer, VulkanContext, Window, WindowId as RenderWindowId};
+use crate::resource_manager::asset_manager::gltf_loader::register_skin_morph_forges;
 use crate::resource_manager::gltf_driver::{
+    create_instance_pool, create_instance_set_layout,
     create_material_pool, create_skin_palette_pool, create_skin_palette_set_layout,
 };
+use crate::resource_manager::gltf_scene::GltfScene;
 use crate::resource_manager::manager::{Arena, Handle, Id};
+
+// Shader bytes embedded once here so AppRunner can register default forges.
+const FORWARD_LIT_VERT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"), "/assets/shaders/forward_lit.vert.spv"
+));
+const FORWARD_LIT_FRAG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"), "/assets/shaders/forward_lit.frag.spv"
+));
+const SKINNED_VERT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"), "/assets/shaders/skinned_forward_lit.vert.spv"
+));
 
 // ── App handle / ID ─────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct AppTag;
 pub type AppHandle = Handle<AppTag>;
 
@@ -63,9 +77,13 @@ pub struct WindowResources {
     pub skin_pool:       vk::DescriptorPool,
     pub skin_set_layout: vk::DescriptorSetLayout,
     pub material_layout: vk::DescriptorSetLayout,
+    pub instance_pool:   vk::DescriptorPool,
+    pub instance_layout: vk::DescriptorSetLayout,
     pub winit_id:        WindowId,
     pub aspect:          f32,
     pub last_frame:      Instant,
+    /// Last known absolute cursor position; used to compute per-event deltas.
+    pub last_cursor:     Option<(f32, f32)>,
 }
 
 impl WindowResources {
@@ -92,6 +110,10 @@ struct AppData {
     windows:        Arena<AppTag, WindowResources>,
     next_app_id:    i64,
     next_camera_id: i64,
+    /// Compute semaphores to wait on before the next draw, keyed by AppHandle.
+    compute_waits:  HashMap<AppHandle, Vec<vk::Semaphore>>,
+    /// Wall-clock start time — exposed via AppCtx::elapsed().
+    start:          Instant,
 }
 
 impl AppData {
@@ -103,6 +125,8 @@ impl AppData {
             windows:        Arena::new(),
             next_app_id:    1,
             next_camera_id: 1,
+            compute_waits:  HashMap::new(),
+            start:          Instant::now(),
         }
     }
 
@@ -129,6 +153,8 @@ pub struct AppCtx<'a> {
     pub windows:  &'a mut Arena<AppTag, WindowResources>,
     pub next_app_id:    &'a mut i64,
     pub next_camera_id: &'a mut i64,
+    compute_waits: &'a mut HashMap<AppHandle, Vec<vk::Semaphore>>,
+    start:         Instant,
 }
 
 impl<'a> AppCtx<'a> {
@@ -198,6 +224,8 @@ impl<'a> AppCtx<'a> {
         let material_pool   = create_material_pool(&ctx.device, 4096)?;
         let skin_set_layout = create_skin_palette_set_layout(&ctx.device)?;
         let skin_pool       = create_skin_palette_pool(&ctx.device, 256)?;
+        let instance_layout = create_instance_set_layout(&ctx.device)?;
+        let instance_pool   = create_instance_pool(&ctx.device, 4096)?;
 
         let camera_handle = self.cameras.insert(camera);
         let controller    = CameraController::new(move_speed, mouse_sens);
@@ -206,7 +234,8 @@ impl<'a> AppCtx<'a> {
         let resources = WindowResources {
             window_handle, camera_handle, controller,
             material_pool, skin_pool, skin_set_layout, material_layout,
-            winit_id, aspect, last_frame: Instant::now(),
+            instance_pool, instance_layout,
+            winit_id, aspect, last_frame: Instant::now(), last_cursor: None,
         };
         let app_handle = self.windows.insert(resources);
         *self.next_app_id    += 1;
@@ -221,6 +250,51 @@ impl<'a> AppCtx<'a> {
     pub fn camera_mut(&mut self, app: AppHandle) -> Option<&mut Camera> {
         let h = self.windows.get(app)?.camera_handle;
         self.cameras.get_mut(h)
+    }
+
+    /// Seconds since `AppRunner::run()` was called.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.start.elapsed()
+    }
+
+    /// View-projection matrix for the window's camera at its current aspect.
+    /// Returns identity if the window or camera does not exist.
+    pub fn camera_vp(&self, app: AppHandle) -> [f32; 16] {
+        let res = match self.windows.get(app) { Some(r) => r, None => return [0.0; 16] };
+        let cam = match self.cameras.get(res.camera_handle) { Some(c) => c, None => return [0.0; 16] };
+        cam.view_projection_matrix(res.aspect)
+    }
+
+    /// Create a [`GltfScene`] pre-configured with the descriptor layouts from
+    /// `app`'s window.  Call [`GltfScene::load`] on the result to start
+    /// background asset loading.
+    pub fn new_gltf_scene(&self, app: AppHandle) -> ForgeResult<GltfScene> {
+        let res = self.windows.get(app)
+            .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?;
+        GltfScene::new(self.vulkan.device.clone(), res.material_layout)
+    }
+
+    /// Drive a scene for one frame: animate, compute dispatch, graphics plan.
+    ///
+    /// If a compute semaphore is returned you should call
+    /// `push_compute_wait(app, sem)` so the draw submit waits for it.
+    pub fn gltf_update(
+        &mut self,
+        scene:   &mut GltfScene,
+        app:     AppHandle,
+        elapsed: f32,
+        vp:      &[f32; 16],
+    ) -> ForgeResult<Option<vk::Semaphore>> {
+        let wh = self.windows.get(app)
+            .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?
+            .window_handle;
+        scene.update(self.vulkan, self.renderer, wh, vp, elapsed)
+    }
+
+    /// Queue a compute semaphore that will be waited on before drawing `app`'s
+    /// window this frame.  Semaphores are consumed and cleared after each draw.
+    pub fn push_compute_wait(&mut self, app: AppHandle, sem: vk::Semaphore) {
+        self.compute_waits.entry(app).or_default().push(sem);
     }
 }
 
@@ -283,6 +357,17 @@ impl<T: AppLogic> AppRunner<T> {
         let mut forge = ForgeMaster::new(
             ctx.device.clone(), ctx.queue, ctx.command_pool, ctx.memory_properties,
         )?;
+        // Register engine defaults so apps don't have to.
+        forge.add_graphics_forge_from_spirv_bytes(
+            GraphicsForgeId::new(1), GraphicsOreKind::ForwardLit,
+            FORWARD_LIT_VERT, FORWARD_LIT_FRAG,
+        )?;
+        forge.add_graphics_forge_from_spirv_bytes(
+            GraphicsForgeId::new(2), GraphicsOreKind::SkinnedForwardLit,
+            SKINNED_VERT, FORWARD_LIT_FRAG,
+        )?;
+        register_skin_morph_forges(&mut forge)?;
+        // App-specific forges on top of the defaults.
         self.logic.register_forges(&mut forge)?;
         let renderer = Renderer::new(forge);
         self.data.ctx      = Some(ctx);
@@ -298,6 +383,8 @@ impl<T: AppLogic> AppRunner<T> {
             windows:  &mut data.windows,
             next_app_id:    &mut data.next_app_id,
             next_camera_id: &mut data.next_camera_id,
+            compute_waits:  &mut data.compute_waits,
+            start:          data.start,
         }
     }
 }
@@ -364,9 +451,14 @@ impl<T: AppLogic> ApplicationHandler for AppRunner<T> {
                 let pos_y = position.y as f32;
                 let (grabbed, dyaw, dpitch) = {
                     let Some(res) = self.data.windows.get_mut(app_handle) else { return };
+                    let (dx, dy) = match res.last_cursor {
+                        Some((lx, ly)) => (pos_x - lx, pos_y - ly),
+                        None => (0.0, 0.0),
+                    };
+                    res.last_cursor = Some((pos_x, pos_y));
                     if !res.controller.is_grabbed() { return; }
-                    let (dy, dp) = res.controller.handle_mouse(pos_x, pos_y);
-                    (true, dy, dp)
+                    let (dyaw, dpitch) = res.controller.handle_mouse(dx, dy);
+                    (true, dyaw, dpitch)
                 };
                 if grabbed {
                     if let Some(res) = self.data.windows.get(app_handle) {
@@ -425,12 +517,21 @@ impl<T: AppLogic> AppRunner<T> {
                 return;
             }
         }
+        // Collect and drain any compute semaphores the logic registered.
+        let compute_sems: Vec<vk::Semaphore> = self.data
+            .compute_waits
+            .remove(&app_handle)
+            .unwrap_or_default();
+
         if let (Some(renderer), Some(ctx)) =
             (self.data.renderer.as_mut(), self.data.ctx.as_ref())
         {
             if let Some(window) = renderer.window_mut(window_h) {
                 unsafe {
-                    if let Err(e) = window.draw_frame(&ctx.instance, &ctx.device, ctx.queue) {
+                    let result = window.draw_frame_with_compute_wait(
+                        &ctx.instance, &ctx.device, ctx.queue, &compute_sems,
+                    );
+                    if let Err(e) = result {
                         eprintln!("draw_frame error: {e:?}");
                         event_loop.exit();
                     }
