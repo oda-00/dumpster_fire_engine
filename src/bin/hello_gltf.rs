@@ -82,7 +82,7 @@ struct App {
     asset_loaded: Option<AssetState>,
     live:         Option<LiveState>,
 }
-
+car
 struct AssetState {
     asset:           GltfAsset,
     pose:            Pose,
