@@ -137,6 +137,10 @@ path = "src/bin/game.rs"
 name = "render_demo"
 path = "src/bin/render_demo.rs"
 
+[[bin]]
+name = "editor"
+path = "src/bin/editor.rs"
+
 [profile.release]
 lto           = "fat"
 codegen-units = 1

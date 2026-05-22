@@ -215,6 +215,7 @@ pub struct Character {
     pub visible:  bool,
     pub physical: bool,
     pub playable: bool,
+    pub mesh:     Option<crate::resource_manager::component::MeshRef>,
 }
 
 pub struct Environment {
@@ -222,16 +223,18 @@ pub struct Environment {
     pub name:     Arc<str>,
     pub visible:  bool,
     pub physical: bool,
+    pub mesh:     Option<crate::resource_manager::component::MeshRef>,
 }
 
 pub struct Item {
-    pub id:       ItemId,
-    pub name:     Arc<str>,
-    pub quantity: (u32, u32, u32), // (current, max, stack_size)
+    pub id:          ItemId,
+    pub name:        Arc<str>,
+    pub quantity:    (u32, u32, u32), // (current, max, stack_size)
     pub description: Arc<str>,
-    pub stackable: bool,
-    pub visible:  bool,
-    pub physical: bool,
+    pub stackable:   bool,
+    pub visible:     bool,
+    pub physical:    bool,
+    pub mesh:        Option<crate::resource_manager::component::MeshRef>,
 }
 
 pub struct Utility {
@@ -239,6 +242,7 @@ pub struct Utility {
     pub name:    Arc<str>,
     pub visible: bool,
     pub toggle:  bool,
+    pub mesh:    Option<crate::resource_manager::component::MeshRef>,
 }
 
 pub enum ActorType {
@@ -276,6 +280,20 @@ impl ActorType {
             ActorType::Environment(e) => &e.name,
             ActorType::Item(i)        => &i.name,
             ActorType::Utility(u)     => &u.name,
+        }
+    }
+
+    /// Returns `(visible, mesh_ref)` from this sub-entity's actor-type data.
+    /// Drives the render_world gather pass: skip if !visible, skip if mesh is None.
+    #[inline]
+    pub fn visibility_and_mesh(
+        &self,
+    ) -> (bool, Option<crate::resource_manager::component::MeshRef>) {
+        match self {
+            ActorType::Character(c)   => (c.visible, c.mesh),
+            ActorType::Environment(e) => (e.visible, e.mesh),
+            ActorType::Item(i)        => (i.visible, i.mesh),
+            ActorType::Utility(u)     => (u.visible, u.mesh),
         }
     }
 }

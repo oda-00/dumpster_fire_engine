@@ -137,6 +137,7 @@ fn spawn_wall(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64,
                 name: "wall".into(),
                 visible: true,
                 physical: true,
+                mesh: None,
             }),
             Affine3A::IDENTITY,
         )
@@ -162,6 +163,9 @@ fn spawn_wall(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64,
         UtilityComponent {
             name: "wall".into(),
             description: Arc::from(""),
+            camera: None,
+            light: None,
+            render: None,
         },
     );
 }
@@ -188,6 +192,7 @@ fn spawn_player(
                 visible: true,
                 physical: true,
                 playable: true,
+                mesh: None,
             }),
             Affine3A::IDENTITY,
         )
@@ -212,6 +217,9 @@ fn spawn_player(
         UtilityComponent {
             name: "player".into(),
             description: Arc::from(""),
+            camera: None,
+            light: None,
+            render: None,
         },
     );
     ah
@@ -232,6 +240,7 @@ fn spawn_enemy(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64
                 visible: true,
                 physical: true,
                 playable: false,
+                mesh: None,
             }),
             Affine3A::IDENTITY,
         )
@@ -255,6 +264,9 @@ fn spawn_enemy(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64
         UtilityComponent {
             name: "enemy".into(),
             description: Arc::from(""),
+            camera: None,
+            light: None,
+            render: None,
         },
     );
 }
@@ -284,6 +296,7 @@ fn spawn_gold(
                 stackable:   false,
                 visible:     true,
                 physical:    false,
+                mesh:        None,
         }),
             Affine3A::IDENTITY,
         )
@@ -297,6 +310,9 @@ fn spawn_gold(
         UtilityComponent {
             name:        "gold".into(),
             description: Arc::from(""),
+            camera: None,
+            light: None,
+            render: None,
         },
     );
 }
@@ -315,6 +331,7 @@ fn spawn_exit(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64,
                 name: "exit".into(),
                 visible: true,
                 physical: false,
+                mesh: None,
             }),
             Affine3A::IDENTITY,
         )
@@ -327,6 +344,9 @@ fn spawn_exit(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64,
         UtilityComponent {
             name: "exit".into(),
             description: Arc::from(""),
+            camera: None,
+            light: None,
+            render: None,
         },
     );
 }
@@ -348,6 +368,7 @@ fn spawn_meta(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64)
                 name: "meta".into(),
                 visible: false,
                 toggle: false,
+                mesh: None,
             }),
             Affine3A::IDENTITY,
         )
@@ -371,6 +392,9 @@ fn spawn_meta(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64)
         UtilityComponent {
             name: "meta".into(),
             description: Arc::from(""),
+            camera: None,
+            light: None,
+            render: None,
         },
     );
     ah
