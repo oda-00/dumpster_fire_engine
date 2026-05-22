@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use ash::vk;
-
+use glam::Mat4;
 use thin_vec::ThinVec;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::forge_master::{ForgeError, ForgeMaster, ForgeResult, ForgeImage, GraphicsForge, GraphicsMold};
@@ -836,9 +836,272 @@ impl Window {
         gfx.current_frame = (gfx.current_frame + 1) % FRAMES_IN_FLIGHT;
         Ok(())
     }
+
+    /// Draw one frame rendering `viewports` panes into distinct scissored
+    /// regions of the same framebuffer.  Each entry carries a dynamic
+    /// `vk::Viewport`, `vk::Rect2D`, and a pre-computed VP matrix.
+    /// The per-pane VP is combined with each call's stored model matrix via
+    /// `mat4_mul(pane_vp, call.mvp)` to form the final push-constant MVP.
+    /// Depth is cleared once by the render-pass clear values; per-pane
+    /// scissors ensure depth regions are disjoint so no explicit inter-pane
+    /// depth flush is required.
+    pub unsafe fn draw_frame_with_viewports(
+        &mut self,
+        instance:     &ash::Instance,
+        device:       &ash::Device,
+        queue:        vk::Queue,
+        compute_wait: &[vk::Semaphore],
+        viewports:    &[(vk::Viewport, vk::Rect2D, [f32; 16])],
+    ) -> ForgeResult<()> {
+        if self.graphics.as_ref().is_some_and(|g| g.needs_resize) {
+            self.recreate_swapchain(instance, device)?;
+        }
+        let gfx = self
+            .graphics
+            .as_mut()
+            .expect("draw_frame_with_viewports called on a headless window");
+
+        if gfx.swapchain_extent.width == 0 || gfx.swapchain_extent.height == 0 {
+            return Ok(());
+        }
+
+        let frame     = gfx.current_frame;
+        let img_avail = gfx.image_available_semaphores[frame];
+        let in_flight = gfx.in_flight_fences[frame];
+
+        unsafe {
+            device.wait_for_fences(&[in_flight], true, u64::MAX)
+                .map_err(ForgeError::Vk)?;
+        }
+
+        let acquire = unsafe {
+            gfx.swapchain_loader.acquire_next_image(
+                gfx.swapchain, u64::MAX, img_avail, vk::Fence::null(),
+            )
+        };
+        let (image_index, _) = match acquire {
+            Ok(t) => t,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                gfx.needs_resize = true;
+                return Ok(());
+            }
+            Err(e) => return Err(ForgeError::Vk(e)),
+        };
+
+        unsafe { device.reset_fences(&[in_flight]).map_err(ForgeError::Vk)?; }
+
+        let command_buffer = gfx.command_buffers[frame];
+
+        // Collect draw calls once — shared across all panes.
+        let calls: ThinVec<_> = self
+            .factory_master
+            .iter()
+            .flat_map(|f| f.graphics_calls().iter().cloned())
+            .collect();
+
+        let clear_values = [
+            vk::ClearValue { color: vk::ClearColorValue { float32: [0.05, 0.05, 0.1, 1.0] } },
+            vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
+        ];
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let rp_begin = vk::RenderPassBeginInfo::default()
+            .render_pass(gfx.mold.render_pass)
+            .framebuffer(gfx.framebuffers[image_index as usize])
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: gfx.swapchain_extent,
+            })
+            .clear_values(&clear_values);
+
+        unsafe {
+            device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(ForgeError::Vk)?;
+            device.begin_command_buffer(command_buffer, &begin_info)
+                .map_err(ForgeError::Vk)?;
+
+            let mem_barrier2 = vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
+                    | vk::PipelineStageFlags2::VERTEX_SHADER)
+                .dst_access_mask(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ
+                    | vk::AccessFlags2::SHADER_STORAGE_READ);
+            let memory_barriers = [mem_barrier2];
+            let dep_info = vk::DependencyInfo::default().memory_barriers(&memory_barriers);
+            device.cmd_pipeline_barrier2(command_buffer, &dep_info);
+
+            device.cmd_begin_render_pass(command_buffer, &rp_begin, vk::SubpassContents::INLINE);
+
+            let mut current_kind: Option<GraphicsOreKind> = None;
+
+            for (pane_viewport, pane_scissor, pane_vp) in viewports {
+                device.cmd_set_viewport(command_buffer, 0, std::slice::from_ref(pane_viewport));
+                device.cmd_set_scissor(command_buffer, 0, std::slice::from_ref(pane_scissor));
+
+                for call in &calls {
+                    let mold: &GraphicsMold = match (call.kind, gfx.skinned_mold.as_ref()) {
+                        (GraphicsOreKind::SkinnedForwardLit, Some(sm)) => sm,
+                        _ => &gfx.mold,
+                    };
+                    if current_kind != Some(call.kind) {
+                        device.cmd_bind_pipeline(
+                            command_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            mold.pipeline,
+                        );
+                        current_kind = Some(call.kind);
+                    }
+
+                    if let Some(mat_set) = call.material_set {
+                        device.cmd_bind_descriptor_sets(
+                            command_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            mold.pipeline_layout,
+                            1, &[mat_set], &[],
+                        );
+                    }
+                    if call.kind == GraphicsOreKind::SkinnedForwardLit {
+                        if let Some(skin_set) = call.skin_palette_set {
+                            device.cmd_bind_descriptor_sets(
+                                command_buffer,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                mold.pipeline_layout,
+                                2, &[skin_set], &[],
+                            );
+                        }
+                    }
+                    if let Some(inst_set) = call.instance_set {
+                        device.cmd_bind_descriptor_sets(
+                            command_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            mold.pipeline_layout,
+                            3, &[inst_set], &[],
+                        );
+                    }
+
+                    if let Some(mesh) = &call.mesh {
+                        let vb = call.vertex_buffer_override
+                            .unwrap_or(mesh.vertex_buffer.handle);
+                        if call.kind == GraphicsOreKind::SkinnedForwardLit {
+                            if let Some(skin_vb) = call.skin_vertex_buffer {
+                                device.cmd_bind_vertex_buffers(
+                                    command_buffer, 0, &[vb, skin_vb], &[0, 0],
+                                );
+                            } else {
+                                device.cmd_bind_vertex_buffers(
+                                    command_buffer, 0, &[vb], &[0],
+                                );
+                            }
+                        } else {
+                            device.cmd_bind_vertex_buffers(
+                                command_buffer, 0, &[vb], &[0],
+                            );
+                        }
+                        device.cmd_bind_index_buffer(
+                            command_buffer, mesh.index_buffer.handle, 0, vk::IndexType::UINT32,
+                        );
+                        let mvp = mat4_mul(pane_vp, &call.mvp);
+                        let mvp_bytes: &[u8] =
+                            std::slice::from_raw_parts(mvp.as_ptr().cast(), 64);
+                        device.cmd_push_constants(
+                            command_buffer,
+                            mold.pipeline_layout,
+                            vk::ShaderStageFlags::VERTEX,
+                            0,
+                            mvp_bytes,
+                        );
+                        device.cmd_draw_indexed(
+                            command_buffer,
+                            mesh.index_count,
+                            call.instance_count,
+                            0, 0, 0,
+                        );
+                    } else {
+                        let mvp = mat4_mul(pane_vp, &call.mvp);
+                        let mvp_bytes: &[u8] =
+                            std::slice::from_raw_parts(mvp.as_ptr().cast(), 64);
+                        device.cmd_push_constants(
+                            command_buffer,
+                            mold.pipeline_layout,
+                            vk::ShaderStageFlags::VERTEX,
+                            0,
+                            mvp_bytes,
+                        );
+                        device.cmd_draw(
+                            command_buffer,
+                            call.vertex_count,
+                            call.instance_count,
+                            call.first_vertex,
+                            call.first_instance,
+                        );
+                    }
+                }
+            }
+
+            device.cmd_end_render_pass(command_buffer);
+            device.end_command_buffer(command_buffer).map_err(ForgeError::Vk)?;
+        }
+
+        let render_done = gfx.render_finished_semaphores[image_index as usize];
+        let mut wait_infos: Vec<vk::SemaphoreSubmitInfo> =
+            Vec::with_capacity(1 + compute_wait.len());
+        wait_infos.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(img_avail)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+        );
+        for &sem in compute_wait {
+            wait_infos.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(sem)
+                    .stage_mask(
+                        vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
+                            | vk::PipelineStageFlags2::VERTEX_SHADER,
+                    ),
+            );
+        }
+        let cb_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)];
+        let signal_infos = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(render_done)
+            .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS)];
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait_infos)
+            .command_buffer_infos(&cb_infos)
+            .signal_semaphore_infos(&signal_infos);
+
+        let signal_semaphores    = [render_done];
+        let present_swapchains   = [gfx.swapchain];
+        let present_image_indices = [image_index];
+
+        unsafe {
+            device.queue_submit2(queue, &[submit_info], in_flight)
+                .map_err(ForgeError::Vk)?;
+
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&signal_semaphores)
+                .swapchains(&present_swapchains)
+                .image_indices(&present_image_indices);
+            match gfx.swapchain_loader.queue_present(queue, &present_info) {
+                Ok(suboptimal) if suboptimal => { gfx.needs_resize = true; }
+                Ok(_) => {}
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR)
+                | Err(vk::Result::SUBOPTIMAL_KHR) => { gfx.needs_resize = true; }
+                Err(e) => return Err(ForgeError::Vk(e)),
+            }
+        }
+
+        gfx.current_frame = (gfx.current_frame + 1) % FRAMES_IN_FLIGHT;
+        Ok(())
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+#[inline]
+fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    (Mat4::from_cols_array(a) * Mat4::from_cols_array(b)).to_cols_array()
+}
 
 /// Build a swapchain + all per-image resources (image views, depth images,
 /// framebuffers, render_finished semaphores). Shared by initial creation and

@@ -1,6 +1,6 @@
 //! Camera system using engine-native types (Arena, Handle, Id, Arc<str>).
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use std::sync::Arc;
 use thin_vec::ThinVec;
 use winit::event::ElementState;
@@ -25,19 +25,32 @@ pub enum CameraMode {
     Orbit { target: [f32; 3], distance: f32 },
 }
 
+// ── Projection override ────────────────────────────────────────────────────
+
+/// When set on a `Camera`, overrides `fov`/`near`/`far`. `None` preserves
+/// the existing perspective path — all legacy call-sites are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProjectionMode {
+    Perspective  { fov: f32,  near: f32, far: f32 },
+    Orthographic { size: f32, near: f32, far: f32 },
+}
+
 // ── Camera ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Camera {
-    pub id: CameraId,
-    pub name: Arc<str>,
-    pub mode: CameraMode,
-    pub position: [f32; 3],
-    pub yaw: f32,
-    pub pitch: f32,
-    pub fov: f32,
-    pub near: f32,
-    pub far: f32,
+    pub id:         CameraId,
+    pub name:       Arc<str>,
+    pub mode:       CameraMode,
+    pub position:   [f32; 3],
+    pub yaw:        f32,
+    pub pitch:      f32,
+    pub roll:       f32,
+    pub fov:        f32,
+    pub near:       f32,
+    pub far:        f32,
+    /// When `Some`, overrides `fov`/`near`/`far`. `None` = backwards-compat perspective.
+    pub projection: Option<ProjectionMode>,
 }
 
 impl Camera {
@@ -49,9 +62,11 @@ impl Camera {
             position,
             yaw,
             pitch,
+            roll: 0.0,
             fov: 45.0_f32.to_radians(),
             near: 0.1,
             far: 100.0,
+            projection: None,
         }
     }
 
@@ -71,9 +86,11 @@ impl Camera {
             position,
             yaw,
             pitch,
+            roll: 0.0,
             fov: 45.0_f32.to_radians(),
             near: 0.1,
             far: 100.0,
+            projection: None,
         }
     }
 
@@ -90,29 +107,69 @@ impl Camera {
         }
     }
 
+    #[inline]
     pub fn view_matrix(&self) -> [f32; 16] {
-        let pos = Vec3::new(self.position[0], self.position[1], self.position[2]);
-        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
-        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
-        let forward = Vec3::new(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw).normalize();
-        let right = Vec3::new(-sin_yaw, 0.0, cos_yaw).normalize();
-        let up = right.cross(forward).normalize();
-        let view = Mat4::look_at_rh(pos, pos + forward, up);
-        view.to_cols_array()
+        let pos = Vec3::from(self.position);
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let forward    = Vec3::new(cp * cy, sp, cp * sy).normalize();
+        let right_base = Vec3::new(-sy, 0.0, cy).normalize();
+        let up_base    = right_base.cross(forward).normalize();
+        // Roll: rotate up around the forward axis.
+        let up = Quat::from_axis_angle(forward, self.roll) * up_base;
+        Mat4::look_at_rh(pos, pos + forward, up).to_cols_array()
     }
 
+    #[inline]
     pub fn projection_matrix(&self, aspect: f32) -> [f32; 16] {
-        // perspective_rh uses Z ∈ [0, 1] depth (correct for Vulkan).
-        // Negate Y to flip the clip-space Y axis for Vulkan NDC (Y points down).
-        let mut proj = Mat4::perspective_rh(self.fov, aspect, self.near, self.far);
+        let mut proj = match self.projection {
+            None => Mat4::perspective_rh(self.fov, aspect, self.near, self.far),
+            Some(ProjectionMode::Perspective { fov, near, far }) => {
+                Mat4::perspective_rh(fov, aspect, near, far)
+            }
+            Some(ProjectionMode::Orthographic { size, near, far }) => {
+                let hw = size * aspect * 0.5;
+                let hh = size * 0.5;
+                Mat4::orthographic_rh(-hw, hw, -hh, hh, near, far)
+            }
+        };
+        // Vulkan NDC: Y points down — flip the Y axis of the projection.
         proj.y_axis.y = -proj.y_axis.y;
         proj.to_cols_array()
     }
 
+    #[inline]
     pub fn view_projection_matrix(&self, aspect: f32) -> [f32; 16] {
         let view = Mat4::from_cols_array(&self.view_matrix());
         let proj = Mat4::from_cols_array(&self.projection_matrix(aspect));
         (proj * view).to_cols_array()
+    }
+
+    /// Translate position in the camera's local right/up plane (pan for all pane types).
+    #[inline]
+    pub fn pan(&mut self, dx: f32, dy: f32) {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let forward    = Vec3::new(cp * cy, sp, cp * sy);
+        let right_base = Vec3::new(-sy, 0.0, cy);
+        let up_base    = right_base.cross(forward).normalize();
+        let up         = Quat::from_axis_angle(forward, self.roll) * up_base;
+        let right      = forward.cross(up).normalize();
+        let delta      = right * dx + up * dy;
+        self.position[0] += delta.x;
+        self.position[1] += delta.y;
+        self.position[2] += delta.z;
+    }
+
+    /// Zoom: shrinks orthographic `size` or flies perspective forward.
+    #[inline]
+    pub fn zoom(&mut self, delta: f32) {
+        match &mut self.projection {
+            Some(ProjectionMode::Orthographic { size, .. }) => {
+                *size = (*size * (1.0 - delta * 0.1)).max(0.01);
+            }
+            _ => self.move_forward(delta * 0.5),
+        }
     }
 
     pub fn move_forward(&mut self, delta: f32) {
@@ -194,41 +251,53 @@ impl CameraArena {
 // ── Camera controller ───────────────────────────────────────────────────────
 
 pub struct CameraController {
-    forward: bool,
-    backward: bool,
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool,
-    mouse_grabbed: bool,
+    forward:           bool,
+    backward:          bool,
+    left:              bool,
+    right:             bool,
+    up:                bool,
+    down:              bool,
+    roll_left:         bool,
+    roll_right:        bool,
+    mouse_grabbed:     bool,
+    middle_grabbed:    bool,
     mouse_sensitivity: f32,
-    move_speed: f32,
+    move_speed:        f32,
+    roll_speed:        f32,
+    pan_sensitivity:   f32,
 }
 
 impl CameraController {
     pub fn new(move_speed: f32, mouse_sensitivity: f32) -> Self {
         Self {
-            forward: false,
-            backward: false,
-            left: false,
-            right: false,
-            up: false,
-            down: false,
-            mouse_grabbed: false,
+            forward:           false,
+            backward:          false,
+            left:              false,
+            right:             false,
+            up:                false,
+            down:              false,
+            roll_left:         false,
+            roll_right:        false,
+            mouse_grabbed:     false,
+            middle_grabbed:    false,
             move_speed,
             mouse_sensitivity,
+            roll_speed:        1.0,
+            pan_sensitivity:   0.01,
         }
     }
 
     pub fn handle_key(&mut self, key: KeyCode, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
-            KeyCode::KeyW => self.forward = pressed,
-            KeyCode::KeyS => self.backward = pressed,
-            KeyCode::KeyA => self.left = pressed,
-            KeyCode::KeyD => self.right = pressed,
-            KeyCode::KeyQ => self.up = pressed,
-            KeyCode::KeyE => self.down = pressed,
+            KeyCode::KeyW => self.forward    = pressed,
+            KeyCode::KeyS => self.backward   = pressed,
+            KeyCode::KeyA => self.left       = pressed,
+            KeyCode::KeyD => self.right      = pressed,
+            KeyCode::KeyQ => self.up         = pressed,
+            KeyCode::KeyE => self.down       = pressed,
+            KeyCode::KeyZ => self.roll_left  = pressed,
+            KeyCode::KeyC => self.roll_right = pressed,
             _ => {}
         }
     }
@@ -237,9 +306,23 @@ impl CameraController {
         if !self.mouse_grabbed {
             return (0.0, 0.0);
         }
-        let yaw = -dx * self.mouse_sensitivity;
+        let yaw   = -dx * self.mouse_sensitivity;
         let pitch = -dy * self.mouse_sensitivity;
         (yaw, pitch)
+    }
+
+    /// Call when the middle mouse button state changes. Returns new grabbed state.
+    pub fn handle_middle_button(&mut self, state: ElementState) -> bool {
+        self.middle_grabbed = state == ElementState::Pressed;
+        self.middle_grabbed
+    }
+
+    /// Pan the camera in its local right/up plane when middle-mouse is grabbed.
+    #[inline]
+    pub fn handle_pan(&self, camera: &mut Camera, dx: f32, dy: f32) {
+        if self.middle_grabbed {
+            camera.pan(dx * self.pan_sensitivity, -dy * self.pan_sensitivity);
+        }
     }
 
     pub fn toggle_grab(&mut self) -> bool {
@@ -255,25 +338,23 @@ impl CameraController {
         self.mouse_grabbed
     }
 
+    pub fn is_middle_grabbed(&self) -> bool {
+        self.middle_grabbed
+    }
+
+    pub fn pan_sensitivity(&self) -> f32 {
+        self.pan_sensitivity
+    }
+
     pub fn update(&self, camera: &mut Camera, dt: f32) {
         let speed = self.move_speed * dt;
-        if self.forward {
-            camera.move_forward(speed);
-        }
-        if self.backward {
-            camera.move_forward(-speed);
-        }
-        if self.right {
-            camera.move_right(speed);
-        }
-        if self.left {
-            camera.move_right(-speed);
-        }
-        if self.up {
-            camera.move_up(speed);
-        }
-        if self.down {
-            camera.move_up(-speed);
-        }
+        if self.forward    { camera.move_forward(speed);  }
+        if self.backward   { camera.move_forward(-speed); }
+        if self.right      { camera.move_right(speed);    }
+        if self.left       { camera.move_right(-speed);   }
+        if self.up         { camera.move_up(speed);       }
+        if self.down       { camera.move_up(-speed);      }
+        if self.roll_left  { camera.roll += self.roll_speed * dt; }
+        if self.roll_right { camera.roll -= self.roll_speed * dt; }
     }
 }

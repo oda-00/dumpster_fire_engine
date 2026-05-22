@@ -22,11 +22,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::{CursorGrabMode, WindowId};
 
-<<<<<<< HEAD
-=======
 use dumpster_fire_engine::render::camera::{Camera, CameraController, CameraId};
 
->>>>>>> 5b1fd0af6298e447d49809a9dc2b0b7b85cd25b7
+
 use dumpster_fire_engine::forge_master::ore::{GpuMesh, GpuSkinBuffer};
 use dumpster_fire_engine::forge_master::{ForgeMaster, GraphicsForgeId, GraphicsOreKind};
 use dumpster_fire_engine::render::{
@@ -37,11 +35,7 @@ use dumpster_fire_engine::resource_manager::asset_manager::{
     collect_morph_output_buffers, collect_skin_palette_buffers, compute_asset_aabb,
     forge_gltf::{GltfAsset, Pose},
     pack_primitive_skin_attrs, primitive_is_skinned, register_skin_morph_forges,
-<<<<<<< HEAD
-    upload_all_primitive_meshes, view_projection_from_aabb,
-=======
     upload_all_primitive_meshes,
->>>>>>> 5b1fd0af6298e447d49809a9dc2b0b7b85cd25b7
 };
 use dumpster_fire_engine::resource_manager::gltf_driver::{
     AsyncGltfLoader, GltfCache, GltfSampler, GltfUploadCtx, MaterialHandle, TEXTURE_SLOT_COUNT,
@@ -102,10 +96,6 @@ struct App {
     start: Instant,
     asset_loaded: Option<AssetState>,
     live: Option<LiveState>,
-<<<<<<< HEAD
-}
-
-=======
     camera: Camera,
     controller: CameraController,
     /// True once the camera has been fitted to the asset AABB on first load.
@@ -115,7 +105,6 @@ struct App {
     /// Wall-clock instant of the previous frame, for controller dt.
     last_frame: Instant,
 }
->>>>>>> 5b1fd0af6298e447d49809a9dc2b0b7b85cd25b7
 struct AssetState {
     asset: GltfAsset,
     pose: Pose,
