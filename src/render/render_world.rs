@@ -57,7 +57,7 @@ pub fn collect_and_submit(
     asset_cache:  &GltfAssetCache,
     renderer:     &mut Renderer,
     window_h:     WindowHandle,
-    vulkan:       &VulkanContext,
+    _vulkan:      &VulkanContext,
     camera_views: &[CameraView],
     elapsed:      f32,
 ) -> ForgeResult<Option<vk::Semaphore>> {

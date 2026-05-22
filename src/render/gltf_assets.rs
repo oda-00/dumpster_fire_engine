@@ -119,14 +119,14 @@ impl PendingLoad {
         macro_rules! destroy_pool {
             ($pool:expr) => {
                 if $pool != vk::DescriptorPool::null() {
-                    self.device.destroy_descriptor_pool($pool, None);
+                    unsafe { self.device.destroy_descriptor_pool($pool, None); }
                 }
             };
         }
         macro_rules! destroy_layout {
             ($layout:expr) => {
                 if $layout != vk::DescriptorSetLayout::null() {
-                    self.device.destroy_descriptor_set_layout($layout, None);
+                    unsafe { self.device.destroy_descriptor_set_layout($layout, None); }
                 }
             };
         }

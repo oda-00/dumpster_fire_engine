@@ -932,7 +932,6 @@ impl<T: AppLogic> ApplicationHandler for AppRunner<T> {
                                     && key_event.state == ElementState::Pressed
                                 {
                                     let grabbed = vp.controller.toggle_grab();
-                                    drop(res); // release borrow before set_cursor_grab
                                     self.set_cursor_grab(app_handle, grabbed);
                                 }
                             }
@@ -943,7 +942,6 @@ impl<T: AppLogic> ApplicationHandler for AppRunner<T> {
                                 && key_event.state == ElementState::Pressed
                             {
                                 let grabbed = res.controller.toggle_grab();
-                                drop(res);
                                 self.set_cursor_grab(app_handle, grabbed);
                             }
                         }
@@ -1014,7 +1012,6 @@ impl<T: AppLogic> ApplicationHandler for AppRunner<T> {
                         match button {
                             MouseButton::Left if *state == ElementState::Pressed => {
                                 let grabbed = vp.controller.toggle_grab();
-                                drop(res);
                                 self.set_cursor_grab(app_handle, grabbed);
                             }
                             MouseButton::Middle => {
@@ -1024,7 +1021,6 @@ impl<T: AppLogic> ApplicationHandler for AppRunner<T> {
                         }
                     } else if *button == MouseButton::Left && *state == ElementState::Pressed {
                         let grabbed = res.controller.toggle_grab();
-                        drop(res);
                         self.set_cursor_grab(app_handle, grabbed);
                     }
                 }
