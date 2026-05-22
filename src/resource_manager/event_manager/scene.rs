@@ -279,7 +279,11 @@ fn clone_component(c: &Component) -> Component {
             position: c.position, rotation: c.rotation, scale: c.scale, collision: c.collision,
         }),
         Component::Utility(u) => Component::Utility(UtilityComponent {
-            name: u.name.clone(), description: u.description.clone(),
+            name:        u.name.clone(),
+            description: u.description.clone(),
+            camera:      u.camera.clone(),
+            light:       u.light.clone(),
+            render:      None, // RenderState is not Clone; animation state resets on clone
         }),
     }
 }

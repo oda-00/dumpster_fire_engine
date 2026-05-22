@@ -7,6 +7,19 @@ pub trait ComponentData: sealed::Sealed {
     const TYPE: ComponentType;
 }
 
+// ── GltfHandle — mesh asset reference ────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct GltfTag;
+pub type GltfHandle = crate::resource_manager::manager::Handle<GltfTag>;
+
+/// A lightweight reference from an actor sub-entity to a loaded glTF asset.
+/// Copy so it can live inside ThinVec and arena operations without cloning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshRef {
+    pub asset: GltfHandle,
+}
+
 /// Generates ComponentType enum, Component enum, From impls, and ComponentData impls
 /// from a list of `Variant: DataType` pairs. Single source of truth for component count.
 macro_rules! declare_components {
@@ -100,10 +113,45 @@ pub struct CollisionComponent {
     pub collision: bool,
 }
 
+/// Camera sub-state owned by a Utility actor. Reuses the engine Camera struct.
+#[derive(Debug, Clone)]
+pub struct CameraData {
+    pub camera: crate::render::camera::Camera,
+}
+
+/// Light sub-state owned by a Utility actor.
+#[derive(Debug, Clone)]
+pub struct LightData {
+    pub color:     [f32; 3],
+    pub intensity: f32,
+    /// Sphere radius around the actor's world position for point/spot lights.
+    pub range:     f32,
+    pub kind:      LightKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum LightKind {
+    Point,
+    Spot        { half_angle: f32, direction: [f32; 3] },
+    Directional { direction: [f32; 3] },
+}
+
+/// Per-actor animation + pose state. Owned by UtilityComponent.render on
+/// actors that carry a mesh and need independent animation state.
+#[derive(Debug)]
+pub struct RenderState {
+    pub pose:       crate::resource_manager::asset_manager::forge_gltf::Pose,
+    pub anim_index: Option<usize>,
+    pub anim_time:  f32,
+}
+
 #[derive(Debug)]
 pub struct UtilityComponent {
     pub name:        Arc<str>,
     pub description: Arc<str>,
+    pub camera:      Option<CameraData>,
+    pub light:       Option<LightData>,
+    pub render:      Option<RenderState>,
 }
 
 #[derive(Debug)]

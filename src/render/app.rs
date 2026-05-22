@@ -24,10 +24,10 @@
 //!   own descriptor allocation + semaphore threading, NOT this binary.
 
 use ash::vk;
-use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::time::Instant;
+use thin_vec::ThinVec;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -39,14 +39,17 @@ use crate::forge_master::master::{ForgeError, ForgeResult};
 use crate::forge_master::ore::MAT4_IDENTITY;
 use crate::forge_master::{ForgeMaster, GraphicsForgeId, GraphicsOreKind};
 use crate::render::camera::{Camera, CameraArena, CameraController, CameraHandle, ProjectionMode};
+use crate::render::gltf_assets::{fit_camera_to_aabb, GltfAssetCache};
+use crate::render::render_world::{CameraView, collect_and_submit, extract_frustum_planes};
 use crate::render::{Renderer, VulkanContext, Window, WindowId as RenderWindowId};
 use crate::resource_manager::asset_manager::gltf_loader::register_skin_morph_forges;
+use crate::resource_manager::component::GltfHandle;
 use crate::resource_manager::gltf_driver::{
     create_instance_pool, create_instance_set_layout,
     create_material_pool, create_skin_palette_pool, create_skin_palette_set_layout,
 };
-use crate::resource_manager::gltf_scene::GltfScene;
 use crate::resource_manager::manager::{Arena, Handle, Id};
+use crate::resource_manager::world_manager::World;
 
 // Shader bytes embedded once here so AppRunner can register default forges.
 const FORWARD_LIT_VERT: &[u8] = include_bytes!(concat!(
@@ -364,10 +367,11 @@ struct AppData {
     ctx:            Option<VulkanContext>,
     cameras:        CameraArena,
     windows:        Arena<AppTag, WindowResources>,
+    gltf_assets:    GltfAssetCache,
     next_app_id:    i64,
     next_camera_id: i64,
     /// Compute semaphores to wait on before the next draw, keyed by AppHandle.
-    compute_waits:  HashMap<AppHandle, Vec<vk::Semaphore>>,
+    compute_waits:  ThinVec<(AppHandle, ThinVec<vk::Semaphore>)>,
     /// Wall-clock start time — exposed via AppCtx::elapsed().
     start:          Instant,
 }
@@ -379,9 +383,10 @@ impl AppData {
             ctx:            None,
             cameras:        CameraArena::new(),
             windows:        Arena::new(),
+            gltf_assets:    GltfAssetCache::new(),
             next_app_id:    1,
             next_camera_id: 1,
-            compute_waits:  HashMap::new(),
+            compute_waits:  ThinVec::new(),
             start:          Instant::now(),
         }
     }
@@ -403,13 +408,14 @@ impl AppData {
 // windows) so the logic field stays mutably borrowed from `self.data.logic`.
 
 pub struct AppCtx<'a> {
-    pub renderer: &'a mut Renderer,
-    pub vulkan:   &'a VulkanContext,
-    pub cameras:  &'a mut CameraArena,
-    pub windows:  &'a mut Arena<AppTag, WindowResources>,
+    pub renderer:     &'a mut Renderer,
+    pub vulkan:       &'a VulkanContext,
+    pub cameras:      &'a mut CameraArena,
+    pub windows:      &'a mut Arena<AppTag, WindowResources>,
+    pub gltf_assets:  &'a mut GltfAssetCache,
     pub next_app_id:    &'a mut i64,
     pub next_camera_id: &'a mut i64,
-    compute_waits: &'a mut HashMap<AppHandle, Vec<vk::Semaphore>>,
+    compute_waits: &'a mut ThinVec<(AppHandle, ThinVec<vk::Semaphore>)>,
     start:         Instant,
 }
 
@@ -522,36 +528,122 @@ impl<'a> AppCtx<'a> {
         cam.view_projection_matrix(res.aspect)
     }
 
-    /// Create a [`GltfScene`] pre-configured with the descriptor layouts from
-    /// `app`'s window.  Call [`GltfScene::load`] on the result to start
-    /// background asset loading.
-    pub fn new_gltf_scene(&self, app: AppHandle) -> ForgeResult<GltfScene> {
-        let res = self.windows.get(app)
-            .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?;
-        GltfScene::new(self.vulkan.device.clone(), res.material_layout)
+    /// Start loading a glTF asset from `path` for `app`'s window.
+    /// Deduplicated by path; returns a handle immediately.
+    /// Call `poll_gltf_loaders` each frame to finalize.
+    pub fn load_gltf(&mut self, app: AppHandle, path: std::path::PathBuf) -> ForgeResult<GltfHandle> {
+        let (device, material_layout) = {
+            let res = self.windows.get(app)
+                .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?;
+            (self.vulkan.device.clone(), res.material_layout)
+        };
+        let path_str: Arc<str> = Arc::from(path.to_str().unwrap_or(""));
+        self.gltf_assets.load(path_str, device, material_layout)
     }
 
-    /// Drive a scene for one frame: animate, compute dispatch, graphics plan.
-    ///
-    /// If a compute semaphore is returned you should call
-    /// `push_compute_wait(app, sem)` so the draw submit waits for it.
-    pub fn gltf_update(
+    /// Drive background loaders; GPU-upload any that have completed.
+    pub fn poll_gltf_loaders(&mut self, _app: AppHandle) -> ForgeResult<()> {
+        self.gltf_assets.poll(self.vulkan)
+    }
+
+    /// Render every visible actor in `world` to `app`'s window.
+    pub fn render_world(
         &mut self,
-        scene:   &mut GltfScene,
+        world:   &World,
         app:     AppHandle,
         elapsed: f32,
-        vp:      &[f32; 16],
     ) -> ForgeResult<Option<vk::Semaphore>> {
-        let wh = self.windows.get(app)
-            .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?
-            .window_handle;
-        scene.update(self.vulkan, self.renderer, wh, vp, elapsed)
+        let (window_h, cam_views) = {
+            let res = self.windows.get(app)
+                .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?;
+            let wh = res.window_handle;
+            let mut views: ThinVec<CameraView> = ThinVec::new();
+            if let Some(grid) = &res.viewport_grid {
+                for (_, vp) in grid.iter() {
+                    let aspect  = vp.rect.pixel_aspect(grid.win_w, grid.win_h);
+                    if let Some(cam) = self.cameras.get(vp.camera_handle) {
+                        let vp_mat  = cam.view_projection_matrix(aspect);
+                        let frustum = extract_frustum_planes(&vp_mat);
+                        views.push(CameraView { frustum, vp_matrix: vp_mat });
+                    }
+                }
+            } else if let Some(cam) = self.cameras.get(res.camera_handle) {
+                let vp_mat  = cam.view_projection_matrix(res.aspect);
+                let frustum = extract_frustum_planes(&vp_mat);
+                views.push(CameraView { frustum, vp_matrix: vp_mat });
+            }
+            (wh, views)
+        };
+        collect_and_submit(
+            world,
+            self.gltf_assets,
+            self.renderer,
+            window_h,
+            self.vulkan,
+            &cam_views,
+            elapsed,
+        )
+    }
+
+    /// AABB (world space) covering all loaded, visible mesh actors in `world`.
+    pub fn gltf_union_aabb_for_world(&self, world: &World) -> Option<([f32; 3], [f32; 3])> {
+        use crate::render::gltf_assets::transform_aabb;
+        let mut mn = [f32::MAX; 3];
+        let mut mx = [f32::MIN; 3];
+        let mut found = false;
+        for level in world.levels.values() {
+            for stage in level.stages.values() {
+                for (actor_h, actor) in stage.actors.entries() {
+                    let wa: glam::Affine3A = stage.worlds[actor_h.idx as usize];
+                    for se in actor.sub_entities.iter().flatten() {
+                        let (visible, mesh_opt) = se.actor_type.visibility_and_mesh();
+                        if !visible { continue; }
+                        if let Some(mr) = mesh_opt {
+                            if let Some(loaded) = self.gltf_assets.get(mr.asset) {
+                                let ab = transform_aabb(&loaded.rest_aabb, &wa);
+                                for i in 0..3 { mn[i] = mn[i].min(ab.0[i]); mx[i] = mx[i].max(ab.1[i]); }
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if found { Some((mn, mx)) } else { None }
+    }
+
+    /// Fit the perspective pane camera (slot 0) to the given AABB.
+    pub fn fit_perspective_pane_to_aabb(&mut self, app: AppHandle, aabb: &([f32; 3], [f32; 3])) {
+        let cam_h = self.windows.get(app)
+            .and_then(|r| r.viewport_grid.as_ref())
+            .and_then(|g| { let vh = g.slot(0)?; Some(g.get(vh)?.camera_handle) });
+        if let Some(h) = cam_h {
+            if let Some(cam) = self.cameras.get_mut(h) {
+                fit_camera_to_aabb(cam, aabb);
+            }
+        }
+    }
+
+    /// Fit the window's main camera to the given AABB.
+    pub fn fit_window_camera_to_aabb(&mut self, app: AppHandle, aabb: &([f32; 3], [f32; 3])) {
+        let h = self.windows.get(app).map(|r| r.camera_handle);
+        if let Some(h) = h {
+            if let Some(cam) = self.cameras.get_mut(h) {
+                fit_camera_to_aabb(cam, aabb);
+            }
+        }
     }
 
     /// Queue a compute semaphore that will be waited on before drawing `app`'s
     /// window this frame.  Semaphores are consumed and cleared after each draw.
     pub fn push_compute_wait(&mut self, app: AppHandle, sem: vk::Semaphore) {
-        self.compute_waits.entry(app).or_default().push(sem);
+        if let Some(entry) = self.compute_waits.iter_mut().find(|(h, _)| *h == app) {
+            entry.1.push(sem);
+        } else {
+            let mut v = ThinVec::new();
+            v.push(sem);
+            self.compute_waits.push((app, v));
+        }
     }
 
     // ── Viewport grid ────────────────────────────────────────────────────────
@@ -644,17 +736,6 @@ impl<'a> AppCtx<'a> {
         cam.view_projection_matrix(pane.rect.pixel_aspect(grid.win_w, grid.win_h))
     }
 
-    /// Like `gltf_update` but passes `MAT4_IDENTITY` as the VP matrix so
-    /// `call.mvp` stores only the world (model) matrix. Use in multiview
-    /// windows; `draw_frame_with_viewports` applies per-pane VP at draw time.
-    pub fn gltf_update_model_only(
-        &mut self,
-        scene:   &mut GltfScene,
-        app:     AppHandle,
-        elapsed: f32,
-    ) -> ForgeResult<Option<vk::Semaphore>> {
-        self.gltf_update(scene, app, elapsed, &MAT4_IDENTITY)
-    }
 }
 
 // ── AppLogic trait ───────────────────────────────────────────────────────────
@@ -743,10 +824,11 @@ impl<T: AppLogic> AppRunner<T> {
 
     fn ctx_for_logic<'a>(data: &'a mut AppData) -> AppCtx<'a> {
         AppCtx {
-            renderer: data.renderer.as_mut().expect("renderer ready"),
-            vulkan:   data.ctx.as_ref().expect("vulkan ready"),
-            cameras:  &mut data.cameras,
-            windows:  &mut data.windows,
+            renderer:     data.renderer.as_mut().expect("renderer ready"),
+            vulkan:       data.ctx.as_ref().expect("vulkan ready"),
+            cameras:      &mut data.cameras,
+            windows:      &mut data.windows,
+            gltf_assets:  &mut data.gltf_assets,
             next_app_id:    &mut data.next_app_id,
             next_camera_id: &mut data.next_camera_id,
             compute_waits:  &mut data.compute_waits,
@@ -1005,10 +1087,15 @@ impl<T: AppLogic> AppRunner<T> {
                 return;
             }
         }
-        let compute_sems: Vec<vk::Semaphore> = self.data
-            .compute_waits
-            .remove(&app_handle)
-            .unwrap_or_default();
+        let compute_sems: Vec<vk::Semaphore> = {
+            let pos = self.data.compute_waits.iter().position(|(h, _)| *h == app_handle);
+            if let Some(i) = pos {
+                let (_, v) = self.data.compute_waits.swap_remove(i);
+                v.into_iter().collect()
+            } else {
+                Vec::new()
+            }
+        };
 
         let specs = Self::collect_viewport_specs(&self.data, app_handle);
         if let (Some(renderer), Some(ctx)) =

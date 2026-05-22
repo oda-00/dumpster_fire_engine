@@ -27,6 +27,7 @@ fn main() {
             visible:  true,
             physical: true,
             playable: true,
+            mesh:     None,
         }),
         Affine3A::from_translation(Vec3::new(10.0, 0.0, 0.0)),
     ).unwrap();
@@ -54,6 +55,7 @@ fn main() {
             stackable:   false,
             visible:     true,
             physical:    true,
+            mesh:        None,
 }),
         Affine3A::from_scale_rotation_translation(
             glam::Vec3::new(0.2, 1.0, 0.2),
@@ -181,6 +183,7 @@ fn main() {
             id: CharacterId::new(2),
             name: "carol".into(),
             visible: true, physical: true, playable: false,
+            mesh: None,
         }),
         Affine3A::IDENTITY,
     );

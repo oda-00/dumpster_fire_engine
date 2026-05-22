@@ -394,8 +394,8 @@ pub fn morph_output_frame_id(asset: &GltfAsset, mesh_idx: usize, prim_idx: usize
 pub fn collect_morph_output_buffers(
     asset:   &GltfAsset,
     factory: &crate::render::factory_master::factory::Factory,
-) -> std::collections::HashMap<(usize, usize), vk::Buffer> {
-    let mut out = std::collections::HashMap::new();
+) -> ThinVec<(u32, u32, vk::Buffer)> {
+    let mut out = ThinVec::new();
     for (mi, mesh) in asset.meshes.iter().enumerate() {
         for (pi, prim) in mesh.primitives.iter().enumerate() {
             if prim.morph_targets.is_empty() { continue; }
@@ -403,7 +403,7 @@ pub fn collect_morph_output_buffers(
             let Some(frame) = factory.frame_by_id(id) else { continue };
             let Some(ingot) = frame.ingots.first() else { continue };
             if let Some(buf) = ingot.result_buffer() {
-                out.insert((mi, pi), buf.handle);
+                out.push((mi as u32, pi as u32, buf.handle));
             }
         }
     }
@@ -548,18 +548,49 @@ pub fn build_graphics_plans_with_pose_and_materials(
     build_graphics_plans_full(asset, pose, upload_ctx, material_sets, &Default::default())
 }
 
+/// Flat (mesh_idx, prim_idx) → `Arc<GpuMesh>` cache built once at asset-load
+/// time by `upload_all_primitive_meshes`. O(1) lookup via flat-index arithmetic.
+pub struct MeshTable {
+    /// Flattened storage: mesh 0 prims first, then mesh 1, etc.
+    meshes:  ThinVec<Arc<GpuMesh>>,
+    /// `offsets[mesh_idx]` is the index into `meshes` where that mesh starts.
+    offsets: ThinVec<u32>,
+}
+
+impl MeshTable {
+    #[inline]
+    pub fn get(&self, mesh_idx: usize, prim_idx: usize) -> Option<&Arc<GpuMesh>> {
+        let off = *self.offsets.get(mesh_idx)? as usize;
+        self.meshes.get(off + prim_idx)
+    }
+}
+
 /// Bundle of per-frame resources for skinned-draw routing — output of
 /// the compute pass plus the device-side buffers/sets the graphics pass
 /// will bind.
 #[derive(Default)]
 pub struct SkinningFrame {
-    /// (mesh_idx, prim_idx) → the per-vertex joints+weights buffer
-    /// uploaded once per primitive via `GpuSkinBuffer::upload`. Owned by
-    /// the caller (typically cached for the asset's lifetime).
-    pub skin_vertex_buffers: std::collections::HashMap<(usize, usize), vk::Buffer>,
-    /// `node_idx` → the skin-palette descriptor set bound at set 2.
+    /// (mesh_idx, prim_idx, buffer) — per-vertex joints+weights buffer.
+    /// Uploaded once per primitive at asset-load time. Linear scan; < 10 entries.
+    pub skin_vertex_buffers:  ThinVec<(u32, u32, vk::Buffer)>,
+    /// (node_idx, descriptor_set) — skin-palette set bound at set 2.
     /// Allocated per frame from a recyclable descriptor pool.
-    pub palette_sets_by_node: std::collections::HashMap<usize, vk::DescriptorSet>,
+    pub palette_sets_by_node: ThinVec<(u32, vk::DescriptorSet)>,
+}
+
+impl SkinningFrame {
+    #[inline]
+    pub fn skin_vb(&self, mesh: u32, prim: u32) -> Option<vk::Buffer> {
+        self.skin_vertex_buffers.iter()
+            .find(|(m, p, _)| *m == mesh && *p == prim)
+            .map(|(_, _, b)| *b)
+    }
+    #[inline]
+    pub fn palette_set(&self, node: u32) -> Option<vk::DescriptorSet> {
+        self.palette_sets_by_node.iter()
+            .find(|(n, _)| *n == node)
+            .map(|(_, s)| *s)
+    }
 }
 
 /// Maximal-power per-frame plan builder.
@@ -575,7 +606,7 @@ pub fn build_graphics_plans_full(
     pose:          &Pose,
     upload_ctx:    &MeshUploadCtx,
     material_sets: &[Option<vk::DescriptorSet>],
-    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    morph_buffers: &ThinVec<(u32, u32, vk::Buffer)>,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     build_graphics_plans_maximal(
         asset, pose, upload_ctx, material_sets, morph_buffers, &SkinningFrame::default(),
@@ -590,16 +621,18 @@ pub fn build_graphics_plans_full(
 pub fn upload_all_primitive_meshes(
     asset:      &GltfAsset,
     upload_ctx: &MeshUploadCtx,
-) -> ForgeResult<std::collections::HashMap<(usize, usize), Arc<GpuMesh>>> {
-    let mut out = std::collections::HashMap::new();
+) -> ForgeResult<MeshTable> {
+    let mut meshes  = ThinVec::with_capacity(64);
+    let mut offsets = ThinVec::with_capacity(asset.meshes.len());
     for (mi, mesh) in asset.meshes.iter().enumerate() {
+        offsets.push(meshes.len() as u32);
         for pi in 0..mesh.primitives.len() {
             let ore = primitive_to_mesh_ore(asset, mi as u32, pi as u32);
             let gpu = GpuMesh::upload(upload_ctx, &ore)?;
-            out.insert((mi, pi), Arc::new(gpu));
+            meshes.push(Arc::new(gpu));
         }
     }
-    Ok(out)
+    Ok(MeshTable { meshes, offsets })
 }
 
 /// The final per-frame plan builder. Beyond `_full`, this also routes
@@ -614,10 +647,11 @@ pub fn build_graphics_plans_maximal(
     pose:          &Pose,
     upload_ctx:    &MeshUploadCtx,
     material_sets: &[Option<vk::DescriptorSet>],
-    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    morph_buffers: &ThinVec<(u32, u32, vk::Buffer)>,
     skinning:      &SkinningFrame,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
-    let mut cache: Vec<Vec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
+    // Per-call inline mesh cache: 2D ThinVec indexed by mesh then prim.
+    let mut cache: ThinVec<ThinVec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
         .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
         .collect();
 
@@ -632,19 +666,10 @@ pub fn build_graphics_plans_maximal(
         }
         let mesh = mesh_slot.as_ref().unwrap().clone();
 
-        // Skinned primitives need three things in lockstep:
-        //   1. the per-vertex JOINTS_0 + WEIGHTS_0 buffer at vertex binding 1
-        //   2. the SkinPalette descriptor set at set 2 (one per node-with-skin)
-        //   3. the SkinnedForwardLit pipeline (kind override)
-        // Falls back to plain ForwardLit when any of those pieces is missing.
         let node = &asset.nodes[d.node as usize];
         let is_skinned = node.skin.is_some() && primitive_is_skinned(asset, d.mesh, d.primitive);
-        let skin_vb = if is_skinned {
-            skinning.skin_vertex_buffers.get(&(d.mesh as usize, d.primitive as usize)).copied()
-        } else { None };
-        let palette_set = if is_skinned {
-            skinning.palette_sets_by_node.get(&(d.node as usize)).copied()
-        } else { None };
+        let skin_vb    = if is_skinned { skinning.skin_vb(d.mesh, d.primitive) } else { None };
+        let palette_set = if is_skinned { skinning.palette_set(d.node) } else { None };
 
         let mut plan = GraphicsFramePlan::new_mesh(
             crate::forge_master::frame::FrameId::new((i + 1) as i64),
@@ -659,10 +684,12 @@ pub fn build_graphics_plans_maximal(
                 plan = plan.with_material_set(*set);
             }
         }
-        if let Some(&buf) = morph_buffers.get(&(d.mesh as usize, d.primitive as usize)) {
+        if let Some(buf) = morph_buffers.iter()
+            .find(|(m, p, _)| *m == d.mesh && *p == d.primitive)
+            .map(|(_, _, b)| *b)
+        {
             plan = plan.with_vertex_buffer_override(buf);
         }
-        // Promote to the skinned pipeline only when the full triplet is wired.
         if is_skinned && skin_vb.is_some() && palette_set.is_some() {
             plan = plan
                 .with_kind(GraphicsOreKind::SkinnedForwardLit)
@@ -786,14 +813,14 @@ pub fn skin_palette_frame_id(asset: &GltfAsset, skin_idx: usize) -> Option<Frame
 pub fn collect_skin_palette_buffers(
     asset:   &GltfAsset,
     factory: &crate::render::factory_master::factory::Factory,
-) -> std::collections::HashMap<usize, vk::Buffer> {
-    let mut out = std::collections::HashMap::new();
+) -> ThinVec<(u32, vk::Buffer)> {
+    let mut out = ThinVec::new();
     for si in 0..asset.skins.len() {
         let Some(id) = skin_palette_frame_id(asset, si) else { continue };
         let Some(frame) = factory.frame_by_id(id) else { continue };
         let Some(ingot) = frame.ingots.first() else { continue };
         if let Some(buf) = ingot.result_buffer() {
-            out.insert(si, buf.handle);
+            out.push((si as u32, buf.handle));
         }
     }
     out
@@ -1005,14 +1032,14 @@ fn mat4_mul_cm(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 pub fn build_graphics_plans_maximal_with_meshes(
     asset:         &GltfAsset,
     pose:          &Pose,
-    meshes:        &std::collections::HashMap<(usize, usize), Arc<GpuMesh>>,
+    meshes:        &MeshTable,
     material_sets: &[Option<vk::DescriptorSet>],
-    morph_buffers: &std::collections::HashMap<(usize, usize), vk::Buffer>,
+    morph_buffers: &ThinVec<(u32, u32, vk::Buffer)>,
     skinning:      &SkinningFrame,
 ) -> ThinVec<GraphicsFramePlan> {
     build_graphics_plans_maximal_with_meshes_vp(
         asset, pose, meshes, material_sets, morph_buffers, skinning,
-        &IDENTITY_MAT4, None, &std::collections::HashMap::new(), None,
+        &IDENTITY_MAT4, None, &ThinVec::new(), None,
     )
 }
 
@@ -1035,31 +1062,27 @@ const IDENTITY_MAT4: [f32; 16] = [
 /// to `dummy_instance_set` (1×identity); callers must call
 /// `cache.ensure_dummy_instance_matrices` first to obtain it.
 pub fn build_graphics_plans_maximal_with_meshes_vp(
-    asset:                  &GltfAsset,
-    pose:                   &Pose,
-    meshes:                 &std::collections::HashMap<(usize, usize), Arc<GpuMesh>>,
-    material_sets:          &[Option<vk::DescriptorSet>],
-    morph_buffers:          &std::collections::HashMap<(usize, usize), vk::Buffer>,
-    skinning:               &SkinningFrame,
-    view_proj:              &[f32; 16],
-    fallback_material:      Option<vk::DescriptorSet>,
-    instance_sets:          &std::collections::HashMap<(usize, usize), vk::DescriptorSet>,
-    dummy_instance_set:     Option<vk::DescriptorSet>,
+    asset:              &GltfAsset,
+    pose:               &Pose,
+    meshes:             &MeshTable,
+    material_sets:      &[Option<vk::DescriptorSet>],
+    morph_buffers:      &ThinVec<(u32, u32, vk::Buffer)>,
+    skinning:           &SkinningFrame,
+    view_proj:          &[f32; 16],
+    fallback_material:  Option<vk::DescriptorSet>,
+    instance_sets:      &ThinVec<(u32, u32, vk::DescriptorSet)>,
+    dummy_instance_set: Option<vk::DescriptorSet>,
 ) -> ThinVec<GraphicsFramePlan> {
     let draws = build_graphics_draws_with_matrices(asset, &pose.world);
     let mut plans = ThinVec::with_capacity(draws.len());
     for (i, d) in draws.iter().enumerate() {
-        let Some(mesh) = meshes.get(&(d.mesh as usize, d.primitive as usize)) else { continue };
+        let Some(mesh) = meshes.get(d.mesh as usize, d.primitive as usize) else { continue };
 
         let node = &asset.nodes[d.node as usize];
         let is_skinned = node.skin.is_some()
             && primitive_is_skinned(asset, d.mesh, d.primitive);
-        let skin_vb = if is_skinned {
-            skinning.skin_vertex_buffers.get(&(d.mesh as usize, d.primitive as usize)).copied()
-        } else { None };
-        let palette_set = if is_skinned {
-            skinning.palette_sets_by_node.get(&(d.node as usize)).copied()
-        } else { None };
+        let skin_vb     = if is_skinned { skinning.skin_vb(d.mesh, d.primitive) }    else { None };
+        let palette_set = if is_skinned { skinning.palette_set(d.node) } else { None };
 
         let mvp = mat4_mul_cm(view_proj, &d.world_matrix);
         let mut plan = GraphicsFramePlan::new_mesh(
@@ -1070,35 +1093,26 @@ pub fn build_graphics_plans_maximal_with_meshes_vp(
             mesh.clone(),
         )
         .with_mvp(mvp);
-        // Try the asset's material first, then fall back to the cache's
-        // dummy white material so every ForwardLit / SkinnedForwardLit
-        // draw has a bound set 1 (the shader reads from it
-        // unconditionally; missing means UB and a validation error).
         let resolved_set = d.material
             .and_then(|m| material_sets.get(m as usize).copied().flatten())
             .or(fallback_material);
         if let Some(set) = resolved_set {
             plan = plan.with_material_set(set);
         }
-        if let Some(&buf) = morph_buffers.get(&(d.mesh as usize, d.primitive as usize)) {
+        if let Some(buf) = morph_buffers.iter()
+            .find(|(m, p, _)| *m == d.mesh && *p == d.primitive)
+            .map(|(_, _, b)| *b)
+        {
             plan = plan.with_vertex_buffer_override(buf);
         }
-        // EXT_mesh_gpu_instancing: when the draw carries per-instance
-        // matrices, fan it out via vkCmdDrawIndexed(instanceCount=N).
-        // The actual mat4 per instance lives in the set-3 SSBO that the
-        // vertex shader indexes by gl_InstanceIndex; the engine bridge
-        // uploads it once at plan-build time and references the
-        // resulting descriptor set here.
         if !d.instance_matrices.is_empty() {
             plan = plan.with_instances(d.instance_matrices.len() as u32);
-            if let Some(&set) = instance_sets.get(&(d.mesh as usize, d.primitive as usize)) {
-                plan = plan.with_instance_set(set);
-            } else if let Some(set) = dummy_instance_set {
-                plan = plan.with_instance_set(set);
-            }
+            let inst_set = instance_sets.iter()
+                .find(|(m, p, _)| *m == d.mesh && *p == d.primitive)
+                .map(|(_, _, s)| *s)
+                .or(dummy_instance_set);
+            if let Some(set) = inst_set { plan = plan.with_instance_set(set); }
         } else if let Some(set) = dummy_instance_set {
-            // Non-instanced draws still need the dummy bound so the
-            // shader's set 3 reference resolves to the identity matrix.
             plan = plan.with_instance_set(set);
         }
 
