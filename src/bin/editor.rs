@@ -131,7 +131,7 @@ impl AppLogic for EditorApp {
 
         if !self.cam_fitted {
             if let Some(aabb) = ctx.gltf_union_aabb_for_world(&self.world) {
-                ctx.fit_perspective_pane_to_aabb(app, &aabb);
+                ctx.fit_all_panes_to_aabb(app, &aabb);
                 self.cam_fitted = true;
             }
         }

@@ -107,16 +107,21 @@ impl Camera {
         }
     }
 
-    #[inline]
-    pub fn view_matrix(&self) -> [f32; 16] {
-        let pos = Vec3::from(self.position);
+    fn basis(&self) -> (Vec3, Vec3, Vec3) {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         let forward    = Vec3::new(cp * cy, sp, cp * sy).normalize();
         let right_base = Vec3::new(-sy, 0.0, cy).normalize();
         let up_base    = right_base.cross(forward).normalize();
-        // Roll: rotate up around the forward axis.
-        let up = Quat::from_axis_angle(forward, self.roll) * up_base;
+        let up         = Quat::from_axis_angle(forward, self.roll) * up_base;
+        let right      = forward.cross(up).normalize();
+        (forward, right, up)
+    }
+
+    #[inline]
+    pub fn view_matrix(&self) -> [f32; 16] {
+        let pos = Vec3::from(self.position);
+        let (forward, _, up) = self.basis();
         Mat4::look_at_rh(pos, pos + forward, up).to_cols_array()
     }
 
@@ -148,14 +153,8 @@ impl Camera {
     /// Translate position in the camera's local right/up plane (pan for all pane types).
     #[inline]
     pub fn pan(&mut self, dx: f32, dy: f32) {
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
-        let forward    = Vec3::new(cp * cy, sp, cp * sy);
-        let right_base = Vec3::new(-sy, 0.0, cy);
-        let up_base    = right_base.cross(forward).normalize();
-        let up         = Quat::from_axis_angle(forward, self.roll) * up_base;
-        let right      = forward.cross(up).normalize();
-        let delta      = right * dx + up * dy;
+        let (_, right, up) = self.basis();
+        let delta = right * dx + up * dy;
         self.position[0] += delta.x;
         self.position[1] += delta.y;
         self.position[2] += delta.z;

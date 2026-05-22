@@ -178,12 +178,12 @@ impl NormRect {
     pub fn to_vk_scissor(&self, e: vk::Extent2D) -> vk::Rect2D {
         vk::Rect2D {
             offset: vk::Offset2D {
-                x: (self.x * e.width  as f32) as i32,
-                y: (self.y * e.height as f32) as i32,
+                x: (self.x * e.width  as f32).round() as i32,
+                y: (self.y * e.height as f32).round() as i32,
             },
             extent: vk::Extent2D {
-                width:  (self.w * e.width  as f32) as u32,
-                height: (self.h * e.height as f32) as u32,
+                width:  (self.w * e.width  as f32).round() as u32,
+                height: (self.h * e.height as f32).round() as u32,
             },
         }
     }
@@ -624,6 +624,42 @@ impl<'a> AppCtx<'a> {
         }
     }
 
+    /// Fit every viewport pane to the AABB: perspective uses `fit_camera_to_aabb`;
+    /// ortho panes get their `size`/`near`/`far` set from the scene radius and
+    /// their position moved along their fixed view direction to frame the scene.
+    pub fn fit_all_panes_to_aabb(&mut self, app: AppHandle, aabb: &([f32; 3], [f32; 3])) {
+        let mn = glam::Vec3::from(aabb.0);
+        let mx = glam::Vec3::from(aabb.1);
+        let center = (mn + mx) * 0.5;
+        let radius = ((mx - mn).length() * 0.5).max(0.01);
+
+        let cam_handles: thin_vec::ThinVec<CameraHandle> = {
+            let Some(res) = self.windows.get(app) else { return };
+            let Some(grid) = &res.viewport_grid else { return };
+            grid.arenas.values().map(|vp| vp.camera_handle).collect()
+        };
+
+        for h in cam_handles {
+            if let Some(cam) = self.cameras.get_mut(h) {
+                match cam.projection {
+                    None | Some(ProjectionMode::Perspective { .. }) => {
+                        fit_camera_to_aabb(cam, aabb);
+                    }
+                    Some(ProjectionMode::Orthographic { ref mut size, ref mut near, ref mut far }) => {
+                        *size = radius * 2.2;
+                        *near = -(radius * 4.0);
+                        *far  = radius * 4.0;
+                        let (sy, cy) = cam.yaw.sin_cos();
+                        let (sp, cp) = cam.pitch.sin_cos();
+                        let forward = glam::Vec3::new(cp * cy, sp, cp * sy).normalize();
+                        let pos = center - forward * radius * 2.0;
+                        cam.position = pos.into();
+                    }
+                }
+            }
+        }
+    }
+
     /// Fit the window's main camera to the given AABB.
     pub fn fit_window_camera_to_aabb(&mut self, app: AppHandle, aabb: &([f32; 3], [f32; 3])) {
         let h = self.windows.get(app).map(|r| r.camera_handle);
@@ -929,7 +965,12 @@ impl<T: AppLogic> ApplicationHandler for AppRunner<T> {
                     res.last_cursor = Some((pos_x, pos_y));
 
                     if let Some(grid) = &mut res.viewport_grid {
-                        grid.hit_test_focus(pos_x, pos_y);
+                        let any_grabbed = grid.arenas.values().any(|vp| {
+                            vp.controller.is_grabbed() || vp.controller.is_middle_grabbed()
+                        });
+                        if !any_grabbed {
+                            grid.hit_test_focus(pos_x, pos_y);
+                        }
                         let vp = match grid.arenas.get_mut(grid.focused) { Some(v) => v, None => return };
                         let cam_h  = vp.camera_handle;
                         let grabbed     = vp.controller.is_grabbed();
