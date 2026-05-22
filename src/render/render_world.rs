@@ -109,7 +109,7 @@ pub fn collect_and_submit(
                                 color:     ld.color,
                                 intensity: ld.intensity,
                                 range:     ld.range,
-                                kind:      ld.kind.clone(),
+                                kind:      ld.kind,
                             });
                         }
                     }
@@ -214,7 +214,6 @@ pub fn collect_and_submit(
             }
         }
 
-        let instance_sets: ThinVec<(u32, u32, vk::DescriptorSet)> = ThinVec::new();
         let plans = build_graphics_plans_maximal_with_meshes_vp(
             &loaded.asset,
             &pose,
@@ -224,7 +223,7 @@ pub fn collect_and_submit(
             &skinning,
             &r.actor_world,
             loaded.cache.dummy_material_set(),
-            &instance_sets,
+            &[],
             loaded.cache.dummy_instance_set(),
         );
         all_plans.extend(plans);

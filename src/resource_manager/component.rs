@@ -129,7 +129,7 @@ pub struct LightData {
     pub kind:      LightKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum LightKind {
     Point,
     Spot        { half_angle: f32, direction: [f32; 3] },

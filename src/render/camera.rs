@@ -145,8 +145,20 @@ impl Camera {
 
     #[inline]
     pub fn view_projection_matrix(&self, aspect: f32) -> [f32; 16] {
-        let view = Mat4::from_cols_array(&self.view_matrix());
-        let proj = Mat4::from_cols_array(&self.projection_matrix(aspect));
+        let (forward, _, up) = self.basis();
+        let pos  = Vec3::from(self.position);
+        let view = Mat4::look_at_rh(pos, pos + forward, up);
+        let mut proj = match self.projection {
+            None => Mat4::perspective_rh(self.fov, aspect, self.near, self.far),
+            Some(ProjectionMode::Perspective { fov, near, far }) =>
+                Mat4::perspective_rh(fov, aspect, near, far),
+            Some(ProjectionMode::Orthographic { size, near, far }) => {
+                let hw = size * aspect * 0.5;
+                let hh = size * 0.5;
+                Mat4::orthographic_rh(-hw, hw, -hh, hh, near, far)
+            }
+        };
+        proj.y_axis.y = -proj.y_axis.y;
         (proj * view).to_cols_array()
     }
 

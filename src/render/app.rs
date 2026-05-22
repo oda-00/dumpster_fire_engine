@@ -1128,13 +1128,12 @@ impl<T: AppLogic> AppRunner<T> {
                 return;
             }
         }
-        let compute_sems: Vec<vk::Semaphore> = {
+        let compute_sems: ThinVec<vk::Semaphore> = {
             let pos = self.data.compute_waits.iter().position(|(h, _)| *h == app_handle);
             if let Some(i) = pos {
-                let (_, v) = self.data.compute_waits.swap_remove(i);
-                v.into_iter().collect()
+                self.data.compute_waits.swap_remove(i).1
             } else {
-                Vec::new()
+                ThinVec::new()
             }
         };
 

@@ -1070,7 +1070,7 @@ pub fn build_graphics_plans_maximal_with_meshes_vp(
     skinning:           &SkinningFrame,
     view_proj:          &[f32; 16],
     fallback_material:  Option<vk::DescriptorSet>,
-    instance_sets:      &ThinVec<(u32, u32, vk::DescriptorSet)>,
+    instance_sets:      &[(u32, u32, vk::DescriptorSet)],
     dummy_instance_set: Option<vk::DescriptorSet>,
 ) -> ThinVec<GraphicsFramePlan> {
     let draws = build_graphics_draws_with_matrices(asset, &pose.world);
