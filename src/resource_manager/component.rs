@@ -3,6 +3,10 @@ mod sealed {
 }
 
 use std::sync::Arc;
+use thin_vec::ThinVec;
+
+use crate::resource_manager::manager::ActorHandle;
+
 pub trait ComponentData: sealed::Sealed {
     const TYPE: ComponentType;
 }
@@ -129,11 +133,112 @@ pub struct LightData {
     pub kind:      LightKind,
 }
 
-#[derive(Debug, Clone, Copy)]
+// ── Light substrate handles ─────────────────────────────────────────────────
+
+/// Index into the engine-wide bindless IES profile array (set 0 binding 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IesHandle(pub u32);
+
+/// Index into the engine-wide bindless HDRI cubemap array (set 0 binding 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HdriHandle(pub u32);
+
+/// Index into the engine-wide bindless 3D density-texture array (set 0 binding 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DensityTexHandle(pub u32);
+
+/// Analytic-sky parametric model. Encoded as `model_id_f` in `LightGpu.data[1].w`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SkyModel {
+    HosekWilkie            = 0,
+    Preetham               = 1,
+    AtmosphericScattering  = 2,
+}
+
+/// Physically-complete light taxonomy. Twenty variants covering every
+/// distinct combination of geometry / medium / data-source we want to ship.
+///
+/// Indexing convention (kept stable; matches the GPU `kind` tag in `LightGpu`):
+///
+///   0 Point        5 Disk         10 Volumetric    15 Ies
+///   1 Spot         6 Rectangle    11 VolumeBox     16 Mesh
+///   2 Directional  7 Polygon      12 VolumeCone    17 Environment
+///   3 Sun          8 Linear       13 VolumeCylinder 18 AnalyticSky
+///   4 Sphere       9 Tube         14 VolumeMesh    19 Ambient
+#[derive(Debug, Clone)]
 pub enum LightKind {
+    // ── Punctual + sun-disc ────────────────────────────────────────────
     Point,
-    Spot        { half_angle: f32, direction: [f32; 3] },
+    Spot         { cone_inner: f32, cone_outer: f32, direction: [f32; 3] },
     Directional { direction: [f32; 3] },
+    Sun          { direction: [f32; 3], angular_radius: f32 },
+
+    // ── Area lights ────────────────────────────────────────────────────
+    Sphere       { radius: f32 },
+    Disk         { normal: [f32; 3], radius: f32, two_sided: bool },
+    Rectangle    { normal: [f32; 3], tangent: [f32; 3], size: [f32; 2], two_sided: bool },
+    Polygon      { normal: [f32; 3], tangent: [f32; 3], vertices: ThinVec<[f32; 2]>, two_sided: bool },
+    Linear       { point_b: [f32; 3], radius: f32 },
+    Tube         { point_b: [f32; 3], radius: f32, capped: bool },
+
+    // ── Participating media ────────────────────────────────────────────
+    Volumetric    { radius: f32, extinction: f32, anisotropy_g: f32 },
+    VolumeBox     { half_extents: [f32; 3], extinction: f32, anisotropy_g: f32 },
+    VolumeCone    { direction: [f32; 3], half_angle: f32, height: f32, extinction: f32, anisotropy_g: f32 },
+    VolumeCylinder{ direction: [f32; 3], height: f32, radius: f32, extinction: f32, anisotropy_g: f32 },
+    VolumeMesh    { mesh_actor: ActorHandle, density_tex: Option<DensityTexHandle>, extinction: f32, anisotropy_g: f32 },
+
+    // ── Data-driven photometric ────────────────────────────────────────
+    Ies          { direction: [f32; 3], profile: IesHandle },
+
+    // ── Global / special ───────────────────────────────────────────────
+    Mesh         { mesh_actor: ActorHandle },
+    Environment  { hdri: HdriHandle, rotation_rad: f32, intensity_scale: f32 },
+    AnalyticSky  { sun_direction: [f32; 3], turbidity: f32, ground_albedo: [f32; 3], model: SkyModel },
+    Ambient,
+}
+
+impl LightKind {
+    /// Stable GPU tag matching the chit / frag shader's `kind` dispatch.
+    pub const fn tag(&self) -> u32 {
+        match self {
+            LightKind::Point             => 0,
+            LightKind::Spot         { .. } => 1,
+            LightKind::Directional { .. } => 2,
+            LightKind::Sun          { .. } => 3,
+            LightKind::Sphere       { .. } => 4,
+            LightKind::Disk         { .. } => 5,
+            LightKind::Rectangle    { .. } => 6,
+            LightKind::Polygon      { .. } => 7,
+            LightKind::Linear       { .. } => 8,
+            LightKind::Tube         { .. } => 9,
+            LightKind::Volumetric   { .. } => 10,
+            LightKind::VolumeBox    { .. } => 11,
+            LightKind::VolumeCone   { .. } => 12,
+            LightKind::VolumeCylinder { .. } => 13,
+            LightKind::VolumeMesh   { .. } => 14,
+            LightKind::Ies          { .. } => 15,
+            LightKind::Mesh         { .. } => 16,
+            LightKind::Environment  { .. } => 17,
+            LightKind::AnalyticSky  { .. } => 18,
+            LightKind::Ambient            => 19,
+        }
+    }
+
+    /// True when the kind has a meaningful world-space position (point-like
+    /// or area). False for Directional/Sun/Environment/AnalyticSky/Ambient,
+    /// which are inherently positionless.
+    pub const fn is_positional(&self) -> bool {
+        !matches!(
+            self,
+            LightKind::Directional { .. }
+                | LightKind::Sun { .. }
+                | LightKind::Environment { .. }
+                | LightKind::AnalyticSky { .. }
+                | LightKind::Ambient
+        )
+    }
 }
 
 /// Per-actor animation + pose state. Owned by UtilityComponent.render on

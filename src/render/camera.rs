@@ -17,6 +17,74 @@ pub type CameraHandle = Handle<CameraTag>;
 pub struct CameraMarker;
 pub type CameraId = Id<CameraMarker>;
 
+// ── Physical Lens Parameters ───────────────────────────────────────────────
+
+/// Physical-lens parameters. `fov_y` is derived from focal_length and sensor_h.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lens {
+    pub focal_length_mm: f32,  // e.g., 50.0
+    pub sensor_w_mm:     f32,  // e.g., 36.0 (full-frame)
+    pub sensor_h_mm:     f32,  // e.g., 24.0
+}
+
+impl Lens {
+    pub fn fov_y(&self) -> f32 {
+        2.0 * ((self.sensor_h_mm * 0.5) / self.focal_length_mm).atan()
+    }
+    pub const FULL_FRAME: Self = Lens {
+        focal_length_mm: 50.0,
+        sensor_w_mm: 36.0,
+        sensor_h_mm: 24.0,
+    };
+}
+
+// ── Exposure: Sensor + Shutter ────────────────────────────────────────────
+
+/// Sensor + shutter parameters. EV15 (sunny-16) is calibration baseline.
+/// Exposure multiplier = 2^(EV_REF - ev)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Exposure {
+    pub aperture_fstop:  f32,  // e.g., 5.6
+    pub shutter_seconds: f32,  // e.g., 1.0/60.0
+    pub iso:             f32,  // e.g., 100.0
+    pub ev_compensation: f32,  // user offset in stops; e.g., 0.0
+}
+
+impl Exposure {
+    pub fn ev(&self) -> f32 {
+        let n2 = self.aperture_fstop * self.aperture_fstop;
+        (n2 / self.shutter_seconds).log2() - (self.iso / 100.0).log2() - self.ev_compensation
+    }
+
+    /// Scene-linear multiplier before tonemap.
+    pub fn linear_scale(&self) -> f32 {
+        const EV_REF: f32 = 15.0;
+        2.0_f32.powf(EV_REF - self.ev())
+    }
+}
+
+// ── Depth of Field ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dof {
+    pub focus_distance_m: f32,  // e.g., 5.0
+    pub aperture_blades:  u32,  // e.g., 6
+    pub samples_per_pix:  u32,  // 1 = off; >= 2 enables RT bokeh
+}
+
+impl Dof {
+    pub const OFF: Self = Dof {
+        focus_distance_m: 5.0,
+        aperture_blades: 6,
+        samples_per_pix: 1,
+    };
+
+    pub fn aperture_radius_m(&self, lens: &Lens, exposure: &Exposure) -> f32 {
+        // Physical aperture diameter = focal_length / N; radius in meters.
+        (lens.focal_length_mm * 0.001) / (2.0 * exposure.aperture_fstop)
+    }
+}
+
 // ── Camera modes ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,6 +119,9 @@ pub struct Camera {
     pub far:        f32,
     /// When `Some`, overrides `fov`/`near`/`far`. `None` = backwards-compat perspective.
     pub projection: Option<ProjectionMode>,
+    pub lens:       Lens,      // NEW
+    pub exposure:   Exposure,  // NEW
+    pub dof:        Dof,       // NEW
 }
 
 impl Camera {
@@ -67,6 +138,14 @@ impl Camera {
             near: 0.1,
             far: 100.0,
             projection: None,
+            lens: Lens::FULL_FRAME,
+            exposure: Exposure {
+                aperture_fstop:  5.6,
+                shutter_seconds: 1.0 / 60.0,
+                iso:             100.0,
+                ev_compensation: 0.0,
+            },
+            dof: Dof::OFF,
         }
     }
 
@@ -91,6 +170,14 @@ impl Camera {
             near: 0.1,
             far: 100.0,
             projection: None,
+            lens: Lens::FULL_FRAME,
+            exposure: Exposure {
+                aperture_fstop:  5.6,
+                shutter_seconds: 1.0 / 60.0,
+                iso:             100.0,
+                ev_compensation: 0.0,
+            },
+            dof: Dof::OFF,
         }
     }
 
@@ -128,7 +215,7 @@ impl Camera {
     #[inline]
     pub fn projection_matrix(&self, aspect: f32) -> [f32; 16] {
         let mut proj = match self.projection {
-            None => Mat4::perspective_rh(self.fov, aspect, self.near, self.far),
+            None => Mat4::perspective_rh(self.lens.fov_y(), aspect, self.near, self.far),
             Some(ProjectionMode::Perspective { fov, near, far }) => {
                 Mat4::perspective_rh(fov, aspect, near, far)
             }
@@ -149,7 +236,7 @@ impl Camera {
         let pos  = Vec3::from(self.position);
         let view = Mat4::look_at_rh(pos, pos + forward, up);
         let mut proj = match self.projection {
-            None => Mat4::perspective_rh(self.fov, aspect, self.near, self.far),
+            None => Mat4::perspective_rh(self.lens.fov_y(), aspect, self.near, self.far),
             Some(ProjectionMode::Perspective { fov, near, far }) =>
                 Mat4::perspective_rh(fov, aspect, near, far),
             Some(ProjectionMode::Orthographic { size, near, far }) => {
@@ -312,6 +399,108 @@ impl CameraController {
             _ => {}
         }
     }
+
+    pub fn handle_mouse(&mut self, dx: f32, dy: f32) -> (f32, f32) {
+        if !self.mouse_grabbed {
+            return (0.0, 0.0);
+        }
+        let yaw   = -dx * self.mouse_sensitivity;
+        let pitch = -dy * self.mouse_sensitivity;
+        (yaw, pitch)
+    }
+
+    /// Call when the middle mouse button state changes. Returns new grabbed state.
+    pub fn handle_middle_button(&mut self, state: ElementState) -> bool {
+        self.middle_grabbed = state == ElementState::Pressed;
+        self.middle_grabbed
+    }
+
+    /// Pan the camera in its local right/up plane when middle-mouse is grabbed.
+    #[inline]
+    pub fn handle_pan(&self, camera: &mut Camera, dx: f32, dy: f32) {
+        if self.middle_grabbed {
+            camera.pan(dx * self.pan_sensitivity, -dy * self.pan_sensitivity);
+        }
+    }
+
+    pub fn toggle_grab(&mut self) -> bool {
+        self.mouse_grabbed = !self.mouse_grabbed;
+        self.mouse_grabbed
+    }
+
+    pub fn set_grab(&mut self, grabbed: bool) {
+        self.mouse_grabbed = grabbed;
+    }
+
+    pub fn is_grabbed(&self) -> bool {
+        self.mouse_grabbed
+    }
+
+    pub fn is_middle_grabbed(&self) -> bool {
+        self.middle_grabbed
+    }
+
+    pub fn pan_sensitivity(&self) -> f32 {
+        self.pan_sensitivity
+    }
+
+    pub fn update(&self, camera: &mut Camera, dt: f32) {
+        let speed = self.move_speed * dt;
+        if self.forward    { camera.move_forward(speed);  }
+        if self.backward   { camera.move_forward(-speed); }
+        if self.right      { camera.move_right(speed);    }
+        if self.left       { camera.move_right(-speed);   }
+        if self.up         { camera.move_up(speed);       }
+        if self.down       { camera.move_up(-speed);      }
+        if self.roll_left  { camera.roll += self.roll_speed * dt; }
+        if self.roll_right { camera.roll -= self.roll_speed * dt; }
+    }
+}
+
+// ── Push Constants ─────────────────────────────────────────────────────────
+
+/// Scene (raster) push constants. Packed for 128 B (Vulkan typical limit).
+#[repr(C)]
+pub struct ScenePush {
+    pub view_proj:      [f32; 16],
+    pub cam_pos:        [f32; 3],
+    pub _pad0:          f32,
+    pub cam_forward:    [f32; 3],
+    pub _pad1:          f32,
+    pub exposure_scale: f32,
+    pub _pad2:          [f32; 3],
+}
+
+/// Ray-tracing push constants. Exactly 128 B (one 4x32-bit register block).
+#[repr(C)]
+pub struct RayCameraPush {
+    pub inv_vp:         [f32; 16],
+    pub cam_pos:        [f32; 3],
+    pub is_ortho:       u32,
+    pub cam_forward:    [f32; 3],
+    pub frame_count:    u32,
+    pub aperture_radius: f32,
+    pub focus_distance: f32,
+    pub samples_per_pix: u32,
+    pub aperture_blades: u32,
+    pub pane_offset_px: [u32; 2],
+    pub pane_size_px:   [u32; 2],
+    pub exposure_scale: f32,
+    pub _pad:           [f32; 3],
+}
+    pub cam_pos:        [f32; 3],
+    pub is_ortho:       u32,
+    pub cam_forward:    [f32; 3],
+    pub frame_count:    u32,
+    pub aperture_radius: f32,
+    pub focus_distance: f32,
+    pub samples_per_pix: u32,
+    pub aperture_blades: u32,
+    pub pane_offset_px: [u32; 2],
+    pub pane_size_px:   [u32; 2],
+    pub exposure_scale: f32,
+    pub _pad:           [f32; 3],
+}
 
     pub fn handle_mouse(&mut self, dx: f32, dy: f32) -> (f32, f32) {
         if !self.mouse_grabbed {

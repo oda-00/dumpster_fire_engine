@@ -21,9 +21,9 @@ pub struct Handle<Tag> {
 }
 
 // Arena tag types — plain ZSTs, no data, no circular imports.
-#[derive(Copy, Clone, PartialEq, Eq)] pub struct LevelTag;
-#[derive(Copy, Clone, PartialEq, Eq)] pub struct StageTag;
-#[derive(Copy, Clone, PartialEq, Eq)] pub struct ActorTag;
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)] pub struct LevelTag;
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)] pub struct StageTag;
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)] pub struct ActorTag;
 
 pub type LevelHandle = Handle<LevelTag>;
 pub type StageHandle = Handle<StageTag>;

@@ -1128,3 +1128,150 @@ fn image_layout_barrier_mips(
             .base_mip_level(base_mip).level_count(level_count)
             .base_array_layer(0).layer_count(1))
 }
+
+// ─── Light substrate (GPU side) ──────────────────────────────────────────────
+//
+// `LightGpu` is the fragment / chit shader's view of one light: a flat 128-byte
+// std140 record. Per-variant fields live in `data: vec4[6]` per the variant
+// encoding table in the plan (see Phase 1 — the host packer in
+// `render_world::pack_lights_ubo` writes these slots).
+//
+// `LightsUBO` is the per-frame uniform-buffer payload. 32-light cap keeps the
+// UBO inside the 64 KiB Vulkan-guaranteed `maxUniformBufferRange` with headroom
+// (32 × 128 B + 16 B header = 4112 B).
+
+/// Max simultaneous lights the engine packs per frame. Lights past this cap
+/// are silently dropped (the packer takes the first `MAX_LIGHTS` from
+/// `render_world`'s collection order — typically AABB-front-to-back-sorted).
+pub const MAX_LIGHTS: usize = 32;
+
+/// 128-byte std140 record. `kind` is the dispatch tag (see `LightKind::tag`
+/// in component.rs). `flags` carries per-kind bit flags: bit 0 = two_sided
+/// (Disk / Rectangle / Polygon), bit 1 = capped (Tube), bit 2 = hidden.
+#[repr(C, align(16))]
+#[derive(Copy, Clone, Debug)]
+pub struct LightGpu {
+    pub color_intensity: [f32; 4],   // 0..16   rgb=linear color, a=intensity
+    pub kind:            u32,        // 16..20  variant tag (matches LightKind::tag)
+    pub flags:           u32,        // 20..24  bit0=two_sided, bit1=capped, bit2=hidden
+    pub _pad:            [u32; 2],   // 24..32
+    pub data:            [[f32; 4]; 6], // 32..128  variant-specific payload
+}
+
+impl Default for LightGpu {
+    fn default() -> Self {
+        // All-zero record with kind = 0xFFFFFFFF (sentinel: skip in shader).
+        Self {
+            color_intensity: [0.0; 4],
+            kind:            u32::MAX,
+            flags:           0,
+            _pad:            [0; 2],
+            data:            [[0.0; 4]; 6],
+        }
+    }
+}
+
+/// Per-frame uniform-buffer payload at set 0 binding 1 (FRAGMENT stage in
+/// the raster path; also at set 0 binding 2 in the RT pipeline). Padded
+/// std140 so the GPU sees identical layout to the GLSL `Lights` block.
+#[repr(C, align(16))]
+#[derive(Copy, Clone, Debug)]
+pub struct LightsUBO {
+    pub count:       u32,
+    /// Index into the bindless HDRI cubemap array when an Environment light
+    /// is present; `u32::MAX` otherwise. Lets the RT miss shader skip the
+    /// linear scan over the lights array.
+    pub env_idx:     u32,
+    /// 1 when any `AnalyticSky` light is present; 0 otherwise.
+    pub sky_present: u32,
+    pub _pad:        u32,
+    pub lights:      [LightGpu; MAX_LIGHTS],
+}
+
+impl Default for LightsUBO {
+    fn default() -> Self {
+        Self {
+            count:       0,
+            env_idx:     u32::MAX,
+            sky_present: 0,
+            _pad:        0,
+            lights:      [LightGpu::default(); MAX_LIGHTS],
+        }
+    }
+}
+
+// Compile-time layout assertions — the GPU side relies on these byte offsets.
+const _: () = {
+    assert!(core::mem::size_of::<LightGpu>()  == 128);
+    assert!(core::mem::align_of::<LightGpu>() == 16);
+    assert!(core::mem::size_of::<LightsUBO>() == 16 + 32 * 128);
+    assert!(core::mem::align_of::<LightsUBO>() == 16);
+};
+
+// ─── Lights descriptor helpers (raster fallback path) ────────────────────────
+
+/// Descriptor set layout for the raster-path lights UBO:
+///   set = 0 binding = 1, UNIFORM_BUFFER, FRAGMENT stage, count 1.
+pub fn create_lights_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout, ForgeError> {
+    let bindings = [vk::DescriptorSetLayoutBinding::default()
+        .binding(1)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+    let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    unsafe {
+        device
+            .create_descriptor_set_layout(&info, None)
+            .map_err(ForgeError::Vk)
+    }
+}
+
+/// Pool sized for one lights UBO per frame in flight.
+pub fn create_lights_pool(
+    device: &ash::Device,
+    frames: u32,
+) -> Result<vk::DescriptorPool, ForgeError> {
+    let sizes = [vk::DescriptorPoolSize::default()
+        .ty(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(frames)];
+    let info = vk::DescriptorPoolCreateInfo::default()
+        .max_sets(frames)
+        .pool_sizes(&sizes);
+    unsafe {
+        device
+            .create_descriptor_pool(&info, None)
+            .map_err(ForgeError::Vk)
+    }
+}
+
+/// Allocate a lights descriptor set and bind the given UBO at binding 1.
+pub fn allocate_lights_set(
+    device: &ash::Device,
+    pool:   vk::DescriptorPool,
+    layout: vk::DescriptorSetLayout,
+    buffer: vk::Buffer,
+    range:  vk::DeviceSize,
+) -> Result<vk::DescriptorSet, ForgeError> {
+    let info = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(pool)
+        .set_layouts(std::slice::from_ref(&layout));
+    let set = unsafe {
+        device
+            .allocate_descriptor_sets(&info)
+            .map_err(ForgeError::Vk)?
+            .remove(0)
+    };
+    let buf_info = [vk::DescriptorBufferInfo::default()
+        .buffer(buffer)
+        .offset(0)
+        .range(range)];
+    let writes = [vk::WriteDescriptorSet::default()
+        .dst_set(set)
+        .dst_binding(1)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .buffer_info(&buf_info)];
+    unsafe { device.update_descriptor_sets(&writes, &[]); }
+    Ok(set)
+}
