@@ -53,6 +53,7 @@ slotmap       = "1"
 criterion     = "0.5"
 divan         = "0.1"
 iai-callgrind = "0.16.1"
+pprof         = { version = "0.13", features = ["criterion", "flamegraph"] }
 lang_frontend = { path = "crates/lang_frontend" }
 langc         = { path = "tools/langc" }
 
