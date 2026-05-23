@@ -47,6 +47,23 @@ enum GizmoMode { Translate, Rotate, Scale }
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum GizmoSpace { World, Local }
 
+/// Active drag state captured at the click that started the gizmo grab.
+/// `axis` is 0/1/2 for X/Y/Z; `mode` selects which transform op to apply.
+#[derive(Copy, Clone, Debug)]
+struct GizmoDrag {
+    actor:        ActorHandle,
+    mode:         GizmoMode,
+    axis:         u8,
+    start_local:  Affine3A,
+    start_world:  Affine3A,
+    start_cursor: [f32; 2],
+    /// Screen-space arrow vector (tip - origin) captured at click time
+    /// so the per-frame delta math is stable while the user drags.
+    arrow_screen: [f32; 2],
+    /// World-space arrow length so screen-space "progress" maps to world delta.
+    arrow_world_len: f32,
+}
+
 struct EditorApp {
     asset_paths:       ThinVec<Arc<str>>,
     world:             World,
@@ -84,6 +101,9 @@ struct EditorApp {
     /// True when the most recent left-click was over a UI panel — the
     /// editor swallows the click so viewport-pick doesn't also fire.
     ui_consumed_click: bool,
+
+    /// Active TRS-gizmo drag, set on click + cleared on release.
+    gizmo_drag:        Option<GizmoDrag>,
 }
 
 impl EditorApp {
@@ -295,6 +315,10 @@ impl AppLogic for EditorApp {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.ui_cursor = [position.x as f32, position.y as f32];
+                // While a gizmo drag is active, update the actor each move.
+                if self.gizmo_drag.is_some() {
+                    self.apply_gizmo_drag();
+                }
             }
 
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
@@ -302,10 +326,8 @@ impl AppLogic for EditorApp {
                     ElementState::Pressed => {
                         self.ui_left_down         = true;
                         self.ui_left_just_pressed = true;
-                        // Hit-test UI panels first. The toolbar (top 36px),
-                        // outliner+inspector (right 280px), and file picker
-                        // modal all consume the click.
-                        let (win_w, win_h) = ctx.viewport_grid(app)
+                        // Hit-test UI panels first.
+                        let (win_w, _win_h) = ctx.viewport_grid(app)
                             .map(|g| (g.win_w, g.win_h))
                             .unwrap_or((1280.0, 720.0));
                         let in_toolbar  = self.ui_cursor[1] < 36.0;
@@ -316,6 +338,11 @@ impl AppLogic for EditorApp {
                             && self.ui_cursor[1] > 36.0  && self.ui_cursor[1] < 236.0;
                         self.ui_consumed_click = in_toolbar || in_side || in_picker || in_spawn;
                         if !self.ui_consumed_click {
+                            // Gizmo arrows take precedence over actor pick.
+                            if let Some(drag) = self.start_gizmo_drag(ctx, app) {
+                                self.gizmo_drag = Some(drag);
+                                return true;
+                            }
                             if let Some(win) = self.win {
                                 if let Some(ah) = self.pick_actor(ctx, win, (self.ui_cursor[0], self.ui_cursor[1])) {
                                     self.world.selection = Some(ah);
@@ -323,10 +350,10 @@ impl AppLogic for EditorApp {
                                 }
                             }
                         }
-                        let _ = win_h;
                     }
                     ElementState::Released => {
                         self.ui_left_down = false;
+                        self.gizmo_drag   = None;
                     }
                 }
             }
@@ -746,6 +773,128 @@ impl EditorApp {
     }
 }
 
+// ── TRS gizmo drag math ───────────────────────────────────────────────────
+
+impl EditorApp {
+    /// Hit-test the three axis arrows of the currently rendered gizmo.
+    /// Returns a GizmoDrag if the cursor is within 10 px of an arrow.
+    fn start_gizmo_drag(&self, ctx: &AppCtx<'_>, app: AppHandle) -> Option<GizmoDrag> {
+        let ah = self.world.selection?;
+        let (lh, sh) = self.main_stage?;
+        let grid = ctx.viewport_grid(app)?;
+        let vp = grid.get(grid.focused)?;
+        let cam = ctx.cameras.get(vp.camera_handle)?;
+        let stage = self.world.levels.get(lh)?.stages.get(sh)?;
+        let world_t = *stage.worlds.get(ah.idx as usize)?;
+        let local_t = *stage.locals.get(ah.idx as usize).unwrap_or(&world_t);
+        let center = Vec3::from(world_t.translation);
+
+        let (win_w, win_h) = (grid.win_w, grid.win_h);
+        let aspect = vp.rect.pixel_aspect(win_w, win_h);
+        let vp_mat = Mat4::from_cols_array(&cam.view_projection_matrix(aspect));
+        let pane_x = vp.rect.x * win_w;
+        let pane_y = vp.rect.y * win_h;
+        let pane_w = vp.rect.w * win_w;
+        let pane_h = vp.rect.h * win_h;
+        let project = |p: Vec3| -> Option<[f32; 2]> {
+            let clip = vp_mat * Vec4::new(p.x, p.y, p.z, 1.0);
+            if clip.w <= 1e-5 { return None; }
+            Some([
+                pane_x + (clip.x / clip.w * 0.5 + 0.5) * pane_w,
+                pane_y + (clip.y / clip.w * 0.5 + 0.5) * pane_h,
+            ])
+        };
+
+        let cam_pos = Vec3::from_array(cam.position);
+        let len = 0.15 * (cam_pos - center).length().max(0.5);
+        let origin_s = project(center)?;
+        let cursor = self.ui_cursor;
+
+        let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+        let mut best: Option<(u8, [f32; 2])> = None;
+        let mut best_dist = 12.0_f32;
+        for (i, axis) in axes.iter().enumerate() {
+            let tip = project(center + *axis * len)?;
+            let dist = point_to_segment(cursor, origin_s, tip);
+            if dist < best_dist {
+                best_dist = dist;
+                best = Some((i as u8, [tip[0] - origin_s[0], tip[1] - origin_s[1]]));
+            }
+        }
+        let (axis_i, arrow_screen) = best?;
+        Some(GizmoDrag {
+            actor:           ah,
+            mode:            self.gizmo_mode,
+            axis:            axis_i,
+            start_local:     local_t,
+            start_world:     world_t,
+            start_cursor:    cursor,
+            arrow_screen,
+            arrow_world_len: len,
+        })
+    }
+
+    /// Apply per-frame delta from cursor motion to the dragged actor.
+    fn apply_gizmo_drag(&mut self) {
+        let Some(drag) = self.gizmo_drag else { return };
+        let Some((lh, sh)) = self.main_stage else { return };
+        let dx = self.ui_cursor[0] - drag.start_cursor[0];
+        let dy = self.ui_cursor[1] - drag.start_cursor[1];
+        let arrow_len_sq = drag.arrow_screen[0].powi(2) + drag.arrow_screen[1].powi(2);
+        if arrow_len_sq < 1.0 { return; }
+        // Scalar projection of mouse delta onto the screen-space arrow:
+        // t = (dot(delta, arrow)) / |arrow|² → unitless [-N..+N]
+        let t = (dx * drag.arrow_screen[0] + dy * drag.arrow_screen[1]) / arrow_len_sq;
+        let axis = match drag.axis { 0 => Vec3::X, 1 => Vec3::Y, _ => Vec3::Z };
+        let new_local = match drag.mode {
+            GizmoMode::Translate => {
+                let world_delta = axis * (t * drag.arrow_world_len);
+                let mut nl = drag.start_local;
+                nl.translation += glam::Vec3A::from(world_delta);
+                nl
+            }
+            GizmoMode::Scale => {
+                // 1.0 + t scales the chosen axis basis vector. Clamp at 0.01
+                // so the matrix can't collapse.
+                let factor = (1.0 + t).max(0.01);
+                let mut nl = drag.start_local;
+                let mut col = nl.matrix3.col(drag.axis as usize);
+                col *= factor / col.length().max(1e-5) * (col.length() * factor);
+                // Simpler: rebuild via diagonal scale of the chosen axis.
+                let mut scale_vec = Vec3::ONE;
+                scale_vec[drag.axis as usize] = factor;
+                nl.matrix3 = drag.start_local.matrix3 * glam::Mat3A::from_diagonal(scale_vec);
+                let _ = col;
+                nl
+            }
+            GizmoMode::Rotate => {
+                // Rotate around the chosen world axis by an angle proportional
+                // to the cursor's tangential travel.
+                let angle = t * std::f32::consts::PI;
+                let rot = glam::Quat::from_axis_angle(axis, angle);
+                let mut nl = drag.start_local;
+                nl.matrix3 = glam::Mat3A::from_quat(rot) * drag.start_local.matrix3;
+                nl
+            }
+        };
+        self.world.set_actor_local(lh, sh, drag.actor, new_local);
+    }
+}
+
+/// Perpendicular distance from a 2D point to a line segment.
+fn point_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-5 {
+        return ((p[0] - a[0]).powi(2) + (p[1] - a[1]).powi(2)).sqrt();
+    }
+    let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len_sq).clamp(0.0, 1.0);
+    let cx = a[0] + t * dx;
+    let cy = a[1] + t * dy;
+    ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt()
+}
+
 // ── TRS gizmo (rendered in 2D screen space projected from focused pane) ───
 
 impl EditorApp {
@@ -913,5 +1062,6 @@ fn main() -> ForgeResult<()> {
         ui_left_down:       false,
         ui_left_just_pressed: false,
         ui_consumed_click:  false,
+        gizmo_drag:         None,
     }).run()
 }

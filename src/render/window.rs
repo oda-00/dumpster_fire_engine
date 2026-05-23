@@ -1147,7 +1147,7 @@ impl Window {
                 let swap_img = gfx.swapchain_images[image_index as usize];
                 let hdr_img = overlay.hdr_images[image_index as usize].handle;
 
-                // Swapchain: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC.
+                // Swapchain: PRESENT_SRC_KHR → TRANSFER_SRC.
                 // HDR:       UNDEFINED → TRANSFER_DST.
                 let pre_blit = [
                     vk::ImageMemoryBarrier2::default()
@@ -1155,7 +1155,7 @@ impl Window {
                         .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
                         .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                         .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                         .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                         .image(swap_img)
                         .subresource_range(vk::ImageSubresourceRange {
