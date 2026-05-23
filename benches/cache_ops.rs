@@ -27,7 +27,7 @@ fn build_world(n: usize) -> (World, LevelHandle, StageHandle, ThinVec<ActorHandl
             lh, sh, ah,
             ActorType::Character(Character {
                 id: CharacterId::new(i as i64 + 1), name: "n".into(),
-                visible: true, physical: true, playable: false,
+                visible: true, physical: true, playable: false, mesh: None,
             }),
             Affine3A::IDENTITY,
         );
@@ -186,7 +186,7 @@ fn stage_despawn_subentity_partial_evict(b: Bencher) {
             lh, sh, ah,
             ActorType::Character(Character {
                 id: CharacterId::new(1), name: "c".into(),
-                visible: true, physical: true, playable: false,
+                visible: true, physical: true, playable: false, mesh: None,
             }),
             Affine3A::IDENTITY,
         ).unwrap();
@@ -200,6 +200,7 @@ fn stage_despawn_subentity_partial_evict(b: Bencher) {
                 stackable:   false,
                 visible:     true,
                 physical:    false,
+                mesh:        None,
             }),
             Affine3A::IDENTITY,
         ).unwrap();

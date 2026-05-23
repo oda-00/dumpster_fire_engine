@@ -44,7 +44,7 @@ fn build_fixture(troupe_size: usize, n_events: usize) -> Fixture {
             ActorType::Character(Character {
                 id: CharacterId::new(i as i64 + 1),
                 name: "n".into(),
-                visible: true, physical: true, playable: false,
+                visible: true, physical: true, playable: false, mesh: None,
             }),
             Affine3A::IDENTITY,
         );

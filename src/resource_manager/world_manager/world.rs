@@ -227,7 +227,7 @@ impl World {
             return;
         }
 
-        if total_dirty >= 1024 && stage_count >= 2 {
+        if stage_count >= 2 && total_dirty / stage_count >= 1024 {
             let mut stages: ThinVec<&mut crate::resource_manager::world_manager::stage::Stage> =
                 ThinVec::with_capacity(stage_count);
             for level in self.levels.values_mut() {

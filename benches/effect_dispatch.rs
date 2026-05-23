@@ -22,7 +22,7 @@ fn build_world_with_play() -> (World, LevelHandle, StageHandle, ActorHandle, Act
         lh, sh, ah,
         ActorType::Character(Character {
             id: CharacterId::new(1), name: "n".into(),
-            visible: true, physical: true, playable: false,
+            visible: true, physical: true, playable: false, mesh: None,
         }),
         Affine3A::IDENTITY,
     );
@@ -162,6 +162,7 @@ fn bench_apply_effect(c: &mut Criterion) {
                     stackable:   false,
                     visible:     true,
                     physical:    false,
+                    mesh:        None,
         }),
                 Affine3A::IDENTITY,
             );
