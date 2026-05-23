@@ -38,6 +38,22 @@ use dumpster_fire_engine::resource_manager::component::{
     LightData, LightKind, MeshRef, UtilityComponent,
 };
 use dumpster_fire_engine::resource_manager::manager::ActorHandle;
+use dumpster_fire_engine::resource_manager::ui_manager::{
+    UiInputState,
+    panel::{Panel, PanelHandle},
+    widget::{Widget, WidgetHandle, CheckboxData, DropdownData},
+};
+
+// ── Layout constants ───────────────────────────────────────────────────────
+
+const TOOLBAR_H:   f32 = 28.0;
+const TITLEBAR_H:  f32 = 22.0;
+const OUTLINER_W:  f32 = 220.0;
+const INSPECTOR_W: f32 = 260.0;
+const SEP:         [u8; 4] = [58,  58,  74, 255];
+const PANEL_BG:    [u8; 4] = [22,  22,  28, 240];
+const TITLEBAR_BG: [u8; 4] = [35,  35,  45, 255];
+const TOOLBAR_BG:  [u8; 4] = [26,  26,  34, 255];
 
 // ── Editor state ───────────────────────────────────────────────────────────
 
@@ -48,20 +64,20 @@ enum GizmoMode { Translate, Rotate, Scale }
 enum GizmoSpace { World, Local }
 
 /// Active drag state captured at the click that started the gizmo grab.
-/// `axis` is 0/1/2 for X/Y/Z; `mode` selects which transform op to apply.
 #[derive(Copy, Clone, Debug)]
 struct GizmoDrag {
-    actor:        ActorHandle,
-    mode:         GizmoMode,
-    axis:         u8,
-    start_local:  Affine3A,
-    start_world:  Affine3A,
-    start_cursor: [f32; 2],
-    /// Screen-space arrow vector (tip - origin) captured at click time
-    /// so the per-frame delta math is stable while the user drags.
-    arrow_screen: [f32; 2],
-    /// World-space arrow length so screen-space "progress" maps to world delta.
+    actor:           ActorHandle,
+    mode:            GizmoMode,
+    axis:            u8,
+    start_local:     Affine3A,
+    start_world:     Affine3A,
+    start_cursor:    [f32; 2],
+    /// Screen-space arrow vector (tip - origin) for translate/scale projection.
+    arrow_screen:    [f32; 2],
+    /// World-space gizmo arm length for translate/scale world-delta conversion.
     arrow_world_len: f32,
+    /// Screen-space projected gizmo origin for rotate atan2 computation.
+    ring_origin:     [f32; 2],
 }
 
 struct EditorApp {
@@ -88,6 +104,13 @@ struct EditorApp {
 
     // ── outliner
     outliner_filter:   Arc<str>,
+    outliner_scroll_y: f32,
+
+    // ── inspector collapse state (retained between frames)
+    insp_pos_collapsed: bool,
+    insp_rot_collapsed: bool,
+    insp_scl_collapsed: bool,
+    insp_cmp_collapsed: bool,
 
     // ── FPS
     frame_time_accum:  f32,
@@ -95,12 +118,20 @@ struct EditorApp {
     fps_display:       f32,
 
     // ── UI input (cursor + mouse state for immediate-mode hit tests).
-    ui_cursor:         [f32; 2],
-    ui_left_down:      bool,
+    ui_cursor:            [f32; 2],
+    ui_left_down:         bool,
     ui_left_just_pressed: bool,
-    /// True when the most recent left-click was over a UI panel — the
-    /// editor swallows the click so viewport-pick doesn't also fire.
-    ui_consumed_click: bool,
+    /// True when the most recent left-click was over a UI panel.
+    ui_consumed_click:    bool,
+
+    // ── retained panel/widget handles (initialized on first frame)
+    ui_initialized:      bool,
+    toolbar_ph:          Option<PanelHandle>,
+    outliner_ph:         Option<PanelHandle>,
+    inspector_ph:        Option<PanelHandle>,
+    toolbar_grid_wh:     Option<WidgetHandle>,
+    toolbar_gizmo_wh:    Option<WidgetHandle>,
+    toolbar_tonemap_wh:  Option<WidgetHandle>,
 
     /// Active TRS-gizmo drag, set on click + cleared on release.
     gizmo_drag:        Option<GizmoDrag>,
@@ -207,6 +238,61 @@ impl EditorApp {
             }
         }
         best_h
+    }
+
+    fn ui_input(&self) -> UiInputState {
+        let mut s = UiInputState::default();
+        s.cursor            = self.ui_cursor;
+        s.left_down         = self.ui_left_down;
+        s.left_just_pressed = self.ui_left_just_pressed;
+        s
+    }
+
+    /// Lazily initialize retained panels + widgets on the first rendered frame.
+    fn init_ui_panels(&mut self, win_w: f32, win_h: f32) {
+        if self.ui_initialized { return; }
+        let panel_h = win_h - TOOLBAR_H;
+
+        let tp = self.world.ui.spawn_panel(Panel::new(
+            dumpster_fire_engine::resource_manager::ui_manager::layout::Rect {
+                x: 0.0, y: 0.0, w: win_w, h: TOOLBAR_H }));
+        let op = self.world.ui.spawn_panel(Panel::new(
+            dumpster_fire_engine::resource_manager::ui_manager::layout::Rect {
+                x: 0.0, y: TOOLBAR_H, w: OUTLINER_W, h: panel_h }));
+        let ip = self.world.ui.spawn_panel(Panel::new(
+            dumpster_fire_engine::resource_manager::ui_manager::layout::Rect {
+                x: win_w - INSPECTOR_W, y: TOOLBAR_H, w: INSPECTOR_W, h: panel_h }));
+
+        self.toolbar_ph   = Some(tp);
+        self.outliner_ph  = Some(op);
+        self.inspector_ph = Some(ip);
+
+        let grid_wh = self.world.ui.widgets.insert(
+            Widget::Checkbox(CheckboxData::new(self.grid_enabled)));
+        let gizmo_wh = self.world.ui.widgets.insert(
+            Widget::Dropdown(DropdownData::new(
+                thin_vec::thin_vec![
+                    Arc::from("Translate"),
+                    Arc::from("Rotate"),
+                    Arc::from("Scale"),
+                ], 0)));
+        let tonemap_wh = self.world.ui.widgets.insert(
+            Widget::Dropdown(DropdownData::new(
+                thin_vec::thin_vec![
+                    Arc::from("Lin"),
+                    Arc::from("Reinhard"),
+                    Arc::from("ACES"),
+                ], self.world.tonemap_op)));
+
+        if let Some(p) = self.world.ui.panels.get_mut(tp) {
+            p.children.push(grid_wh);
+            p.children.push(gizmo_wh);
+            p.children.push(tonemap_wh);
+        }
+        self.toolbar_grid_wh    = Some(grid_wh);
+        self.toolbar_gizmo_wh   = Some(gizmo_wh);
+        self.toolbar_tonemap_wh = Some(tonemap_wh);
+        self.ui_initialized = true;
     }
 }
 
@@ -315,7 +401,6 @@ impl AppLogic for EditorApp {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.ui_cursor = [position.x as f32, position.y as f32];
-                // While a gizmo drag is active, update the actor each move.
                 if self.gizmo_drag.is_some() {
                     self.apply_gizmo_drag();
                 }
@@ -326,19 +411,22 @@ impl AppLogic for EditorApp {
                     ElementState::Pressed => {
                         self.ui_left_down         = true;
                         self.ui_left_just_pressed = true;
-                        // Hit-test UI panels first.
                         let (win_w, _win_h) = ctx.viewport_grid(app)
                             .map(|g| (g.win_w, g.win_h))
                             .unwrap_or((1280.0, 720.0));
-                        let in_toolbar  = self.ui_cursor[1] < 36.0;
-                        let in_side     = self.ui_cursor[0] > win_w - 280.0;
-                        let in_picker   = self.picker_open;
-                        let in_spawn    = self.spawn_menu_open
-                            && self.ui_cursor[0] > 200.0 && self.ui_cursor[0] < 360.0
-                            && self.ui_cursor[1] > 36.0  && self.ui_cursor[1] < 236.0;
-                        self.ui_consumed_click = in_toolbar || in_side || in_picker || in_spawn;
+                        let in_toolbar   = self.ui_cursor[1] < TOOLBAR_H + 2.0;
+                        let in_outliner  = self.ui_cursor[0] < OUTLINER_W
+                                        && self.ui_cursor[1] >= TOOLBAR_H;
+                        let in_inspector = self.ui_cursor[0] >= win_w - INSPECTOR_W
+                                        && self.ui_cursor[1] >= TOOLBAR_H;
+                        let in_picker    = self.picker_open;
+                        let in_spawn     = self.spawn_menu_open
+                            && self.ui_cursor[0] > 200.0 && self.ui_cursor[0] < 370.0
+                            && self.ui_cursor[1] >= TOOLBAR_H
+                            && self.ui_cursor[1] < TOOLBAR_H + 220.0;
+                        self.ui_consumed_click = in_toolbar || in_outliner
+                            || in_inspector || in_picker || in_spawn;
                         if !self.ui_consumed_click {
-                            // Gizmo arrows take precedence over actor pick.
                             if let Some(drag) = self.start_gizmo_drag(ctx, app) {
                                 self.gizmo_drag = Some(drag);
                                 return true;
@@ -371,6 +459,12 @@ impl AppLogic for EditorApp {
         let Some(win) = self.win else { return true };
         if win != app { return true; }
 
+        let (win_w, win_h) = ctx.viewport_grid(app)
+            .map(|g| (g.win_w, g.win_h))
+            .unwrap_or((1280.0, 720.0));
+
+        if !self.ui_initialized { self.init_ui_panels(win_w, win_h); }
+
         self.frame_time_accum  += dt;
         self.frame_count_accum += 1;
         if self.frame_time_accum >= 0.5 {
@@ -395,8 +489,7 @@ impl AppLogic for EditorApp {
         self.draw_inspector(ctx, app);
         self.draw_trs_gizmo(ctx, app);
         if self.picker_open { self.draw_file_picker(ctx, app); }
-        // Frame is built — consume the per-frame click edge so it doesn't
-        // re-fire next tick.
+
         self.ui_left_just_pressed = false;
         self.ui_consumed_click    = false;
 
@@ -413,102 +506,121 @@ impl AppLogic for EditorApp {
 // ── Toolbar ────────────────────────────────────────────────────────────────
 
 impl EditorApp {
-    fn ui_input(&self) -> dumpster_fire_engine::resource_manager::ui_manager::UiInputState {
-        use dumpster_fire_engine::resource_manager::ui_manager::UiInputState;
-        let mut s = UiInputState::default();
-        s.cursor            = self.ui_cursor;
-        s.left_down         = self.ui_left_down;
-        s.left_just_pressed = self.ui_left_just_pressed;
-        s
-    }
-
     fn draw_toolbar(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
-        use dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui;
-        use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
+        use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
 
         let (win_w, _) = ctx.viewport_grid(app)
-            .map(|g| (g.win_w, g.win_h))
-            .unwrap_or((1280.0, 720.0));
-        let layout_label = match ctx.viewport_grid(app).map(|g| g.layout) {
-            Some(ViewportLayout::Single)       => "Single",
-            Some(ViewportLayout::TwoColumns)   => "2 Col",
-            Some(ViewportLayout::TwoRows)      => "2 Row",
-            Some(ViewportLayout::FourQuadrant) | None => "4-Quad",
-        };
-        let tm_label = match self.world.tonemap_op {
-            1 => "TM: Rh",
-            2 => "TM: ACES",
-            _ => "TM: Lin",
-        };
-        let fps_label = format!("FPS:{:.0}", self.fps_display);
-        let t_col = if self.gizmo_mode == GizmoMode::Translate { [80,160,80,255u8] } else { [60,60,70,255] };
-        let r_col = if self.gizmo_mode == GizmoMode::Rotate    { [80,160,80,255u8] } else { [60,60,70,255] };
-        let s_col = if self.gizmo_mode == GizmoMode::Scale     { [80,160,80,255u8] } else { [60,60,70,255] };
-        let sp_col = if self.gizmo_space == GizmoSpace::Local  { [100,100,200,255u8] } else { [60,60,70,255] };
+            .map(|g| (g.win_w, g.win_h)).unwrap_or((1280.0, 720.0));
         let input = self.ui_input();
 
-        // Build draw list — mutable borrow of self.world ends at end of block.
-        let (layout_clicked, frame_all_clicked, spawn_clicked, tonemap_clicked) = {
-            let rect = Rect { x: 0.0, y: 0.0, w: win_w, h: 36.0 };
-            let dl   = &mut self.world.ui.draw_list;
-            dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0, 0.0, 1.0, 1.0], [30, 30, 35, 255]);
+        // Sync retained widget state → EditorApp fields
+        if let Some(wh) = self.toolbar_grid_wh {
+            if let Some(Widget::Checkbox(cb)) = self.world.ui.widgets.get(wh) {
+                self.grid_enabled = cb.checked;
+            }
+        }
+        if let Some(wh) = self.toolbar_gizmo_wh {
+            if let Some(Widget::Dropdown(dd)) = self.world.ui.widgets.get(wh) {
+                self.gizmo_mode = match dd.selected {
+                    1 => GizmoMode::Rotate,
+                    2 => GizmoMode::Scale,
+                    _ => GizmoMode::Translate,
+                };
+            }
+        }
+        if let Some(wh) = self.toolbar_tonemap_wh {
+            if let Some(Widget::Dropdown(dd)) = self.world.ui.widgets.get(wh) {
+                self.world.tonemap_op = dd.selected;
+            }
+        }
 
-            let mut ui = Ui::with_input(dl, Rect { x: 4.0, y: 4.0, w: win_w - 8.0, h: 28.0 }, input);
-            let layout_c  = ui.button(layout_label);
-            ui.checkbox("Grid", &mut self.grid_enabled);
-            let frame_c   = ui.button("Frame All");
-            let spawn_c   = ui.button("+ Actor");
-            ui.draw.push_rect(ui.cursor[0],      ui.cursor[1], 26.0, 26.0, [0.0,0.0,1.0,1.0], t_col);
-            ui.draw.push_rect(ui.cursor[0]+28.0, ui.cursor[1], 26.0, 26.0, [0.0,0.0,1.0,1.0], r_col);
-            ui.draw.push_rect(ui.cursor[0]+56.0, ui.cursor[1], 26.0, 26.0, [0.0,0.0,1.0,1.0], s_col);
-            ui.cursor[0] += 90.0;
-            ui.draw.push_rect(ui.cursor[0], ui.cursor[1], 54.0, 26.0, [0.0,0.0,1.0,1.0], sp_col);
-            ui.cursor[0] += 60.0;
-            let tonemap_c = ui.button(tm_label);
-            ui.label(&fps_label);
-            (layout_c, frame_c, spawn_c, tonemap_c)
+        let layout_label = match ctx.viewport_grid(app).map(|g| g.layout) {
+            Some(ViewportLayout::Single)       => "Single",
+            Some(ViewportLayout::TwoColumns)   => "2Col",
+            Some(ViewportLayout::TwoRows)      => "2Row",
+            _ => "4Q",
+        };
+        let t_col = if self.gizmo_mode == GizmoMode::Translate { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
+        let r_col = if self.gizmo_mode == GizmoMode::Rotate    { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
+        let s_col = if self.gizmo_mode == GizmoMode::Scale     { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
+
+        let tm_label = match self.world.tonemap_op {
+            1 => "Rh",
+            2 => "ACES",
+            _ => "Lin",
+        };
+        let fps_str = format!("{:.0}fps", self.fps_display);
+        let grid_enabled_ref = &mut self.grid_enabled;
+
+        let (layout_clicked, frame_clicked, spawn_clicked, tonemap_clicked) = {
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_panel_bg(0.0, 0.0, win_w, TOOLBAR_H, TOOLBAR_BG);
+            dl.push_hsep(0.0, TOOLBAR_H, win_w, SEP);
+
+            let mut ui = Ui::with_input(dl,
+                Rect { x: 4.0, y: 4.0, w: win_w - 8.0, h: TOOLBAR_H - 4.0 }, input.clone());
+
+            let lc = ui.button(layout_label);
+            ui.checkbox("Grid", grid_enabled_ref);
+            let fc = ui.button("Frame");
+            let sc = ui.button("+Actor");
+
+            // Gizmo mode indicator tiles
+            ui.draw.push_rect(ui.cursor[0],       ui.cursor[1], 22.0, 20.0, [0.0,0.0,1.0,1.0], t_col);
+            ui.draw.push_rect(ui.cursor[0]+24.0,  ui.cursor[1], 22.0, 20.0, [0.0,0.0,1.0,1.0], r_col);
+            ui.draw.push_rect(ui.cursor[0]+48.0,  ui.cursor[1], 22.0, 20.0, [0.0,0.0,1.0,1.0], s_col);
+            ui.cursor[0] += 76.0;
+
+            let tc = ui.button(tm_label);
+            ui.label(&fps_str);
+
+            (lc, fc, sc, tc)
         };
 
-        // Act on button clicks now that the draw_list borrow is released.
+        // Sync grid_enabled back to retained checkbox widget
+        if let Some(wh) = self.toolbar_grid_wh {
+            if let Some(Widget::Checkbox(cb)) = self.world.ui.widgets.get_mut(wh) {
+                cb.checked = self.grid_enabled;
+            }
+        }
+
         if layout_clicked {
             if let Some(grid) = ctx.viewport_grid_mut(app) {
                 let next = grid.layout.next();
                 grid.set_layout(next, &[]);
             }
         }
-        if frame_all_clicked {
+        if frame_clicked {
             if let Some(aabb) = ctx.gltf_union_aabb_for_world(&self.world) {
                 ctx.fit_all_panes_to_aabb(app, &aabb);
             }
         }
-        if spawn_clicked {
-            self.spawn_menu_open = !self.spawn_menu_open;
-        }
-        if tonemap_clicked {
-            self.world.tonemap_op = (self.world.tonemap_op + 1) % 3;
-        }
+        if spawn_clicked  { self.spawn_menu_open = !self.spawn_menu_open; }
+        if tonemap_clicked { self.world.tonemap_op = (self.world.tonemap_op + 1) % 3; }
 
+        // Spawn dropdown menu
         if self.spawn_menu_open {
-            let ox = 200.0_f32;
-            let oy = 36.0_f32;
-            let click_x = self.ui_cursor[0];
-            let click_y = self.ui_cursor[1];
-            let just_clicked = self.ui_left_just_pressed;
+            let ox = 200.0_f32; let oy = TOOLBAR_H;
             let entries: &[&str] = &[
-                "Mesh Actor…", "Light: Point", "Light: Spot", "Light: Directional",
-                "Camera", "Empty", "Trigger Volume", "Audio Emitter",
+                "Mesh Actor...", "Light: Point", "Light: Spot", "Light: Dir",
+                "Camera", "Empty", "Trigger", "Audio Emitter",
             ];
             let mut chosen: Option<usize> = None;
+            let cx = self.ui_cursor[0]; let cy = self.ui_cursor[1];
+            let jp = self.ui_left_just_pressed;
             {
                 let dl = &mut self.world.ui.draw_list;
-                dl.push_rect(ox, oy, 160.0, 200.0, [0.0,0.0,1.0,1.0], [25, 25, 35, 245]);
-                for (i, _label) in entries.iter().enumerate() {
-                    let item_y = oy + i as f32 * 24.0 + 4.0;
-                    let hovered = click_x >= ox + 4.0 && click_x < ox + 156.0
-                                && click_y >= item_y && click_y < item_y + 20.0;
-                    let bg = if hovered { [70, 70, 100, 255] } else { [45, 45, 60, 255] };
-                    dl.push_rect(ox + 4.0, item_y, 152.0, 20.0, [0.0,0.0,1.0,1.0], bg);
-                    if hovered && just_clicked { chosen = Some(i); }
+                let menu_h = entries.len() as f32 * 24.0 + 8.0;
+                dl.push_panel_bg(ox, oy, 168.0, menu_h, [26, 26, 36, 248]);
+                dl.push_line(ox,       oy,           ox+168.0, oy,            1.0, SEP);
+                dl.push_line(ox+168.0, oy,           ox+168.0, oy + menu_h,   1.0, SEP);
+                dl.push_line(ox,       oy + menu_h,  ox+168.0, oy + menu_h,   1.0, SEP);
+                for (i, _) in entries.iter().enumerate() {
+                    let iy = oy + i as f32 * 24.0 + 4.0;
+                    let hov = cx >= ox+4.0 && cx < ox+164.0 && cy >= iy && cy < iy+20.0;
+                    let bg  = if hov { [70, 70, 105, 255] } else { [42, 42, 58, 255] };
+                    dl.push_rect(ox+4.0, iy, 160.0, 20.0, [0.0,0.0,1.0,1.0], bg);
+                    if hov && jp { chosen = Some(i); }
                 }
             }
             if let Some(idx) = chosen {
@@ -529,39 +641,69 @@ impl EditorApp {
             }
         }
     }
-
 }
 
 // ── Outliner ───────────────────────────────────────────────────────────────
 
 impl EditorApp {
     fn draw_outliner(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
-        use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
+        let (_, win_h) = ctx.viewport_grid(app)
+            .map(|g| (g.win_w, g.win_h)).unwrap_or((1280.0, 720.0));
+        let panel_h = win_h - TOOLBAR_H;
+        let x = 0.0_f32;
+        let y = TOOLBAR_H;
+        let content_y = y + TITLEBAR_H + 2.0;
+        let content_h = panel_h - TITLEBAR_H - 2.0;
+        let row_h     = 22.0_f32;
+        let input     = self.ui_input();
 
-        let (win_w, win_h) = ctx.viewport_grid(app)
-            .map(|g| (g.win_w, g.win_h))
-            .unwrap_or((1280.0, 720.0));
-        let panel_w = 280.0_f32;
-        let panel_h = win_h * 0.45;
-        let rect = Rect { x: win_w - panel_w, y: 36.0, w: panel_w, h: panel_h };
-        let dl   = &mut self.world.ui.draw_list;
+        // Collect actor rows before taking draw_list borrow.
+        // Each row: (handle, icon_color, is_selected, hovered, clicked)
+        let mut rows: ThinVec<(ActorHandle, [u8; 4], bool, bool, bool)> = ThinVec::new();
+        let mut clicked_ah: Option<ActorHandle> = None;
+        if let Some((lh, sh)) = self.main_stage {
+            if let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) {
+                let max_scroll = (stage.actors.len() as f32 * row_h - content_h).max(0.0);
+                self.outliner_scroll_y = self.outliner_scroll_y.clamp(0.0, max_scroll);
+                let mut row_y = content_y - self.outliner_scroll_y;
+                for (ah, actor) in stage.actors.entries() {
+                    if row_y + row_h < content_y { row_y += row_h; continue; }
+                    if row_y > y + panel_h       { break; }
+                    let is_sel  = self.world.selection == Some(ah);
+                    let hovered = input.cursor[0] >= x && input.cursor[0] < x + OUTLINER_W
+                               && input.cursor[1] >= row_y && input.cursor[1] < row_y + row_h;
+                    let clicked = hovered && input.left_just_pressed;
+                    if clicked { clicked_ah = Some(ah); }
+                    rows.push((ah, actor_icon_color(actor), is_sel, hovered, clicked));
+                    row_y += row_h;
+                }
+            }
+        }
+        if let Some(ah) = clicked_ah { self.world.selection = Some(ah); }
 
-        dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0,0.0,1.0,1.0], [22, 22, 28, 240]);
-        dl.push_rect(rect.x, rect.y, rect.w, 22.0, [0.0,0.0,1.0,1.0], [35, 35, 50, 255]);
+        // Now borrow draw_list and render.
+        let dl = &mut self.world.ui.draw_list;
+        dl.push_panel_bg(x, y, OUTLINER_W, panel_h, PANEL_BG);
+        dl.push_title_bar(x, y, OUTLINER_W, TITLEBAR_H, TITLEBAR_BG, SEP);
+        dl.push_vsep(x + OUTLINER_W, y, panel_h, SEP);
 
-        let Some((lh, sh)) = self.main_stage else { return };
-        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else { return };
+        let mut row_y = content_y;
+        if let Some((lh, sh)) = self.main_stage {
+            if let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) {
+                row_y -= self.outliner_scroll_y;
+                let _ = stage; // borrow ends before we iterate rows below
+            }
+        }
 
-        let mut row_y = rect.y + 26.0;
-        let row_h     = 22.0;
-
-        for (ah, actor) in stage.actors.entries() {
-            if row_y + row_h > rect.y + rect.h { break; }
-            let is_selected = self.world.selection == Some(ah);
-            let bg = if is_selected { [60, 100, 160, 255] } else { [30, 30, 38, 255] };
-            dl.push_rect(rect.x + 2.0, row_y, rect.w - 4.0, row_h - 2.0, [0.0,0.0,1.0,1.0], bg);
-            let icon_col = actor_icon_color(actor);
-            dl.push_rect(rect.x + 4.0, row_y + 4.0, 12.0, 12.0, [0.0,0.0,1.0,1.0], icon_col);
+        for (ah, icon_col, is_sel, hovered, _) in &rows {
+            let bg = if *is_sel        { [55, 95, 155, 255] }
+                     else if *hovered  { [38, 38, 52,  255] }
+                     else if (ah.idx & 1) == 0 { [26, 26, 33, 255] }
+                     else              { [24, 24, 30,  255] };
+            dl.push_rect(x, row_y, OUTLINER_W, row_h - 1.0, [0.0, 0.0, 1.0, 1.0], bg);
+            dl.push_rect(x + 6.0,  row_y + 5.0, 12.0, 12.0, [0.0, 0.0, 1.0, 1.0], *icon_col);
+            let nc: [u8; 4] = if *is_sel { [200, 220, 255, 200] } else { [155, 155, 175, 170] };
+            dl.push_rect(x + 24.0, row_y + 7.0, 140.0, 8.0, [0.0, 0.0, 1.0, 1.0], nc);
             row_y += row_h;
         }
     }
@@ -588,107 +730,130 @@ fn actor_icon_color(actor: &dumpster_fire_engine::resource_manager::manager::Act
 
 impl EditorApp {
     fn draw_inspector(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
-        use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
-        use dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui;
+        use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
 
         let (win_w, win_h) = ctx.viewport_grid(app)
-            .map(|g| (g.win_w, g.win_h))
-            .unwrap_or((1280.0, 720.0));
-        let Some((lh, sh)) = self.main_stage else { return };
-        let Some(ah) = self.world.selection else { return };
+            .map(|g| (g.win_w, g.win_h)).unwrap_or((1280.0, 720.0));
+        let panel_h = win_h - TOOLBAR_H;
+        let ix = win_w - INSPECTOR_W;
+        let iy = TOOLBAR_H;
 
-        let panel_w = 280.0_f32;
-        let panel_y = 36.0 + win_h * 0.45;
-        let panel_h = win_h - panel_y;
-        let rect    = Rect { x: win_w - panel_w, y: panel_y, w: panel_w, h: panel_h };
-
-        let dl = &mut self.world.ui.draw_list;
-        dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0,0.0,1.0,1.0], [22, 22, 28, 240]);
-        dl.push_rect(rect.x, rect.y, rect.w, 22.0, [0.0,0.0,1.0,1.0], [35, 35, 50, 255]);
-
-        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else { return };
-        let Some(actor) = stage.actors.get(ah) else { return };
-
-        let mut has_transform  = false;
-        let mut has_light      = false;
-        let mut has_camera     = false;
-        let mut is_env         = false;
-        let mut light_kind_tag: Option<u32> = None;
-
-        for se in actor.sub_entities.iter().flatten() {
-            match &se.actor_type {
-                ActorType::Environment(_) => { is_env = true; }
-                ActorType::Utility(_) => {
-                    if let Some(Component::Utility(uc)) = &se.components[ComponentType::Utility.index()] {
-                        if uc.light.is_some()  {
-                            has_light = true;
-                            light_kind_tag = uc.light.as_ref().map(|l| l.kind.tag());
-                        }
-                        if uc.camera.is_some() { has_camera = true; }
-                    }
-                }
-                _ => {}
-            }
-            has_transform = true;
-        }
-
-        let world_idx = ah.idx as usize;
-        let world_t   = stage.worlds.get(world_idx).copied().unwrap_or(Affine3A::IDENTITY);
-        let pos       = world_t.translation;
-
-        let input = dumpster_fire_engine::resource_manager::ui_manager::UiInputState {
-            cursor:             self.ui_cursor,
-            cursor_prev:        self.ui_cursor,
-            left_down:          self.ui_left_down,
-            left_just_pressed:  self.ui_left_just_pressed,
-            left_just_released: false,
-            right_down:         false,
-            mods:               Default::default(),
-            scroll:             [0.0, 0.0],
-            chars:              thin_vec::ThinVec::new(),
+        // Collect data before borrowing draw_list.
+        let input = self.ui_input();
+        let Some((lh, sh)) = self.main_stage else {
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
+            dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
+            dl.push_vsep(ix, iy, panel_h, SEP);
+            return;
         };
-        let mut ui = Ui::with_input(dl, Rect { x: rect.x + 4.0, y: rect.y + 26.0, w: rect.w - 8.0, h: rect.h - 30.0 }, input);
+        let Some(ah) = self.world.selection else {
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
+            dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
+            dl.push_vsep(ix, iy, panel_h, SEP);
+            return;
+        };
 
-        if has_transform {
-            ui.label("Transform");
+        let (pos, has_light, has_camera, is_env, light_kind_tag) = {
+            let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else {
+                let dl = &mut self.world.ui.draw_list;
+                dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
+                dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
+                dl.push_vsep(ix, iy, panel_h, SEP);
+                return;
+            };
+            let Some(actor) = stage.actors.get(ah) else {
+                let dl = &mut self.world.ui.draw_list;
+                dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
+                dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
+                dl.push_vsep(ix, iy, panel_h, SEP);
+                return;
+            };
+            let world_idx = ah.idx as usize;
+            let world_t   = stage.worlds.get(world_idx).copied().unwrap_or(Affine3A::IDENTITY);
+            let pos = world_t.translation;
+            let mut has_light      = false;
+            let mut has_camera     = false;
+            let mut is_env         = false;
+            let mut light_kind_tag: Option<u32> = None;
+            for se in actor.sub_entities.iter().flatten() {
+                match &se.actor_type {
+                    ActorType::Environment(_) => { is_env = true; }
+                    ActorType::Utility(_) => {
+                        if let Some(Component::Utility(uc)) = &se.components[ComponentType::Utility.index()] {
+                            if uc.light.is_some() {
+                                has_light = true;
+                                light_kind_tag = uc.light.as_ref().map(|l| l.kind.tag());
+                            }
+                            if uc.camera.is_some() { has_camera = true; }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (pos, has_light, has_camera, is_env, light_kind_tag)
+        };
+        let content_y = iy + TITLEBAR_H + 4.0;
+        let content_w = INSPECTOR_W - 8.0;
+        let dl = &mut self.world.ui.draw_list;
+        dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
+        dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
+        dl.push_vsep(ix, iy, panel_h, SEP);
+        let mut ui = Ui::with_input(dl,
+            Rect { x: ix + 4.0, y: content_y, w: content_w, h: panel_h - TITLEBAR_H - 8.0 },
+            input);
+
+        ui.section_header("TRANSFORM");
+        if ui.collapsible_header("Position", &mut self.insp_pos_collapsed) {
             let mut px = pos.x; let mut py = pos.y; let mut pz = pos.z;
-            ui.slider("X", &mut px, -100.0, 100.0);
-            ui.slider("Y", &mut py, -100.0, 100.0);
-            ui.slider("Z", &mut pz, -100.0, 100.0);
-            ui.separator();
+            ui.slider("X", &mut px, -500.0, 500.0);
+            ui.slider("Y", &mut py, -500.0, 500.0);
+            ui.slider("Z", &mut pz, -500.0, 500.0);
         }
+        if ui.collapsible_header("Rotation", &mut self.insp_rot_collapsed) {
+            let mut rx = 0.0_f32; let mut ry = 0.0_f32; let mut rz = 0.0_f32;
+            ui.slider("RX", &mut rx, -180.0, 180.0);
+            ui.slider("RY", &mut ry, -180.0, 180.0);
+            ui.slider("RZ", &mut rz, -180.0, 180.0);
+        }
+        if ui.collapsible_header("Scale", &mut self.insp_scl_collapsed) {
+            let mut sx = 1.0_f32; let mut sy = 1.0_f32; let mut sz = 1.0_f32;
+            ui.slider("SX", &mut sx, 0.01, 10.0);
+            ui.slider("SY", &mut sy, 0.01, 10.0);
+            ui.slider("SZ", &mut sz, 0.01, 10.0);
+        }
+        ui.separator();
 
         if is_env {
-            ui.label("Mesh");
-            ui.button("Replace…");
+            ui.section_header("MESH");
+            ui.button("Replace Asset...");
             ui.separator();
         }
-
         if has_light {
-            ui.label("Light");
+            ui.section_header("LIGHT");
             let kind_name = light_kind_name(light_kind_tag.unwrap_or(0) as u8);
             ui.label(kind_name);
             let mut intensity = 100.0_f32;
-            ui.slider("Intensity", &mut intensity, 0.0, 2000.0);
             let mut range = 0.0_f32;
-            ui.slider("Range", &mut range, 0.0, 100.0);
+            ui.slider("Intensity", &mut intensity, 0.0, 2000.0);
+            ui.slider("Range",     &mut range, 0.0, 100.0);
             ui.separator();
         }
-
         if has_camera {
-            ui.label("Camera");
-            let mut focal = 50.0_f32;
+            ui.section_header("CAMERA");
+            let mut focal = 50.0_f32; let mut fstop = 5.6_f32;
+            let mut iso = 100.0_f32;  let mut focus = 5.0_f32;
             ui.slider("Focal mm", &mut focal, 14.0, 300.0);
-            let mut fstop = 5.6_f32;
-            ui.slider("f-stop", &mut fstop, 1.0, 22.0);
-            let mut iso = 100.0_f32;
-            ui.slider("ISO", &mut iso, 50.0, 12800.0);
-            let mut focus = 5.0_f32;
-            ui.slider("Focus dist", &mut focus, 0.1, 50.0);
+            ui.slider("f-stop",   &mut fstop, 1.0,  22.0);
+            ui.slider("ISO",      &mut iso,   50.0, 12800.0);
+            ui.slider("Focus m",  &mut focus, 0.1,  50.0);
             ui.separator();
         }
 
-        ui.button("+ Add Component ▾");
+        if ui.collapsible_header("Components", &mut self.insp_cmp_collapsed) {
+            ui.button("+ Add Component");
+        }
     }
 }
 
@@ -712,52 +877,46 @@ fn light_kind_name(tag: u8) -> &'static str {
 
 impl EditorApp {
     fn draw_file_picker(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
-        use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
-        use dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui;
+        use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
 
         let (win_w, win_h) = ctx.viewport_grid(app)
-            .map(|g| (g.win_w, g.win_h))
-            .unwrap_or((1280.0, 720.0));
-        let pw = 480.0_f32;
-        let ph = 360.0_f32;
-        let rect = Rect {
-            x: (win_w - pw) * 0.5,
-            y: (win_h - ph) * 0.5,
-            w: pw, h: ph,
-        };
+            .map(|g| (g.win_w, g.win_h)).unwrap_or((1280.0, 720.0));
+        let pw = 480.0_f32; let ph = 380.0_f32;
+        let rx = (win_w - pw) * 0.5; let ry = (win_h - ph) * 0.5;
+        let input = self.ui_input();
 
-        let dl = &mut self.world.ui.draw_list;
-        dl.push_rect(0.0, 0.0, win_w, win_h, [0.0,0.0,1.0,1.0], [0, 0, 0, 140]);
-        dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0,0.0,1.0,1.0], [28, 28, 36, 255]);
-        dl.push_rect(rect.x, rect.y, rect.w, 28.0, [0.0,0.0,1.0,1.0], [40, 40, 60, 255]);
-
-        // Collect matching paths before borrowing draw list.
         let filter_lower: Arc<str> = Arc::from(self.picker_filter.to_lowercase().as_str());
         let filtered: ThinVec<Arc<str>> = self.picker_paths.iter()
             .filter(|p| filter_lower.is_empty() || p.to_lowercase().contains(filter_lower.as_ref()))
-            .take(10)
-            .cloned()
-            .collect();
+            .take(12).cloned().collect();
 
         let mut load_path: Option<Arc<str>> = None;
         let mut cancel = false;
-        let input = self.ui_input();
 
         {
-            let dl2 = &mut self.world.ui.draw_list;
-            let mut ui = Ui::with_input(dl2, Rect { x: rect.x + 4.0, y: rect.y + 32.0, w: rect.w - 8.0, h: ph - 60.0 }, input.clone());
-            ui.label("Select .glb file");
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_rect(0.0, 0.0, win_w, win_h, [0.0,0.0,1.0,1.0], [0, 0, 0, 145]);
+            dl.push_panel_bg(rx, ry, pw, ph, [28, 28, 38, 255]);
+            dl.push_title_bar(rx, ry, pw, TITLEBAR_H, [40, 40, 58, 255], SEP);
+            dl.push_line(rx,      ry,      rx+pw, ry,      1.5, [78, 78, 100, 255]);
+            dl.push_line(rx,      ry+ph,   rx+pw, ry+ph,   1.5, [78, 78, 100, 255]);
+            dl.push_line(rx,      ry,      rx,    ry+ph,   1.5, [78, 78, 100, 255]);
+            dl.push_line(rx+pw,   ry,      rx+pw, ry+ph,   1.5, [78, 78, 100, 255]);
 
+            let mut ui = Ui::with_input(dl,
+                Rect { x: rx+4.0, y: ry+TITLEBAR_H+4.0,
+                       w: pw-8.0, h: ph-TITLEBAR_H-36.0 },
+                input.clone());
+            ui.label("Select .glb file");
             for path in &filtered {
                 let name = path.rsplit('/').next().unwrap_or(path.as_ref());
                 let name = name.rsplit('\\').next().unwrap_or(name);
-                if ui.button(name) {
-                    load_path = Some(Arc::clone(path));
-                }
+                if ui.button(name) { load_path = Some(Arc::clone(path)); }
             }
 
-            let footer = Rect { x: rect.x + 4.0, y: rect.y + ph - 32.0, w: rect.w - 8.0, h: 28.0 };
-            let mut u2 = Ui::with_input(dl2, footer, input);
+            let mut u2 = Ui::with_input(dl,
+                Rect { x: rx+4.0, y: ry+ph-30.0, w: pw-8.0, h: 26.0 },
+                input);
             if u2.button("Cancel") { cancel = true; }
         }
 
@@ -776,8 +935,6 @@ impl EditorApp {
 // ── TRS gizmo drag math ───────────────────────────────────────────────────
 
 impl EditorApp {
-    /// Hit-test the three axis arrows of the currently rendered gizmo.
-    /// Returns a GizmoDrag if the cursor is within 10 px of an arrow.
     fn start_gizmo_drag(&self, ctx: &AppCtx<'_>, app: AppHandle) -> Option<GizmoDrag> {
         let ah = self.world.selection?;
         let (lh, sh) = self.main_stage?;
@@ -810,17 +967,40 @@ impl EditorApp {
         let origin_s = project(center)?;
         let cursor = self.ui_cursor;
 
-        let axes = [Vec3::X, Vec3::Y, Vec3::Z];
         let mut best: Option<(u8, [f32; 2])> = None;
-        let mut best_dist = 12.0_f32;
-        for (i, axis) in axes.iter().enumerate() {
-            let tip = project(center + *axis * len)?;
-            let dist = point_to_segment(cursor, origin_s, tip);
-            if dist < best_dist {
-                best_dist = dist;
-                best = Some((i as u8, [tip[0] - origin_s[0], tip[1] - origin_s[1]]));
+        let mut best_dist = 22.0_f32;
+
+        if matches!(self.gizmo_mode, GizmoMode::Rotate) {
+            // Hit-test ring circles: sample 32 points on each projected ring.
+            let ring_bases: [(Vec3, Vec3, u8); 3] = [
+                (Vec3::Y, Vec3::Z, 0),
+                (Vec3::X, Vec3::Z, 1),
+                (Vec3::X, Vec3::Y, 2),
+            ];
+            for (u, v, axis_i) in ring_bases {
+                for j in 0..32usize {
+                    let t = (j as f32) / 32.0 * std::f32::consts::TAU;
+                    let p = center + (u * t.cos() + v * t.sin()) * len;
+                    let Some(s) = project(p) else { continue };
+                    let dist = ((s[0] - cursor[0]).powi(2) + (s[1] - cursor[1]).powi(2)).sqrt();
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best = Some((axis_i, [1.0, 0.0]));
+                    }
+                }
+            }
+        } else {
+            // Hit-test axis arrow lines for Translate/Scale.
+            for (i, axis) in [Vec3::X, Vec3::Y, Vec3::Z].iter().enumerate() {
+                let Some(tip) = project(center + *axis * len) else { continue };
+                let dist = point_to_segment(cursor, origin_s, tip);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best = Some((i as u8, [tip[0] - origin_s[0], tip[1] - origin_s[1]]));
+                }
             }
         }
+
         let (axis_i, arrow_screen) = best?;
         Some(GizmoDrag {
             actor:           ah,
@@ -831,46 +1011,46 @@ impl EditorApp {
             start_cursor:    cursor,
             arrow_screen,
             arrow_world_len: len,
+            ring_origin:     origin_s,
         })
     }
 
-    /// Apply per-frame delta from cursor motion to the dragged actor.
     fn apply_gizmo_drag(&mut self) {
         let Some(drag) = self.gizmo_drag else { return };
         let Some((lh, sh)) = self.main_stage else { return };
-        let dx = self.ui_cursor[0] - drag.start_cursor[0];
-        let dy = self.ui_cursor[1] - drag.start_cursor[1];
-        let arrow_len_sq = drag.arrow_screen[0].powi(2) + drag.arrow_screen[1].powi(2);
-        if arrow_len_sq < 1.0 { return; }
-        // Scalar projection of mouse delta onto the screen-space arrow:
-        // t = (dot(delta, arrow)) / |arrow|² → unitless [-N..+N]
-        let t = (dx * drag.arrow_screen[0] + dy * drag.arrow_screen[1]) / arrow_len_sq;
+        let cursor = self.ui_cursor;
+        let dx = cursor[0] - drag.start_cursor[0];
+        let dy = cursor[1] - drag.start_cursor[1];
         let axis = match drag.axis { 0 => Vec3::X, 1 => Vec3::Y, _ => Vec3::Z };
+
         let new_local = match drag.mode {
             GizmoMode::Translate => {
+                let arrow_len_sq = drag.arrow_screen[0].powi(2) + drag.arrow_screen[1].powi(2);
+                if arrow_len_sq < 1.0 { return; }
+                let t = (dx * drag.arrow_screen[0] + dy * drag.arrow_screen[1]) / arrow_len_sq;
                 let world_delta = axis * (t * drag.arrow_world_len);
                 let mut nl = drag.start_local;
                 nl.translation += glam::Vec3A::from(world_delta);
                 nl
             }
             GizmoMode::Scale => {
-                // 1.0 + t scales the chosen axis basis vector. Clamp at 0.01
-                // so the matrix can't collapse.
+                let arrow_len_sq = drag.arrow_screen[0].powi(2) + drag.arrow_screen[1].powi(2);
+                if arrow_len_sq < 1.0 { return; }
+                let t = (dx * drag.arrow_screen[0] + dy * drag.arrow_screen[1]) / arrow_len_sq;
                 let factor = (1.0 + t).max(0.01);
                 let mut nl = drag.start_local;
-                let mut col = nl.matrix3.col(drag.axis as usize);
-                col *= factor / col.length().max(1e-5) * (col.length() * factor);
-                // Simpler: rebuild via diagonal scale of the chosen axis.
                 let mut scale_vec = Vec3::ONE;
                 scale_vec[drag.axis as usize] = factor;
                 nl.matrix3 = drag.start_local.matrix3 * glam::Mat3A::from_diagonal(scale_vec);
-                let _ = col;
                 nl
             }
             GizmoMode::Rotate => {
-                // Rotate around the chosen world axis by an angle proportional
-                // to the cursor's tangential travel.
-                let angle = t * std::f32::consts::PI;
+                // Atan2-based: angle = difference of cursor-angle around ring center.
+                let cx = drag.ring_origin[0];
+                let cy = drag.ring_origin[1];
+                let start_a = (drag.start_cursor[1] - cy).atan2(drag.start_cursor[0] - cx);
+                let cur_a   = (cursor[1] - cy).atan2(cursor[0] - cx);
+                let angle = cur_a - start_a;
                 let rot = glam::Quat::from_axis_angle(axis, angle);
                 let mut nl = drag.start_local;
                 nl.matrix3 = glam::Mat3A::from_quat(rot) * drag.start_local.matrix3;
@@ -881,7 +1061,6 @@ impl EditorApp {
     }
 }
 
-/// Perpendicular distance from a 2D point to a line segment.
 fn point_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let dx = b[0] - a[0];
     let dy = b[1] - a[1];
@@ -895,7 +1074,7 @@ fn point_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt()
 }
 
-// ── TRS gizmo (rendered in 2D screen space projected from focused pane) ───
+// ── TRS gizmo rendering ────────────────────────────────────────────────────
 
 impl EditorApp {
     fn draw_trs_gizmo(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
@@ -916,14 +1095,11 @@ impl EditorApp {
         let aspect = vp.rect.pixel_aspect(win_w, win_h);
         let vp_mat = Mat4::from_cols_array(&cam.view_projection_matrix(aspect));
 
-        // Compute pane pixel rect for NDC → screen conversion.
         let pane_x = vp.rect.x * win_w;
         let pane_y = vp.rect.y * win_h;
         let pane_w = vp.rect.w * win_w;
         let pane_h = vp.rect.h * win_h;
 
-        // Project a world point into pane-screen pixels. Returns None when
-        // the point is behind the near plane.
         let project = |p: Vec3| -> Option<[f32; 2]> {
             let clip = vp_mat * Vec4::new(p.x, p.y, p.z, 1.0);
             if clip.w <= 1e-5 { return None; }
@@ -934,7 +1110,6 @@ impl EditorApp {
             Some([sx, sy])
         };
 
-        // Constant-screen-size by tying world length to camera distance.
         let cam_pos = Vec3::from_array(cam.position);
         let dist = (cam_pos - center).length().max(0.5);
         let len  = 0.15 * dist;
@@ -953,27 +1128,22 @@ impl EditorApp {
                 for (axis, color) in axes {
                     let tip_world = center + axis * len;
                     if let Some(tip_s) = project(tip_world) {
-                        dl.push_line(origin_s[0], origin_s[1], tip_s[0], tip_s[1], 2.5, color);
-                        // Tip glyph: small box for both translate (arrowhead
-                        // stand-in) and scale.
-                        let sz = 8.0_f32;
+                        dl.push_line(origin_s[0], origin_s[1], tip_s[0], tip_s[1], 4.0, color);
+                        let sz = 14.0_f32;
                         dl.push_rect(tip_s[0] - sz * 0.5, tip_s[1] - sz * 0.5,
                                      sz, sz, [0.0, 0.0, 1.0, 1.0], color);
                     }
                 }
-                // Central yellow free-move / uniform-scale handle.
-                let sz = 10.0_f32;
+                let sz = 14.0_f32;
                 dl.push_rect(origin_s[0] - sz * 0.5, origin_s[1] - sz * 0.5,
                              sz, sz, [0.0, 0.0, 1.0, 1.0], [230, 220, 70, 255]);
             }
             GizmoMode::Rotate => {
-                // Three rings: one perpendicular to each axis. Sample 32
-                // points; project each; connect with line segments.
                 const N: usize = 32;
                 let basis = [
-                    (Vec3::Y, Vec3::Z, [220,  60,  60, 255]), // ring ⟂ X
-                    (Vec3::X, Vec3::Z, [ 70, 200,  70, 255]), // ring ⟂ Y
-                    (Vec3::X, Vec3::Y, [ 70, 100, 220, 255]), // ring ⟂ Z
+                    (Vec3::Y, Vec3::Z, [220,  60,  60, 255u8]),
+                    (Vec3::X, Vec3::Z, [ 70, 200,  70, 255]),
+                    (Vec3::X, Vec3::Y, [ 70, 100, 220, 255]),
                 ];
                 for (u, v, color) in basis {
                     let mut prev: Option<[f32; 2]> = None;
@@ -983,7 +1153,7 @@ impl EditorApp {
                         let p = center + (u * t.cos() + v * t.sin()) * len;
                         if let Some(s) = project(p) {
                             if let Some(prev_s) = prev {
-                                dl.push_line(prev_s[0], prev_s[1], s[0], s[1], 1.8, color);
+                                dl.push_line(prev_s[0], prev_s[1], s[0], s[1], 3.5, color);
                             }
                             if first.is_none() { first = Some(s); }
                             prev = Some(s);
@@ -991,8 +1161,7 @@ impl EditorApp {
                     }
                     let _ = first;
                 }
-                // Center screen-space rotation circle (yellow dot).
-                let sz = 8.0_f32;
+                let sz = 12.0_f32;
                 dl.push_rect(origin_s[0] - sz * 0.5, origin_s[1] - sz * 0.5,
                              sz, sz, [0.0, 0.0, 1.0, 1.0], [230, 220, 70, 255]);
             }
@@ -1055,6 +1224,11 @@ fn main() -> ForgeResult<()> {
         picker_filter:      Arc::from(""),
         picker_paths:       ThinVec::new(),
         outliner_filter:    Arc::from(""),
+        outliner_scroll_y:  0.0,
+        insp_pos_collapsed: false,
+        insp_rot_collapsed: false,
+        insp_scl_collapsed: false,
+        insp_cmp_collapsed: true,
         frame_time_accum:   0.0,
         frame_count_accum:  0,
         fps_display:        0.0,
@@ -1062,6 +1236,13 @@ fn main() -> ForgeResult<()> {
         ui_left_down:       false,
         ui_left_just_pressed: false,
         ui_consumed_click:  false,
+        ui_initialized:     false,
+        toolbar_ph:         None,
+        outliner_ph:        None,
+        inspector_ph:       None,
+        toolbar_grid_wh:    None,
+        toolbar_gizmo_wh:   None,
+        toolbar_tonemap_wh: None,
         gizmo_drag:         None,
     }).run()
 }

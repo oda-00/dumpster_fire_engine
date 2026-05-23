@@ -34,6 +34,24 @@ impl DrawList {
         self.indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
     }
 
+    pub fn push_panel_bg(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
+        self.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], color);
+    }
+
+    pub fn push_title_bar(&mut self, x: f32, y: f32, w: f32, h: f32,
+                           bg: [u8; 4], sep: [u8; 4]) {
+        self.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], bg);
+        self.push_line(x, y + h, x + w, y + h, 1.0, sep);
+    }
+
+    pub fn push_vsep(&mut self, x: f32, y: f32, h: f32, color: [u8; 4]) {
+        self.push_line(x, y, x, y + h, 1.5, color);
+    }
+
+    pub fn push_hsep(&mut self, x: f32, y: f32, w: f32, color: [u8; 4]) {
+        self.push_line(x, y, x + w, y, 1.5, color);
+    }
+
     /// Push an arbitrary-angle line segment as a rotated thin quad.
     /// `thickness` is the perpendicular width in pixels.
     pub fn push_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, thickness: f32, color: [u8; 4]) {

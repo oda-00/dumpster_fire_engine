@@ -61,6 +61,8 @@ pub struct UiRender {
     /// Vertex / index count uploaded for each frame slot.
     pub vert_counts:     [u32; FRAMES_IN_FLIGHT],
     pub idx_counts:      [u32; FRAMES_IN_FLIGHT],
+    /// True once the lazy UNDEFINED→SHADER_READ_ONLY_OPTIMAL barrier has fired.
+    pub font_transitioned: bool,
 }
 
 pub struct OverlayPipeline {
@@ -377,7 +379,7 @@ impl OverlayPipeline {
     /// `COLOR_ATTACHMENT_OPTIMAL`. After return, the swapchain image is
     /// in `PRESENT_SRC_KHR` layout. `frame` selects the per-FIF UI buffer.
     pub unsafe fn record(
-        &self,
+        &mut self,
         device:        &ash::Device,
         cmd:           vk::CommandBuffer,
         image_index:   u32,
@@ -440,6 +442,28 @@ impl OverlayPipeline {
             );
             device.cmd_draw(cmd, 3, 1, 0, 0);
             device.cmd_end_render_pass(cmd);
+
+            // Lazy-once: transition font image UNDEFINED → SHADER_READ_ONLY_OPTIMAL
+            // on the first frame so the fragment shader can sample it safely.
+            if !self.ui.font_transitioned {
+                let barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .src_access_mask(vk::AccessFlags2::empty())
+                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image(self.ui.font_image.handle)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0, level_count: 1,
+                        base_array_layer: 0, layer_count: 1,
+                    });
+                let barriers = [barrier];
+                let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+                device.cmd_pipeline_barrier2(cmd, &dep);
+                self.ui.font_transitioned = true;
+            }
 
             // Overlay pass (LOAD_OP_LOAD on swapchain). Caller can record UI
             // / debug-lines draws between begin and end via the public
@@ -758,6 +782,7 @@ fn build_ui_render(
         vbs, ibs,
         vert_counts: [0; FRAMES_IN_FLIGHT],
         idx_counts:  [0; FRAMES_IN_FLIGHT],
+        font_transitioned: false,
     })
 }
 

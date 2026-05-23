@@ -1,3 +1,5 @@
+use super::button::{ButtonData, ButtonState};
+use super::checkbox::CheckboxData;
 use super::draw::DrawList;
 use super::input::UiInputState;
 use super::layout::Rect;
@@ -46,7 +48,25 @@ impl<'a> Ui<'a> {
         let clicked = hovered && self.input.left_just_pressed;
         let color = if clicked { [120, 150, 200, 255] }
                     else if hovered { [100, 100, 150, 255] }
-                    else { [80, 80, 120, 255] };
+                    else { [70, 70, 105, 255] };
+        self.draw.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], color);
+        self.cursor[1] += 26.0;
+        clicked
+    }
+
+    /// Button that reads hover/pressed state from retained `ButtonData` and
+    /// writes `last_rect` so `Widget::tick` can update state next frame.
+    pub fn button_retained(&mut self, _text: &str, data: &mut ButtonData) -> bool {
+        let x = self.cursor[0]; let y = self.cursor[1];
+        let w = self.width; let h = 24.0_f32;
+        data.last_rect = Rect { x, y, w, h };
+        let hovered = self.hovered(x, y, w, h);
+        let clicked = hovered && self.input.left_just_pressed;
+        let color = match data.state {
+            ButtonState::Pressed => [120, 150, 200, 255],
+            ButtonState::Hovered => [100, 100, 155, 255],
+            ButtonState::Idle    => [70,  70,  105, 255],
+        };
         self.draw.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], color);
         self.cursor[1] += 26.0;
         clicked
@@ -70,8 +90,8 @@ impl<'a> Ui<'a> {
             }
         }
         let t = ((*value - min) / (max - min).max(1e-5)).clamp(0.0, 1.0);
-        self.draw.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], [60, 60, 60, 255]);
-        self.draw.push_rect(x, y, w * t, h, [0.0, 0.0, 1.0, 1.0], [80, 140, 200, 255]);
+        self.draw.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], [50, 50, 60, 255]);
+        self.draw.push_rect(x, y, w * t, h, [0.0, 0.0, 1.0, 1.0], [70, 130, 195, 255]);
         self.cursor[1] += 20.0;
         changed
     }
@@ -90,8 +110,44 @@ impl<'a> Ui<'a> {
         clicked
     }
 
+    /// Checkbox that reads/writes retained `CheckboxData` and sets `last_rect`.
+    pub fn checkbox_retained(&mut self, _label: &str, data: &mut CheckboxData) -> bool {
+        let x = self.cursor[0]; let y = self.cursor[1]; let sz = 16.0_f32;
+        data.last_rect = Rect { x, y, w: sz, h: sz };
+        let color = if data.checked { [80, 200, 80, 255] } else { [80, 80, 80, 255] };
+        self.draw.push_rect(x, y, sz, sz, [0.0, 0.0, 1.0, 1.0], color);
+        self.cursor[1] += 20.0;
+        data.checked
+    }
+
     pub fn separator(&mut self) -> &mut Self {
         self.cursor[1] += 4.0;
         self
+    }
+
+    /// Section header bar with bottom separator line.
+    pub fn section_header(&mut self, _text: &str) -> &mut Self {
+        let x = self.cursor[0]; let y = self.cursor[1];
+        self.draw.push_rect(x, y, self.width, 18.0, [0.0, 0.0, 1.0, 1.0], [42, 42, 54, 255]);
+        self.draw.push_line(x, y + 18.0, x + self.width, y + 18.0, 1.0, [68, 68, 84, 255]);
+        self.cursor[1] += 20.0;
+        self
+    }
+
+    /// Collapsible header — returns true when section is expanded (not collapsed).
+    /// Toggles `*collapsed` on click.
+    pub fn collapsible_header(&mut self, _text: &str, collapsed: &mut bool) -> bool {
+        let x = self.cursor[0]; let y = self.cursor[1];
+        let w = self.width; let h = 18.0_f32;
+        if self.hovered(x, y, w, h) && self.input.left_just_pressed {
+            *collapsed = !*collapsed;
+        }
+        let bg = if self.hovered(x, y, w, h) { [52, 52, 66, 255] } else { [42, 42, 54, 255] };
+        self.draw.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], bg);
+        let arrow_col = if *collapsed { [110, 110, 130, 255] } else { [170, 170, 200, 255] };
+        self.draw.push_rect(x + 4.0, y + 5.0, 8.0, 8.0, [0.0, 0.0, 1.0, 1.0], arrow_col);
+        self.draw.push_line(x, y + h, x + w, y + h, 1.0, [68, 68, 84, 255]);
+        self.cursor[1] += 20.0;
+        !*collapsed
     }
 }
