@@ -1,4 +1,5 @@
 pub mod app;
+pub mod backend;
 pub mod blas;
 pub mod camera;
 pub mod debug_lines;
@@ -11,6 +12,8 @@ pub mod rt_pipeline;
 pub mod sky_hw;
 pub mod vulkan;
 pub mod window;
+#[cfg(feature = "wgpu-backend")]
+pub mod wgpu_surface;
 
 pub use app::*;
 pub use blas::*;

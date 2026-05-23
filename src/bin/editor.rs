@@ -507,32 +507,13 @@ impl AppLogic for EditorApp {
 
 impl EditorApp {
     fn draw_toolbar(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
-        use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
+        use dumpster_fire_engine::resource_manager::ui_manager::{
+            draw as uidraw, immediate::Ui, layout::Rect,
+        };
 
         let (win_w, _) = ctx.viewport_grid(app)
             .map(|g| (g.win_w, g.win_h)).unwrap_or((1280.0, 720.0));
         let input = self.ui_input();
-
-        // Sync retained widget state → EditorApp fields
-        if let Some(wh) = self.toolbar_grid_wh {
-            if let Some(Widget::Checkbox(cb)) = self.world.ui.widgets.get(wh) {
-                self.grid_enabled = cb.checked;
-            }
-        }
-        if let Some(wh) = self.toolbar_gizmo_wh {
-            if let Some(Widget::Dropdown(dd)) = self.world.ui.widgets.get(wh) {
-                self.gizmo_mode = match dd.selected {
-                    1 => GizmoMode::Rotate,
-                    2 => GizmoMode::Scale,
-                    _ => GizmoMode::Translate,
-                };
-            }
-        }
-        if let Some(wh) = self.toolbar_tonemap_wh {
-            if let Some(Widget::Dropdown(dd)) = self.world.ui.widgets.get(wh) {
-                self.world.tonemap_op = dd.selected;
-            }
-        }
 
         let layout_label = match ctx.viewport_grid(app).map(|g| g.layout) {
             Some(ViewportLayout::Single)       => "Single",
@@ -540,70 +521,93 @@ impl EditorApp {
             Some(ViewportLayout::TwoRows)      => "2Row",
             _ => "4Q",
         };
-        let t_col = if self.gizmo_mode == GizmoMode::Translate { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
-        let r_col = if self.gizmo_mode == GizmoMode::Rotate    { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
-        let s_col = if self.gizmo_mode == GizmoMode::Scale     { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
-
         let tm_label = match self.world.tonemap_op {
-            1 => "Rh",
+            1 => "Reinh",
             2 => "ACES",
             _ => "Lin",
         };
         let fps_str = format!("{:.0}fps", self.fps_display);
-        let grid_enabled_ref = &mut self.grid_enabled;
+        let gizmo_mode = self.gizmo_mode;
+        let mut grid_enabled = self.grid_enabled;
 
-        let (layout_clicked, frame_clicked, spawn_clicked, tonemap_clicked) = {
+        let t_col = if gizmo_mode == GizmoMode::Translate { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
+        let r_col = if gizmo_mode == GizmoMode::Rotate    { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
+        let s_col = if gizmo_mode == GizmoMode::Scale     { [70, 160, 80, 255u8] } else { [55, 55, 70, 255] };
+
+        let (lc, fc, sc, tc, tile_x, tile_y) = {
             let dl = &mut self.world.ui.draw_list;
             dl.push_panel_bg(0.0, 0.0, win_w, TOOLBAR_H, TOOLBAR_BG);
             dl.push_hsep(0.0, TOOLBAR_H, win_w, SEP);
 
+            // Horizontal toolbar — cursor advances on X axis
             let mut ui = Ui::with_input(dl,
                 Rect { x: 4.0, y: 4.0, w: win_w - 8.0, h: TOOLBAR_H - 4.0 }, input.clone());
 
-            let lc = ui.button(layout_label);
-            ui.checkbox("Grid", grid_enabled_ref);
-            let fc = ui.button("Frame");
-            let sc = ui.button("+Actor");
+            let lc = ui.hbutton(layout_label, 52.0);
+            ui.hcheckbox("Grid", &mut grid_enabled);
+            let fc = ui.hbutton("Frame", 48.0);
+            let sc = ui.hbutton("+Actor", 56.0);
+            ui.hgap(6.0);
 
-            // Gizmo mode indicator tiles
-            ui.draw.push_rect(ui.cursor[0],       ui.cursor[1], 22.0, 20.0, [0.0,0.0,1.0,1.0], t_col);
-            ui.draw.push_rect(ui.cursor[0]+24.0,  ui.cursor[1], 22.0, 20.0, [0.0,0.0,1.0,1.0], r_col);
-            ui.draw.push_rect(ui.cursor[0]+48.0,  ui.cursor[1], 22.0, 20.0, [0.0,0.0,1.0,1.0], s_col);
-            ui.cursor[0] += 76.0;
+            // Gizmo T / R / S tiles
+            let tile_x = ui.cursor[0];
+            let tile_y = ui.cursor[1];
+            ui.htile(22.0, 20.0, t_col);
+            ui.htile(22.0, 20.0, r_col);
+            ui.htile(22.0, 20.0, s_col);
+            // Labels on tiles
+            ui.draw.push_rect(tile_x +  2.0, tile_y + 2.0, 8.0, 16.0,
+                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('T'),
+                [210, 210, 220, 255]);
+            ui.draw.push_rect(tile_x + 24.0, tile_y + 2.0, 8.0, 16.0,
+                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('R'),
+                [210, 210, 220, 255]);
+            ui.draw.push_rect(tile_x + 46.0, tile_y + 2.0, 8.0, 16.0,
+                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('S'),
+                [210, 210, 220, 255]);
+            ui.hgap(6.0);
 
-            let tc = ui.button(tm_label);
-            ui.label(&fps_str);
+            let tc = ui.hbutton(tm_label, 48.0);
+            ui.hgap(8.0);
+            // FPS as inline text (no button chrome)
+            let fps_x = ui.cursor[0]; let fps_y = ui.cursor[1];
+            ui.text_at(fps_x, fps_y + 2.0, &fps_str, [130, 180, 130, 255]);
 
-            (lc, fc, sc, tc)
+            (lc, fc, sc, tc, tile_x, tile_y)
         };
 
-        // Sync grid_enabled back to retained checkbox widget
-        if let Some(wh) = self.toolbar_grid_wh {
-            if let Some(Widget::Checkbox(cb)) = self.world.ui.widgets.get_mut(wh) {
-                cb.checked = self.grid_enabled;
+        self.grid_enabled = grid_enabled;
+
+        // Gizmo tile click detection
+        if self.ui_left_just_pressed {
+            let cx = self.ui_cursor[0]; let cy = self.ui_cursor[1];
+            if cy >= tile_y && cy < tile_y + 20.0 {
+                if      cx >= tile_x       && cx < tile_x + 22.0 { self.gizmo_mode = GizmoMode::Translate; }
+                else if cx >= tile_x + 22.0 && cx < tile_x + 44.0 { self.gizmo_mode = GizmoMode::Rotate; }
+                else if cx >= tile_x + 44.0 && cx < tile_x + 66.0 { self.gizmo_mode = GizmoMode::Scale; }
             }
         }
 
-        if layout_clicked {
+        if lc {
             if let Some(grid) = ctx.viewport_grid_mut(app) {
                 let next = grid.layout.next();
                 grid.set_layout(next, &[]);
             }
         }
-        if frame_clicked {
+        if fc {
             if let Some(aabb) = ctx.gltf_union_aabb_for_world(&self.world) {
                 ctx.fit_all_panes_to_aabb(app, &aabb);
             }
         }
-        if spawn_clicked  { self.spawn_menu_open = !self.spawn_menu_open; }
-        if tonemap_clicked { self.world.tonemap_op = (self.world.tonemap_op + 1) % 3; }
+        if sc { self.spawn_menu_open = !self.spawn_menu_open; }
+        if tc { self.world.tonemap_op = (self.world.tonemap_op + 1) % 3; }
 
         // Spawn dropdown menu
         if self.spawn_menu_open {
             let ox = 200.0_f32; let oy = TOOLBAR_H;
             let entries: &[&str] = &[
                 "Mesh Actor...", "Light: Point", "Light: Spot", "Light: Dir",
-                "Camera", "Empty", "Trigger", "Audio Emitter",
+                "Camera", "Empty", "Trigger", "AudioEmitter",
             ];
             let mut chosen: Option<usize> = None;
             let cx = self.ui_cursor[0]; let cy = self.ui_cursor[1];
@@ -612,14 +616,23 @@ impl EditorApp {
                 let dl = &mut self.world.ui.draw_list;
                 let menu_h = entries.len() as f32 * 24.0 + 8.0;
                 dl.push_panel_bg(ox, oy, 168.0, menu_h, [26, 26, 36, 248]);
-                dl.push_line(ox,       oy,           ox+168.0, oy,            1.0, SEP);
-                dl.push_line(ox+168.0, oy,           ox+168.0, oy + menu_h,   1.0, SEP);
-                dl.push_line(ox,       oy + menu_h,  ox+168.0, oy + menu_h,   1.0, SEP);
-                for (i, _) in entries.iter().enumerate() {
+                dl.push_line(ox,       oy,           ox+168.0, oy,          1.0, SEP);
+                dl.push_line(ox+168.0, oy,           ox+168.0, oy+menu_h,   1.0, SEP);
+                dl.push_line(ox,       oy + menu_h,  ox+168.0, oy+menu_h,   1.0, SEP);
+                for (i, entry) in entries.iter().enumerate() {
                     let iy = oy + i as f32 * 24.0 + 4.0;
                     let hov = cx >= ox+4.0 && cx < ox+164.0 && cy >= iy && cy < iy+20.0;
                     let bg  = if hov { [70, 70, 105, 255] } else { [42, 42, 58, 255] };
-                    dl.push_rect(ox+4.0, iy, 160.0, 20.0, [0.0,0.0,1.0,1.0], bg);
+                    dl.push_rect(ox+4.0, iy, 160.0, 20.0, uidraw::SOLID, bg);
+                    // Entry label
+                    let mut ex = ox + 8.0;
+                    for c in entry.chars() {
+                        let uv = dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect(c);
+                        if c != ' ' && uv != [0.0_f32; 4] {
+                            dl.push_rect(ex, iy + 2.0, 8.0, 16.0, uv, [200, 200, 210, 255]);
+                        }
+                        ex += 8.0;
+                    }
                     if hov && jp { chosen = Some(i); }
                 }
             }
@@ -695,15 +708,28 @@ impl EditorApp {
             }
         }
 
+        use dumpster_fire_engine::resource_manager::ui_manager::{draw as uidraw, font};
         for (ah, icon_col, is_sel, hovered, _) in &rows {
             let bg = if *is_sel        { [55, 95, 155, 255] }
                      else if *hovered  { [38, 38, 52,  255] }
                      else if (ah.idx & 1) == 0 { [26, 26, 33, 255] }
                      else              { [24, 24, 30,  255] };
-            dl.push_rect(x, row_y, OUTLINER_W, row_h - 1.0, [0.0, 0.0, 1.0, 1.0], bg);
-            dl.push_rect(x + 6.0,  row_y + 5.0, 12.0, 12.0, [0.0, 0.0, 1.0, 1.0], *icon_col);
-            let nc: [u8; 4] = if *is_sel { [200, 220, 255, 200] } else { [155, 155, 175, 170] };
-            dl.push_rect(x + 24.0, row_y + 7.0, 140.0, 8.0, [0.0, 0.0, 1.0, 1.0], nc);
+            dl.push_rect(x, row_y, OUTLINER_W, row_h - 1.0, uidraw::SOLID, bg);
+            dl.push_rect(x + 6.0, row_y + 4.0, 14.0, 14.0, uidraw::SOLID, *icon_col);
+            // Actor index as readable text
+            let label = format!("Actor {}", ah.idx);
+            let tc: [u8; 4] = if *is_sel { [200, 220, 255, 220] } else { [155, 155, 175, 200] };
+            let mut lx = x + 26.0;
+            for c in label.chars() {
+                if lx + 8.0 > x + OUTLINER_W - 4.0 { break; }
+                if c != ' ' {
+                    let uv = font::glyph_rect(c);
+                    if uv != [0.0_f32; 4] {
+                        dl.push_rect(lx, row_y + 3.0, 8.0, 16.0, uv, tc);
+                    }
+                }
+                lx += 8.0;
+            }
             row_y += row_h;
         }
     }
@@ -738,41 +764,27 @@ impl EditorApp {
         let ix = win_w - INSPECTOR_W;
         let iy = TOOLBAR_H;
 
-        // Collect data before borrowing draw_list.
-        let input = self.ui_input();
-        let Some((lh, sh)) = self.main_stage else {
-            let dl = &mut self.world.ui.draw_list;
-            dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
-            dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
-            dl.push_vsep(ix, iy, panel_h, SEP);
-            return;
-        };
-        let Some(ah) = self.world.selection else {
-            let dl = &mut self.world.ui.draw_list;
-            dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
-            dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
-            dl.push_vsep(ix, iy, panel_h, SEP);
-            return;
-        };
+        // Helper: draw empty panel chrome and return
+        macro_rules! draw_empty {
+            () => {{
+                let dl = &mut self.world.ui.draw_list;
+                dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
+                dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
+                dl.push_vsep(ix, iy, panel_h, SEP);
+                return;
+            }};
+        }
 
-        let (pos, has_light, has_camera, is_env, light_kind_tag) = {
-            let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else {
-                let dl = &mut self.world.ui.draw_list;
-                dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
-                dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
-                dl.push_vsep(ix, iy, panel_h, SEP);
-                return;
-            };
-            let Some(actor) = stage.actors.get(ah) else {
-                let dl = &mut self.world.ui.draw_list;
-                dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
-                dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
-                dl.push_vsep(ix, iy, panel_h, SEP);
-                return;
-            };
-            let world_idx = ah.idx as usize;
-            let world_t   = stage.worlds.get(world_idx).copied().unwrap_or(Affine3A::IDENTITY);
-            let pos = world_t.translation;
+        let input = self.ui_input();
+        let Some((lh, sh)) = self.main_stage else { draw_empty!() };
+        let Some(ah)       = self.world.selection else { draw_empty!() };
+
+        // Collect actor data in a scoped read block — releases borrows before dl borrow.
+        let actor_data = {
+            let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else { draw_empty!() };
+            let Some(actor) = stage.actors.get(ah) else { draw_empty!() };
+            let world_t = stage.worlds.get(ah.idx as usize).copied().unwrap_or(Affine3A::IDENTITY);
+            let pos     = world_t.translation;
             let mut has_light      = false;
             let mut has_camera     = false;
             let mut is_env         = false;
@@ -794,65 +806,82 @@ impl EditorApp {
             }
             (pos, has_light, has_camera, is_env, light_kind_tag)
         };
-        let content_y = iy + TITLEBAR_H + 4.0;
-        let content_w = INSPECTOR_W - 8.0;
-        let dl = &mut self.world.ui.draw_list;
-        dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
-        dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
-        dl.push_vsep(ix, iy, panel_h, SEP);
-        let mut ui = Ui::with_input(dl,
-            Rect { x: ix + 4.0, y: content_y, w: content_w, h: panel_h - TITLEBAR_H - 8.0 },
-            input);
+        let (pos, has_light, has_camera, is_env, light_kind_tag) = actor_data;
 
-        ui.section_header("TRANSFORM");
-        if ui.collapsible_header("Position", &mut self.insp_pos_collapsed) {
-            let mut px = pos.x; let mut py = pos.y; let mut pz = pos.z;
-            ui.slider("X", &mut px, -500.0, 500.0);
-            ui.slider("Y", &mut py, -500.0, 500.0);
-            ui.slider("Z", &mut pz, -500.0, 500.0);
-        }
-        if ui.collapsible_header("Rotation", &mut self.insp_rot_collapsed) {
-            let mut rx = 0.0_f32; let mut ry = 0.0_f32; let mut rz = 0.0_f32;
-            ui.slider("RX", &mut rx, -180.0, 180.0);
-            ui.slider("RY", &mut ry, -180.0, 180.0);
-            ui.slider("RZ", &mut rz, -180.0, 180.0);
-        }
-        if ui.collapsible_header("Scale", &mut self.insp_scl_collapsed) {
-            let mut sx = 1.0_f32; let mut sy = 1.0_f32; let mut sz = 1.0_f32;
-            ui.slider("SX", &mut sx, 0.01, 10.0);
-            ui.slider("SY", &mut sy, 0.01, 10.0);
-            ui.slider("SZ", &mut sz, 0.01, 10.0);
-        }
-        ui.separator();
+        // Mutable slider values — drawn this frame, written back after dl borrow.
+        let mut px = pos.x; let mut py = pos.y; let mut pz = pos.z;
+        let mut rx = 0.0_f32; let mut ry = 0.0_f32; let mut rz = 0.0_f32;
+        let mut sx = 1.0_f32; let mut sy = 1.0_f32; let mut sz = 1.0_f32;
 
-        if is_env {
-            ui.section_header("MESH");
-            ui.button("Replace Asset...");
-            ui.separator();
-        }
-        if has_light {
-            ui.section_header("LIGHT");
-            let kind_name = light_kind_name(light_kind_tag.unwrap_or(0) as u8);
-            ui.label(kind_name);
-            let mut intensity = 100.0_f32;
-            let mut range = 0.0_f32;
-            ui.slider("Intensity", &mut intensity, 0.0, 2000.0);
-            ui.slider("Range",     &mut range, 0.0, 100.0);
-            ui.separator();
-        }
-        if has_camera {
-            ui.section_header("CAMERA");
-            let mut focal = 50.0_f32; let mut fstop = 5.6_f32;
-            let mut iso = 100.0_f32;  let mut focus = 5.0_f32;
-            ui.slider("Focal mm", &mut focal, 14.0, 300.0);
-            ui.slider("f-stop",   &mut fstop, 1.0,  22.0);
-            ui.slider("ISO",      &mut iso,   50.0, 12800.0);
-            ui.slider("Focus m",  &mut focus, 0.1,  50.0);
-            ui.separator();
-        }
+        {
+            let content_y = iy + TITLEBAR_H + 4.0;
+            let content_w = INSPECTOR_W - 8.0;
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
+            dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
+            dl.push_vsep(ix, iy, panel_h, SEP);
+            let mut ui = Ui::with_input(dl,
+                Rect { x: ix + 4.0, y: content_y, w: content_w, h: panel_h - TITLEBAR_H - 8.0 },
+                input);
 
-        if ui.collapsible_header("Components", &mut self.insp_cmp_collapsed) {
-            ui.button("+ Add Component");
+            ui.section_header("TRANSFORM");
+            if ui.collapsible_header("Position", &mut self.insp_pos_collapsed) {
+                ui.slider("X", &mut px, -500.0, 500.0);
+                ui.slider("Y", &mut py, -500.0, 500.0);
+                ui.slider("Z", &mut pz, -500.0, 500.0);
+            }
+            if ui.collapsible_header("Rotation", &mut self.insp_rot_collapsed) {
+                ui.slider("RX", &mut rx, -180.0, 180.0);
+                ui.slider("RY", &mut ry, -180.0, 180.0);
+                ui.slider("RZ", &mut rz, -180.0, 180.0);
+            }
+            if ui.collapsible_header("Scale", &mut self.insp_scl_collapsed) {
+                ui.slider("SX", &mut sx, 0.01, 10.0);
+                ui.slider("SY", &mut sy, 0.01, 10.0);
+                ui.slider("SZ", &mut sz, 0.01, 10.0);
+            }
+            ui.separator();
+
+            if is_env {
+                ui.section_header("MESH");
+                ui.button("Replace Asset...");
+                ui.separator();
+            }
+            if has_light {
+                ui.section_header("LIGHT");
+                ui.label(light_kind_name(light_kind_tag.unwrap_or(0) as u8));
+                let mut intensity = 100.0_f32;
+                let mut range = 0.0_f32;
+                ui.slider("Intensity", &mut intensity, 0.0, 2000.0);
+                ui.slider("Range",     &mut range,     0.0,  100.0);
+                ui.separator();
+            }
+            if has_camera {
+                ui.section_header("CAMERA");
+                let mut focal = 50.0_f32; let mut fstop = 5.6_f32;
+                let mut iso = 100.0_f32;  let mut focus = 5.0_f32;
+                ui.slider("Focal mm", &mut focal, 14.0,  300.0);
+                ui.slider("f-stop",   &mut fstop,  1.0,   22.0);
+                ui.slider("ISO",      &mut iso,    50.0, 12800.0);
+                ui.slider("Focus m",  &mut focus,   0.1,   50.0);
+                ui.separator();
+            }
+            if ui.collapsible_header("Components", &mut self.insp_cmp_collapsed) {
+                ui.button("+ Add Component");
+            }
+        } // dl borrow released here
+
+        // Write slider values back to the actor's world transform.
+        if let Some(stage) = self.world.levels.get_mut(lh).and_then(|l| l.stages.get_mut(sh)) {
+            if let Some(t) = stage.worlds.get_mut(ah.idx as usize) {
+                t.translation = glam::Vec3A::new(px, py, pz);
+                let quat = glam::Quat::from_euler(
+                    glam::EulerRot::XYZ,
+                    rx.to_radians(), ry.to_radians(), rz.to_radians(),
+                );
+                t.matrix3 = glam::Mat3A::from_quat(quat)
+                    * glam::Mat3A::from_diagonal(glam::Vec3::new(sx, sy, sz));
+            }
         }
     }
 }
@@ -895,7 +924,7 @@ impl EditorApp {
 
         {
             let dl = &mut self.world.ui.draw_list;
-            dl.push_rect(0.0, 0.0, win_w, win_h, [0.0,0.0,1.0,1.0], [0, 0, 0, 145]);
+            dl.push_rect(0.0, 0.0, win_w, win_h, dumpster_fire_engine::resource_manager::ui_manager::draw::SOLID, [0, 0, 0, 145]);
             dl.push_panel_bg(rx, ry, pw, ph, [28, 28, 38, 255]);
             dl.push_title_bar(rx, ry, pw, TITLEBAR_H, [40, 40, 58, 255], SEP);
             dl.push_line(rx,      ry,      rx+pw, ry,      1.5, [78, 78, 100, 255]);

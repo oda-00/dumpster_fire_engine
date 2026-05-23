@@ -13,6 +13,9 @@ name = "dumpster_fire_engine"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+wgpu-backend = ["dep:wgpu", "dep:naga", "dep:pollster"]
+
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
@@ -23,6 +26,9 @@ rayon      = "1"
 ash        = "0.38.0"
 ash-window = "0.13"
 winit      = "0.30.13"
+wgpu     = { version = "22", optional = true, features = ["wgsl"] }
+naga     = { version = "22", optional = true, features = ["wgsl-out", "spv-in"] }
+pollster = { version = "0.3", optional = true }
 gltf = { version = "1.4", default-features = false, features = [
     "import",
     "KHR_lights_punctual",

@@ -1,5 +1,10 @@
 use thin_vec::ThinVec;
 
+/// UV passed to `push_rect` for opaque solid-color quads.
+/// All four vertices share (0,0) so every fragment triggers the shader's
+/// degenerate-UV bypass and uses vertex color directly (no atlas sample).
+pub const SOLID: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct UiVertex {
@@ -35,12 +40,12 @@ impl DrawList {
     }
 
     pub fn push_panel_bg(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
-        self.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], color);
+        self.push_rect(x, y, w, h, SOLID, color);
     }
 
     pub fn push_title_bar(&mut self, x: f32, y: f32, w: f32, h: f32,
                            bg: [u8; 4], sep: [u8; 4]) {
-        self.push_rect(x, y, w, h, [0.0, 0.0, 1.0, 1.0], bg);
+        self.push_rect(x, y, w, h, SOLID, bg);
         self.push_line(x, y + h, x + w, y + h, 1.0, sep);
     }
 
