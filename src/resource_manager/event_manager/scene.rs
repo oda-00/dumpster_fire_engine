@@ -199,6 +199,13 @@ pub enum Effect {
         target:  SceneId,
         mealy:   Arc<[Effect]>,
     },
+    /// UI-bound action fired by a Button/Slider/Dropdown/Checkbox click or
+    /// edit. Routed by `ui_manager::scripts::dispatch_ui_action`; the
+    /// consumer (editor / game) resolves `action` into a concrete handler.
+    UiAction {
+        action:  u32,
+        payload: f32,
+    },
 }
 
 /// Heap-allocated payload for the rare `AddComponent` effect.
@@ -251,6 +258,8 @@ impl Clone for Effect {
             // Arc clone: one atomic refcount bump, no heap allocation.
             Effect::ScheduleTransition { level_h, stage_h, source, target, mealy } =>
                 Effect::ScheduleTransition { level_h: *level_h, stage_h: *stage_h, source: *source, target: *target, mealy: Arc::clone(mealy) },
+            Effect::UiAction { action, payload } =>
+                Effect::UiAction { action: *action, payload: *payload },
         }
     }
 }
@@ -284,6 +293,11 @@ fn clone_component(c: &Component) -> Component {
             camera:      u.camera.clone(),
             light:       u.light.clone(),
             render:      None, // RenderState is not Clone; animation state resets on clone
+        }),
+        Component::Ui(u) => Component::Ui(UiComponent {
+            panel:        u.panel,
+            world_offset: u.world_offset,
+            size_px:      u.size_px,
         }),
     }
 }

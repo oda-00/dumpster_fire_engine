@@ -58,6 +58,14 @@ pub struct LoadedGltf {
     pub instance_layout: vk::DescriptorSetLayout,
     pub path:            Arc<str>,
     pub device:          ash::Device,
+
+    /// Bottom-Level Acceleration Structures, one per loaded primitive.
+    /// Built when `VulkanContext::has_ray_tracing` is true; otherwise empty.
+    /// Lifetime: owned by this `LoadedGltf` and destroyed in `Drop`.
+    pub blas:            ThinVec<vk::AccelerationStructureKHR>,
+    /// Backing buffers for the BLAS structures (one per BLAS). Each buffer is
+    /// kept alive for the BLAS's lifetime; freed alongside the AS handle.
+    pub blas_buffers:    ThinVec<(vk::Buffer, vk::DeviceMemory)>,
 }
 
 impl LoadedGltf {
@@ -72,6 +80,22 @@ impl Drop for LoadedGltf {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+            // BLAS handles must be destroyed via the acceleration_structure
+            // extension loader; we cached the device but the loader lives on
+            // the VulkanContext, not here. Since BLAS destruction requires the
+            // KHR extension loader, the engine's shutdown path is responsible
+            // for calling `release_blas()` before dropping LoadedGltf. We free
+            // the backing buffers/memory here regardless (raw buffer destroy
+            // works without the extension loader).
+            for (buf, mem) in self.blas_buffers.drain(..) {
+                if buf != vk::Buffer::null() {
+                    self.device.destroy_buffer(buf, None);
+                }
+                if mem != vk::DeviceMemory::null() {
+                    self.device.free_memory(mem, None);
+                }
+            }
+            self.blas.clear();
             // Drop GPU resources before the pools that back them.
             let _ = std::mem::replace(&mut self.cache, GltfCache::new(self.device.clone()));
             self.skin_vbs.clear();
@@ -95,6 +119,25 @@ impl Drop for LoadedGltf {
             destroy_pool!(self.instance_pool);
             destroy_layout!(self.instance_layout);
             // material_layout belongs to the window's mold — do NOT destroy.
+        }
+    }
+}
+
+impl LoadedGltf {
+    /// Destroys BLAS handles via the KHR acceleration_structure loader.
+    /// Must be called before this `LoadedGltf` is dropped when RT is enabled,
+    /// otherwise the AS handle leaks (the backing buffer is still freed).
+    pub fn release_blas(&mut self, vulkan: &VulkanContext) {
+        if let Some(accel) = vulkan.rt_accel.as_ref() {
+            unsafe {
+                for h in self.blas.drain(..) {
+                    if h != vk::AccelerationStructureKHR::null() {
+                        accel.destroy_acceleration_structure(h, None);
+                    }
+                }
+            }
+        } else {
+            self.blas.clear();
         }
     }
 }
@@ -272,7 +315,7 @@ fn finalize_load(
     let _ = cache.ensure_dummy_material(&upload_ctx);
     let _ = cache.ensure_dummy_instance_matrices(&upload_ctx);
 
-    Ok((pl.handle, LoadedGltf {
+    let mut loaded = LoadedGltf {
         asset,
         meshes,
         material_sets,
@@ -287,8 +330,80 @@ fn finalize_load(
         skin_set_layout: pl.skin_set_layout,
         instance_layout: pl.instance_layout,
         path:            pl.path,
-        device:          pl.device,
-    }))
+        device:          pl.device.clone(),
+        blas:            ThinVec::new(),
+        blas_buffers:    ThinVec::new(),
+    };
+
+    // Build per-primitive BLAS structures when ray tracing is available.
+    if vulkan.has_ray_tracing {
+        if let Err(e) = build_blas_for_loaded(&mut loaded, vulkan) {
+            // Non-fatal: RT BLAS construction failed; raster path still works.
+            eprintln!("BLAS build failed for {}: {e:?}", loaded.path);
+        }
+    }
+
+    Ok((pl.handle, loaded))
+}
+
+/// Build a BLAS for every loaded mesh primitive that has indices.
+/// One AS per primitive; on failure leaves `loaded.blas` empty (RT path
+/// skips this asset cleanly).
+fn build_blas_for_loaded(loaded: &mut LoadedGltf, vulkan: &VulkanContext) -> ForgeResult<()> {
+    use crate::render::blas::{BlasBuildInputs, build_blas};
+
+    let accel = vulkan.rt_accel.as_ref()
+        .ok_or(ForgeError::NoPhysicalDevice)?;
+    let device = &vulkan.device;
+
+    // Walk every (mesh_idx, prim_idx) by trying sequential indices until
+    // MeshTable::get returns None. The asset's `meshes` array gives the
+    // primitive-per-mesh structure.
+    let n_meshes = loaded.asset.meshes.len();
+    for mesh_idx in 0..n_meshes {
+        let n_prims = loaded.asset.meshes[mesh_idx].primitives.len();
+        for prim_idx in 0..n_prims {
+            let Some(gpu) = loaded.meshes.get(mesh_idx, prim_idx) else { continue };
+            let prim = &loaded.asset.meshes[mesh_idx].primitives[prim_idx];
+            // Vertex count from the gltf position accessor.
+            let vertex_count = prim.streams.positions.len() as u32;
+            if vertex_count == 0 || gpu.index_count == 0 { continue; }
+
+            let input = BlasBuildInputs {
+                device,
+                accel_ext:     accel,
+                memory_props:  &vulkan.memory_properties,
+                command_pool:  vulkan.command_pool,
+                queue:         vulkan.queue,
+                vertex_buffer: gpu.vertex_buffer.handle,
+                vertex_offset: 0,
+                vertex_count,
+                vertex_stride: 24, // ForgeVertex = pos(12) + normal(12)
+                vertex_format: vk::Format::R32G32B32_SFLOAT,
+                index_buffer:  gpu.index_buffer.handle,
+                index_offset:  0,
+                index_count:   gpu.index_count,
+                index_type:    vk::IndexType::UINT32,
+                transform:     None,
+            };
+
+            match build_blas(&input) {
+                Ok((handle, mut backing)) => {
+                    loaded.blas.push(handle);
+                    // ForgeBuffer owns its memory; we move its handles into the
+                    // pair tuple and forget the wrapper so Drop doesn't run twice.
+                    let pair = (backing.handle, backing.memory);
+                    backing.handle = vk::Buffer::null();
+                    backing.memory = vk::DeviceMemory::null();
+                    loaded.blas_buffers.push(pair);
+                }
+                Err(e) => {
+                    eprintln!("build_blas failed (mesh {mesh_idx} prim {prim_idx}): {e:?}");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── upload helpers ────────────────────────────────────────────────────────────

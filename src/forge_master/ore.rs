@@ -464,9 +464,18 @@ impl ForgeBuffer {
         let req = unsafe { device.get_buffer_memory_requirements(handle) };
         let memory_type_index =
             find_memory_type(memory_properties, req.memory_type_bits, properties)?;
-        let alloc = vk::MemoryAllocateInfo::default()
+        // If the buffer uses SHADER_DEVICE_ADDRESS we must also request
+        // DEVICE_ADDRESS when allocating its memory (Vulkan spec
+        // VUID-vkGetBufferDeviceAddress-bufferDeviceAddress-03324).
+        let needs_addr = usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+        let mut flags_info = vk::MemoryAllocateFlagsInfo::default()
+            .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        let mut alloc = vk::MemoryAllocateInfo::default()
             .allocation_size(req.size)
             .memory_type_index(memory_type_index);
+        if needs_addr {
+            alloc = alloc.push_next(&mut flags_info);
+        }
         let memory = unsafe { device.allocate_memory(&alloc, None)? };
         unsafe { device.bind_buffer_memory(handle, memory, 0)? };
 
@@ -835,15 +844,22 @@ impl GpuMesh {
         )?;
         ib_stage.write_bytes(device, ib_bytes)?;
 
-        // Device-local targets.
+        // Device-local targets. SHADER_DEVICE_ADDRESS + acceleration-structure
+        // input read-only let us reuse the same buffers for raster draws and
+        // BLAS construction without a second upload. Flags are no-ops on
+        // pre-RT drivers; cheap.
         let vertex_buffer = ForgeBuffer::create(
             device, memory_properties, vb_size,
-            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
         let index_buffer = ForgeBuffer::create(
             device, memory_properties, ib_size,
-            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
 

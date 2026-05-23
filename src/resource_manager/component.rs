@@ -259,6 +259,15 @@ pub struct UtilityComponent {
     pub render:      Option<RenderState>,
 }
 
+/// Billboard-anchored UI panel — for in-world labels (light gizmo names,
+/// debug overlays). The `panel` handle points into UiManager.panels.
+#[derive(Debug)]
+pub struct UiComponent {
+    pub panel:        crate::resource_manager::ui_manager::PanelHandle,
+    pub world_offset: [f32; 3],
+    pub size_px:      [u32; 2],
+}
+
 #[derive(Debug)]
 pub enum CollisionShape {
     Box,
@@ -275,4 +284,5 @@ declare_components! {
     Physics:   PhysicsComponent,
     Collision: CollisionComponent,
     Utility:   UtilityComponent,
+    Ui:        UiComponent,
 }

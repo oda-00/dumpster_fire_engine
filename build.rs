@@ -22,6 +22,8 @@ fn main() {
         "assets/shaders/tonemap.frag.glsl",
         "assets/shaders/debug_lines.vert.glsl",
         "assets/shaders/debug_lines.frag.glsl",
+        "assets/shaders/ui.vert.glsl",
+        "assets/shaders/ui.frag.glsl",
         "assets/shaders/raygen.rgen",
         "assets/shaders/primary_miss.rmiss",
         "assets/shaders/shadow_miss.rmiss",

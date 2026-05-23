@@ -1,22 +1,23 @@
 //! Multiview real-time editor — Unreal-style quad-split viewport.
 //!
-//! Perspective (top-left), OrthoTop (top-right), OrthoFront (bottom-left),
-//! OrthoRight (bottom-right). Tab cycles layouts. Click to grab mouse, Escape
-//! to release. WASD fly, Q/E up/down, Z/C roll, scroll zoom, middle-drag pan.
+//! Layout: Perspective (top-left) | OrthoTop (top-right)
+//!         OrthoFront (bottom-left) | OrthoRight (bottom-right)
 //!
-//! Actors: one `Environment` mesh actor per CLI arg. A default key-light
-//! `Utility` actor at (4, 4, 4). Four camera `Utility` actors back the
-//! viewport panes (managed by the viewport grid).
-//!
-//! Run: cargo run --bin editor [path/to/model.glb [...]]
+//! Controls:
+//!   Tab         — cycle viewport layout
+//!   G / R / S   — Translate / Rotate / Scale gizmo mode
+//!   Del         — despawn selected actor
+//!   Esc         — clear selection / close menus
+//!   LMB         — click-to-select actor (ray-AABB)
+//!   RMB         — clear selection
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::{Affine3A, Vec3};
+use glam::{Affine3A, Mat4, Vec3, Vec4, Vec4Swizzles};
 use thin_vec::ThinVec;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -24,6 +25,7 @@ use dumpster_fire_engine::forge_master::master::ForgeResult;
 use dumpster_fire_engine::render::app::{
     AppCtx, AppHandle, AppLogic, AppRunner, ViewportLayout,
 };
+use dumpster_fire_engine::render::camera::ProjectionMode;
 use dumpster_fire_engine::resource_manager::{
     ActorId, ActorType,
     Environment, EnvironmentId,
@@ -32,23 +34,167 @@ use dumpster_fire_engine::resource_manager::{
     World,
 };
 use dumpster_fire_engine::resource_manager::component::{
+    Component, ComponentType, GltfHandle,
     LightData, LightKind, MeshRef, UtilityComponent,
 };
 use dumpster_fire_engine::resource_manager::manager::ActorHandle;
 
+// ── Editor state ───────────────────────────────────────────────────────────
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum GizmoMode { Translate, Rotate, Scale }
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum GizmoSpace { World, Local }
+
 struct EditorApp {
-    asset_paths:      Vec<PathBuf>,
-    world:            World,
-    main_stage:       Option<(LevelHandle, StageHandle)>,
-    actors:           ThinVec<ActorHandle>,
-    cam_fitted:       bool,
-    start:            Instant,
-    win:              Option<AppHandle>,
-    /// Tonemap operator: 0 = Linear, 1 = Reinhard, 2 = ACES (default).
-    tonemap_op:       u32,
-    frame_time_accum: f32,
+    asset_paths:       ThinVec<Arc<str>>,
+    world:             World,
+    main_level:        Option<LevelHandle>,
+    main_stage:        Option<(LevelHandle, StageHandle)>,
+    actors:            ThinVec<ActorHandle>,
+    cam_fitted:        bool,
+    start:             Instant,
+    win:               Option<AppHandle>,
+
+    // ── toolbar state
+    grid_enabled:      bool,
+    gizmo_mode:        GizmoMode,
+    gizmo_space:       GizmoSpace,
+    spawn_menu_open:   bool,
+    light_submenu_open: bool,
+
+    // ── file picker
+    picker_open:       bool,
+    picker_filter:     Arc<str>,
+    picker_paths:      ThinVec<Arc<str>>,
+
+    // ── outliner
+    outliner_filter:   Arc<str>,
+
+    // ── FPS
+    frame_time_accum:  f32,
     frame_count_accum: u32,
-    fps_display:      f32,
+    fps_display:       f32,
+}
+
+impl EditorApp {
+    fn spawn_light(&mut self, lk: LightKind) {
+        let Some((lh, sh)) = self.main_stage else { return };
+        let id = ActorId::new(self.actors.len() as i64 + 100);
+        let Some(ah) = self.world.spawn_actor(lh, sh, id, Affine3A::IDENTITY) else { return };
+        let utility_idx = ActorType::Utility(Utility {
+            id: UtilityId::new(id.raw()), name: Arc::from(""), visible: true, toggle: true, mesh: None,
+        }).index();
+        let _ = self.world.spawn_sub_entity(lh, sh, ah,
+            ActorType::Utility(Utility {
+                id: UtilityId::new(id.raw()), name: Arc::from("Light"),
+                visible: true, toggle: true, mesh: None,
+            }),
+            Affine3A::IDENTITY);
+        self.world.add_component(lh, sh, ah, utility_idx,
+            UtilityComponent {
+                name: Arc::from("Light"), description: Arc::from(""),
+                camera: None,
+                light: Some(LightData { color: [1.0, 1.0, 1.0], intensity: 100.0, range: 0.0, kind: lk }),
+                render: None,
+            });
+        self.actors.push(ah);
+        self.world.selection = Some(ah);
+    }
+
+    fn spawn_empty(&mut self, name: &str) {
+        let Some((lh, sh)) = self.main_stage else { return };
+        let id = ActorId::new(self.actors.len() as i64 + 100);
+        let Some(ah) = self.world.spawn_actor(lh, sh, id, Affine3A::IDENTITY) else { return };
+        let _ = self.world.spawn_sub_entity(lh, sh, ah,
+            ActorType::Utility(Utility {
+                id: UtilityId::new(id.raw()), name: Arc::from(name),
+                visible: true, toggle: true, mesh: None,
+            }),
+            Affine3A::IDENTITY);
+        self.actors.push(ah);
+        self.world.selection = Some(ah);
+    }
+
+    fn do_spawn_mesh(&mut self, asset: GltfHandle) {
+        let Some((lh, sh)) = self.main_stage else { return };
+        let id = ActorId::new(self.actors.len() as i64 + 200);
+        let Some(ah) = self.world.spawn_actor(lh, sh, id, Affine3A::IDENTITY) else { return };
+        let _ = self.world.spawn_sub_entity(lh, sh, ah,
+            ActorType::Environment(Environment {
+                id: EnvironmentId::new(id.raw()),
+                name: Arc::from("mesh_actor"),
+                visible: true, physical: false,
+                mesh: Some(MeshRef { asset }),
+            }),
+            Affine3A::IDENTITY);
+        self.actors.push(ah);
+        self.world.selection = Some(ah);
+    }
+
+    fn pick_actor(
+        &self,
+        ctx: &AppCtx<'_>,
+        win: AppHandle,
+        cursor_px: (f32, f32),
+    ) -> Option<ActorHandle> {
+        let (lh, sh) = self.main_stage?;
+        let grid = ctx.viewport_grid(win)?;
+        let focused_h = grid.focused;
+        let vp = grid.get(focused_h)?;
+        let (win_w, win_h) = (grid.win_w, grid.win_h);
+
+        let px = cursor_px.0 / win_w;
+        let py = cursor_px.1 / win_h;
+        if !vp.rect.contains(px, py, 1.0, 1.0) { return None; }
+        let local_x = (px - vp.rect.x) / vp.rect.w;
+        let local_y = (py - vp.rect.y) / vp.rect.h;
+        let ndc = Vec4::new(local_x * 2.0 - 1.0, local_y * 2.0 - 1.0, -1.0, 1.0);
+
+        let cam = ctx.cameras.get(vp.camera_handle)?;
+        let aspect = vp.rect.pixel_aspect(win_w, win_h);
+        let inv_vp = Mat4::from_cols_array(&cam.view_projection_matrix(aspect)).inverse();
+
+        let near = inv_vp * ndc;
+        let far  = inv_vp * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+        let near_w = near.xyz() / near.w;
+        let far_w  = far.xyz()  / far.w;
+        let ray_dir = (far_w - near_w).normalize();
+        let is_ortho = matches!(cam.projection, Some(ProjectionMode::Orthographic { .. }));
+        let ray_org = if is_ortho { near_w } else { Vec3::from_array(cam.position) };
+
+        let stage = self.world.levels.get(lh)?.stages.get(sh)?;
+        let mut best_t = f32::MAX;
+        let mut best_h = None;
+
+        for ah in &self.actors {
+            let idx = ah.idx as usize;
+            if idx >= stage.worlds.len() { continue; }
+            let world_t = stage.worlds[idx];
+            let center = Vec3::from(world_t.translation);
+            let half = Vec3::splat(0.5);
+            if let Some(t) = ray_aabb(ray_org, ray_dir, center - half, center + half) {
+                if t < best_t { best_t = t; best_h = Some(*ah); }
+            }
+        }
+        best_h
+    }
+}
+
+fn ray_aabb(org: Vec3, dir: Vec3, mn: Vec3, mx: Vec3) -> Option<f32> {
+    let inv = Vec3::new(
+        if dir.x.abs() > 1e-9 { 1.0 / dir.x } else { f32::MAX },
+        if dir.y.abs() > 1e-9 { 1.0 / dir.y } else { f32::MAX },
+        if dir.z.abs() > 1e-9 { 1.0 / dir.z } else { f32::MAX },
+    );
+    let t0 = (mn - org) * inv;
+    let t1 = (mx - org) * inv;
+    let tmin = t0.min(t1);
+    let tmax = t0.max(t1);
+    let enter = tmin.max_element();
+    let exit  = tmax.min_element();
+    if exit >= enter && exit >= 0.0 { Some(enter.max(0.0)) } else { None }
 }
 
 impl AppLogic for EditorApp {
@@ -59,70 +205,100 @@ impl AppLogic for EditorApp {
 
         let lh = self.world.spawn_level(LevelId::new(1), "editor");
         let sh = self.world.spawn_stage(lh, StageId::new(1), "scene").unwrap();
+        self.main_level = Some(lh);
         self.main_stage = Some((lh, sh));
 
-        // Default point-light actor.
-        let light_ah = self.world.spawn_actor(lh, sh, ActorId::new(2),
-            Affine3A::from_translation(Vec3::new(4.0, 4.0, 4.0))).unwrap();
+        // Default key-light.
+        let light_offset = Affine3A::from_translation(Vec3::new(4.0, 4.0, 4.0));
+        let light_ah = self.world.spawn_actor(lh, sh, ActorId::new(2), light_offset).unwrap();
+        let utility_idx = ActorType::Utility(Utility {
+            id: UtilityId::new(1), name: Arc::from(""), visible: true, toggle: true, mesh: None,
+        }).index();
         self.world.spawn_sub_entity(lh, sh, light_ah,
             ActorType::Utility(Utility {
-                id:      UtilityId::new(1),
-                name:    Arc::from("key_light"),
-                visible: true,
-                toggle:  true,
-                mesh:    None,
+                id: UtilityId::new(1), name: Arc::from("key_light"),
+                visible: true, toggle: true, mesh: None,
             }),
             Affine3A::IDENTITY).unwrap();
-        self.world.add_component(lh, sh, light_ah, 3,
+        self.world.add_component(lh, sh, light_ah, utility_idx,
             UtilityComponent {
-                name:        Arc::from("key_light"),
-                description: Arc::from(""),
-                camera:      None,
-                light:       Some(LightData {
-                    color:     [1.0, 0.95, 0.85],
-                    intensity: 5.0,
-                    range:     30.0,
-                    kind:      LightKind::Point,
+                name: Arc::from("key_light"), description: Arc::from(""),
+                camera: None,
+                light: Some(LightData {
+                    color: [1.0, 0.95, 0.85], intensity: 5.0, range: 30.0,
+                    kind: LightKind::Point,
                 }),
                 render: None,
             });
+        self.actors.push(light_ah);
 
-        // One Environment actor per asset path.
-        for (i, path) in self.asset_paths.iter().enumerate() {
-            let asset = ctx.load_gltf(win, path.clone())?;
-            let offset = Affine3A::from_translation(Vec3::new(i as f32 * 3.0, 0.0, 0.0));
-            let ah = self.world.spawn_actor(lh, sh,
-                ActorId::new(100 + i as i64), offset).unwrap();
+        // Load CLI-specified glb paths.
+        for path_str in self.asset_paths.clone() {
+            let asset = ctx.load_gltf(win, PathBuf::from(path_str.as_ref()))?;
+            let offset = Affine3A::IDENTITY;
+            let ah = self.world.spawn_actor(lh, sh, ActorId::new(100 + self.actors.len() as i64), offset).unwrap();
+            let env_id = EnvironmentId::new(self.actors.len() as i64);
             self.world.spawn_sub_entity(lh, sh, ah,
                 ActorType::Environment(Environment {
-                    id:       EnvironmentId::new(i as i64),
-                    name:     Arc::from(format!("model_{i}")),
-                    visible:  true,
-                    physical: false,
-                    mesh:     Some(MeshRef { asset }),
+                    id: env_id, name: Arc::clone(&path_str),
+                    visible: true, physical: false,
+                    mesh: Some(MeshRef { asset }),
                 }),
                 Affine3A::IDENTITY).unwrap();
             self.actors.push(ah);
         }
+
+        self.picker_paths = collect_glb_paths("assets/models");
+
         Ok(())
     }
 
-    fn handle_event(
-        &mut self,
-        ctx:   &mut AppCtx<'_>,
-        app:   AppHandle,
-        event: &WindowEvent,
-    ) -> bool {
-        if let WindowEvent::KeyboardInput { event: ke, .. } = event {
-            if let PhysicalKey::Code(KeyCode::Tab) = ke.physical_key {
-                if ke.state == ElementState::Pressed {
-                    if let Some(grid) = ctx.viewport_grid_mut(app) {
-                        let next = grid.layout.next();
-                        grid.set_layout(next, &[]);
+    fn handle_event(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::KeyboardInput { event: ke, .. } if ke.state == ElementState::Pressed => {
+                match ke.physical_key {
+                    PhysicalKey::Code(KeyCode::Tab) => {
+                        if let Some(grid) = ctx.viewport_grid_mut(app) {
+                            let next = grid.layout.next();
+                            grid.set_layout(next, &[]);
+                        }
+                        return true;
                     }
-                    return true;
+                    PhysicalKey::Code(KeyCode::KeyG) => { self.gizmo_mode = GizmoMode::Translate; return true; }
+                    PhysicalKey::Code(KeyCode::KeyR) => { self.gizmo_mode = GizmoMode::Rotate;    return true; }
+                    PhysicalKey::Code(KeyCode::KeyS) => { self.gizmo_mode = GizmoMode::Scale;     return true; }
+                    PhysicalKey::Code(KeyCode::Delete) => {
+                        if let (Some(ah), Some((lh, sh))) = (self.world.selection, self.main_stage) {
+                            self.world.despawn_actor(lh, sh, ah);
+                            self.actors.retain(|&h| h != ah);
+                            self.world.selection = None;
+                        }
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::Escape) => {
+                        self.world.selection  = None;
+                        self.spawn_menu_open  = false;
+                        self.light_submenu_open = false;
+                        self.picker_open      = false;
+                    }
+                    _ => {}
                 }
             }
+
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if let (Some(win), Some(cursor)) = (self.win, ctx.windows.get(app).and_then(|w| w.last_cursor)) {
+                    if let Some(ah) = self.pick_actor(ctx, win, cursor) {
+                        self.world.selection = Some(ah);
+                        return true;
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
+                self.world.selection = None;
+            }
+
+            _ => {}
         }
         false
     }
@@ -131,7 +307,6 @@ impl AppLogic for EditorApp {
         let Some(win) = self.win else { return true };
         if win != app { return true; }
 
-        // FPS tracking — smoothed over 0.5 s windows.
         self.frame_time_accum  += dt;
         self.frame_count_accum += 1;
         if self.frame_time_accum >= 0.5 {
@@ -140,7 +315,7 @@ impl AppLogic for EditorApp {
             self.frame_count_accum = 0;
         }
 
-        ctx.poll_gltf_loaders(app).ok();
+        let _ = ctx.poll_gltf_loaders(app);
         self.world.propagate_transforms();
 
         if !self.cam_fitted {
@@ -149,6 +324,12 @@ impl AppLogic for EditorApp {
                 self.cam_fitted = true;
             }
         }
+
+        self.world.ui.draw_list.clear();
+        self.draw_toolbar(ctx, app);
+        self.draw_outliner(ctx, app);
+        self.draw_inspector(ctx, app);
+        if self.picker_open { self.draw_file_picker(ctx, app); }
 
         let elapsed = self.start.elapsed().as_secs_f32();
         match ctx.render_world(&self.world, app, elapsed) {
@@ -160,24 +341,378 @@ impl AppLogic for EditorApp {
     }
 }
 
+// ── Toolbar ────────────────────────────────────────────────────────────────
+
+impl EditorApp {
+    fn draw_toolbar(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
+        use dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui;
+        use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
+
+        let (win_w, _) = ctx.viewport_grid(app)
+            .map(|g| (g.win_w, g.win_h))
+            .unwrap_or((1280.0, 720.0));
+        let layout_label = match ctx.viewport_grid(app).map(|g| g.layout) {
+            Some(ViewportLayout::Single)       => "Single",
+            Some(ViewportLayout::TwoColumns)   => "2 Col",
+            Some(ViewportLayout::TwoRows)      => "2 Row",
+            Some(ViewportLayout::FourQuadrant) | None => "4-Quad",
+        };
+        let tm_label = match self.world.tonemap_op {
+            1 => "TM: Rh",
+            2 => "TM: ACES",
+            _ => "TM: Lin",
+        };
+        let fps_label = format!("FPS:{:.0}", self.fps_display);
+        let t_col = if self.gizmo_mode == GizmoMode::Translate { [80,160,80,255u8] } else { [60,60,70,255] };
+        let r_col = if self.gizmo_mode == GizmoMode::Rotate    { [80,160,80,255u8] } else { [60,60,70,255] };
+        let s_col = if self.gizmo_mode == GizmoMode::Scale     { [80,160,80,255u8] } else { [60,60,70,255] };
+        let sp_col = if self.gizmo_space == GizmoSpace::Local  { [100,100,200,255u8] } else { [60,60,70,255] };
+
+        // Build draw list — mutable borrow of self.world ends at end of block.
+        let (layout_clicked, frame_all_clicked, spawn_clicked, tonemap_clicked) = {
+            let rect = Rect { x: 0.0, y: 0.0, w: win_w, h: 36.0 };
+            let dl   = &mut self.world.ui.draw_list;
+            dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0, 0.0, 1.0, 1.0], [30, 30, 35, 255]);
+
+            let mut ui = Ui::new(dl, Rect { x: 4.0, y: 4.0, w: win_w - 8.0, h: 28.0 });
+            let layout_c  = ui.button(layout_label);
+            ui.checkbox("Grid", &mut self.grid_enabled);
+            let frame_c   = ui.button("Frame All");
+            let spawn_c   = ui.button("+ Actor");
+            ui.draw.push_rect(ui.cursor[0],      ui.cursor[1], 26.0, 26.0, [0.0,0.0,1.0,1.0], t_col);
+            ui.draw.push_rect(ui.cursor[0]+28.0, ui.cursor[1], 26.0, 26.0, [0.0,0.0,1.0,1.0], r_col);
+            ui.draw.push_rect(ui.cursor[0]+56.0, ui.cursor[1], 26.0, 26.0, [0.0,0.0,1.0,1.0], s_col);
+            ui.cursor[0] += 90.0;
+            ui.draw.push_rect(ui.cursor[0], ui.cursor[1], 54.0, 26.0, [0.0,0.0,1.0,1.0], sp_col);
+            ui.cursor[0] += 60.0;
+            let tonemap_c = ui.button(tm_label);
+            ui.label(&fps_label);
+            (layout_c, frame_c, spawn_c, tonemap_c)
+        };
+
+        // Act on button clicks now that the draw_list borrow is released.
+        if layout_clicked {
+            if let Some(grid) = ctx.viewport_grid_mut(app) {
+                let next = grid.layout.next();
+                grid.set_layout(next, &[]);
+            }
+        }
+        if frame_all_clicked {
+            if let Some(aabb) = ctx.gltf_union_aabb_for_world(&self.world) {
+                ctx.fit_all_panes_to_aabb(app, &aabb);
+            }
+        }
+        if spawn_clicked {
+            self.spawn_menu_open = !self.spawn_menu_open;
+        }
+        if tonemap_clicked {
+            self.world.tonemap_op = (self.world.tonemap_op + 1) % 3;
+        }
+
+        if self.spawn_menu_open {
+            let ox = 200.0_f32;
+            let oy = 36.0_f32;
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_rect(ox, oy, 160.0, 200.0, [0.0,0.0,1.0,1.0], [25, 25, 35, 245]);
+            let entries: &[&str] = &[
+                "Mesh Actor…", "Light: Point", "Light: Spot", "Light: Directional",
+                "Camera", "Empty", "Trigger Volume", "Audio Emitter",
+            ];
+            for (i, _label) in entries.iter().enumerate() {
+                let item_y = oy + i as f32 * 24.0 + 4.0;
+                dl.push_rect(ox + 4.0, item_y, 152.0, 20.0, [0.0,0.0,1.0,1.0], [45, 45, 60, 255]);
+            }
+        }
+    }
+
+}
+
+// ── Outliner ───────────────────────────────────────────────────────────────
+
+impl EditorApp {
+    fn draw_outliner(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
+
+        let (win_w, win_h) = ctx.viewport_grid(app)
+            .map(|g| (g.win_w, g.win_h))
+            .unwrap_or((1280.0, 720.0));
+        let panel_w = 280.0_f32;
+        let panel_h = win_h * 0.45;
+        let rect = Rect { x: win_w - panel_w, y: 36.0, w: panel_w, h: panel_h };
+        let dl   = &mut self.world.ui.draw_list;
+
+        dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0,0.0,1.0,1.0], [22, 22, 28, 240]);
+        dl.push_rect(rect.x, rect.y, rect.w, 22.0, [0.0,0.0,1.0,1.0], [35, 35, 50, 255]);
+
+        let Some((lh, sh)) = self.main_stage else { return };
+        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else { return };
+
+        let mut row_y = rect.y + 26.0;
+        let row_h     = 22.0;
+
+        for (ah, actor) in stage.actors.entries() {
+            if row_y + row_h > rect.y + rect.h { break; }
+            let is_selected = self.world.selection == Some(ah);
+            let bg = if is_selected { [60, 100, 160, 255] } else { [30, 30, 38, 255] };
+            dl.push_rect(rect.x + 2.0, row_y, rect.w - 4.0, row_h - 2.0, [0.0,0.0,1.0,1.0], bg);
+            let icon_col = actor_icon_color(actor);
+            dl.push_rect(rect.x + 4.0, row_y + 4.0, 12.0, 12.0, [0.0,0.0,1.0,1.0], icon_col);
+            row_y += row_h;
+        }
+    }
+}
+
+fn actor_icon_color(actor: &dumpster_fire_engine::resource_manager::manager::Actor) -> [u8; 4] {
+    for se in actor.sub_entities.iter().flatten() {
+        match &se.actor_type {
+            ActorType::Utility(_) => {
+                if let Some(Component::Utility(uc)) = &se.components[ComponentType::Utility.index()] {
+                    if uc.light.is_some()  { return [230, 220, 80,  255]; }
+                    if uc.camera.is_some() { return [80,  180, 230, 255]; }
+                }
+                return [140, 140, 150, 255];
+            }
+            ActorType::Environment(_) => return [80, 200, 100, 255],
+            _ => {}
+        }
+    }
+    [100, 100, 100, 255]
+}
+
+// ── Inspector ──────────────────────────────────────────────────────────────
+
+impl EditorApp {
+    fn draw_inspector(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
+        use dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui;
+
+        let (win_w, win_h) = ctx.viewport_grid(app)
+            .map(|g| (g.win_w, g.win_h))
+            .unwrap_or((1280.0, 720.0));
+        let Some((lh, sh)) = self.main_stage else { return };
+        let Some(ah) = self.world.selection else { return };
+
+        let panel_w = 280.0_f32;
+        let panel_y = 36.0 + win_h * 0.45;
+        let panel_h = win_h - panel_y;
+        let rect    = Rect { x: win_w - panel_w, y: panel_y, w: panel_w, h: panel_h };
+
+        let dl = &mut self.world.ui.draw_list;
+        dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0,0.0,1.0,1.0], [22, 22, 28, 240]);
+        dl.push_rect(rect.x, rect.y, rect.w, 22.0, [0.0,0.0,1.0,1.0], [35, 35, 50, 255]);
+
+        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else { return };
+        let Some(actor) = stage.actors.get(ah) else { return };
+
+        let mut has_transform  = false;
+        let mut has_light      = false;
+        let mut has_camera     = false;
+        let mut is_env         = false;
+        let mut light_kind_tag: Option<u32> = None;
+
+        for se in actor.sub_entities.iter().flatten() {
+            match &se.actor_type {
+                ActorType::Environment(_) => { is_env = true; }
+                ActorType::Utility(_) => {
+                    if let Some(Component::Utility(uc)) = &se.components[ComponentType::Utility.index()] {
+                        if uc.light.is_some()  {
+                            has_light = true;
+                            light_kind_tag = uc.light.as_ref().map(|l| l.kind.tag());
+                        }
+                        if uc.camera.is_some() { has_camera = true; }
+                    }
+                }
+                _ => {}
+            }
+            has_transform = true;
+        }
+
+        let world_idx = ah.idx as usize;
+        let world_t   = stage.worlds.get(world_idx).copied().unwrap_or(Affine3A::IDENTITY);
+        let pos       = world_t.translation;
+
+        let mut ui = Ui::new(dl, Rect { x: rect.x + 4.0, y: rect.y + 26.0, w: rect.w - 8.0, h: rect.h - 30.0 });
+
+        if has_transform {
+            ui.label("Transform");
+            let mut px = pos.x; let mut py = pos.y; let mut pz = pos.z;
+            ui.slider("X", &mut px, -100.0, 100.0);
+            ui.slider("Y", &mut py, -100.0, 100.0);
+            ui.slider("Z", &mut pz, -100.0, 100.0);
+            ui.separator();
+        }
+
+        if is_env {
+            ui.label("Mesh");
+            ui.button("Replace…");
+            ui.separator();
+        }
+
+        if has_light {
+            ui.label("Light");
+            let kind_name = light_kind_name(light_kind_tag.unwrap_or(0) as u8);
+            ui.label(kind_name);
+            let mut intensity = 100.0_f32;
+            ui.slider("Intensity", &mut intensity, 0.0, 2000.0);
+            let mut range = 0.0_f32;
+            ui.slider("Range", &mut range, 0.0, 100.0);
+            ui.separator();
+        }
+
+        if has_camera {
+            ui.label("Camera");
+            let mut focal = 50.0_f32;
+            ui.slider("Focal mm", &mut focal, 14.0, 300.0);
+            let mut fstop = 5.6_f32;
+            ui.slider("f-stop", &mut fstop, 1.0, 22.0);
+            let mut iso = 100.0_f32;
+            ui.slider("ISO", &mut iso, 50.0, 12800.0);
+            let mut focus = 5.0_f32;
+            ui.slider("Focus dist", &mut focus, 0.1, 50.0);
+            ui.separator();
+        }
+
+        ui.button("+ Add Component ▾");
+    }
+}
+
+fn light_kind_name(tag: u8) -> &'static str {
+    match tag {
+        0  => "Point",        1  => "Spot",
+        2  => "Directional",  3  => "Sun",
+        4  => "Sphere",       5  => "Disk",
+        6  => "Rectangle",    7  => "Polygon",
+        8  => "Linear",       9  => "Tube",
+        10 => "Volumetric",   11 => "VolumeBox",
+        12 => "VolumeCone",   13 => "VolumeCylinder",
+        14 => "VolumeMesh",   15 => "IES",
+        16 => "Mesh",         17 => "Environment",
+        18 => "AnalyticSky",  19 => "Ambient",
+        _  => "Unknown",
+    }
+}
+
+// ── File picker ────────────────────────────────────────────────────────────
+
+impl EditorApp {
+    fn draw_file_picker(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
+        use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
+        use dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui;
+
+        let (win_w, win_h) = ctx.viewport_grid(app)
+            .map(|g| (g.win_w, g.win_h))
+            .unwrap_or((1280.0, 720.0));
+        let pw = 480.0_f32;
+        let ph = 360.0_f32;
+        let rect = Rect {
+            x: (win_w - pw) * 0.5,
+            y: (win_h - ph) * 0.5,
+            w: pw, h: ph,
+        };
+
+        let dl = &mut self.world.ui.draw_list;
+        dl.push_rect(0.0, 0.0, win_w, win_h, [0.0,0.0,1.0,1.0], [0, 0, 0, 140]);
+        dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0,0.0,1.0,1.0], [28, 28, 36, 255]);
+        dl.push_rect(rect.x, rect.y, rect.w, 28.0, [0.0,0.0,1.0,1.0], [40, 40, 60, 255]);
+
+        // Collect matching paths before borrowing draw list.
+        let filter_lower: Arc<str> = Arc::from(self.picker_filter.to_lowercase().as_str());
+        let filtered: ThinVec<Arc<str>> = self.picker_paths.iter()
+            .filter(|p| filter_lower.is_empty() || p.to_lowercase().contains(filter_lower.as_ref()))
+            .take(10)
+            .cloned()
+            .collect();
+
+        let mut load_path: Option<Arc<str>> = None;
+        let mut cancel = false;
+
+        {
+            let dl2 = &mut self.world.ui.draw_list;
+            let mut ui = Ui::new(dl2, Rect { x: rect.x + 4.0, y: rect.y + 32.0, w: rect.w - 8.0, h: ph - 60.0 });
+            ui.label("Select .glb file");
+
+            for path in &filtered {
+                let name = path.rsplit('/').next().unwrap_or(path.as_ref());
+                let name = name.rsplit('\\').next().unwrap_or(name);
+                if ui.button(name) {
+                    load_path = Some(Arc::clone(path));
+                }
+            }
+
+            let footer = Rect { x: rect.x + 4.0, y: rect.y + ph - 32.0, w: rect.w - 8.0, h: 28.0 };
+            let mut u2 = Ui::new(dl2, footer);
+            if u2.button("Cancel") { cancel = true; }
+        }
+
+        if let Some(path) = load_path {
+            if let Some(win) = self.win {
+                if let Ok(asset) = ctx.load_gltf(win, PathBuf::from(path.as_ref())) {
+                    self.do_spawn_mesh(asset);
+                }
+            }
+            self.picker_open = false;
+        }
+        if cancel { self.picker_open = false; }
+    }
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+
+fn collect_glb_paths(root: &str) -> ThinVec<Arc<str>> {
+    let mut out: ThinVec<Arc<str>> = ThinVec::new();
+    collect_glb_paths_into(root, &mut out);
+    out.sort_unstable();
+    out
+}
+
+fn collect_glb_paths_into(root: &str, out: &mut ThinVec<Arc<str>>) {
+    let Ok(rd) = std::fs::read_dir(root) else { return };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(s) = p.to_str() {
+                collect_glb_paths_into(s, out);
+            }
+        } else if p.extension().and_then(|e| e.to_str()) == Some("glb") {
+            if let Some(s) = p.to_str() {
+                out.push(Arc::from(s));
+            }
+        }
+    }
+}
+
+// ── main ───────────────────────────────────────────────────────────────────
+
 fn main() -> ForgeResult<()> {
-    let paths: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+    let paths: ThinVec<Arc<str>> = std::env::args()
+        .skip(1)
+        .map(|s| Arc::from(s.as_str()))
+        .collect();
     let paths = if paths.is_empty() {
-        vec![PathBuf::from("assets/models/BrainStem.glb")]
+        ThinVec::from(["assets/models/BrainStem.glb"].map(Arc::from))
     } else {
         paths
     };
     AppRunner::new(EditorApp {
-        asset_paths:       paths,
-        world:             World::new(dumpster_fire_engine::resource_manager::WorldId::new(1)),
-        main_stage:        None,
-        actors:            ThinVec::new(),
-        cam_fitted:        false,
-        start:             Instant::now(),
-        win:               None,
-        tonemap_op:        2,   // ACES default
-        frame_time_accum:  0.0,
-        frame_count_accum: 0,
-        fps_display:       0.0,
+        asset_paths:        paths,
+        world:              World::new(dumpster_fire_engine::resource_manager::WorldId::new(1)),
+        main_level:         None,
+        main_stage:         None,
+        actors:             ThinVec::new(),
+        cam_fitted:         false,
+        start:              Instant::now(),
+        win:                None,
+        grid_enabled:       true,
+        gizmo_mode:         GizmoMode::Translate,
+        gizmo_space:        GizmoSpace::World,
+        spawn_menu_open:    false,
+        light_submenu_open: false,
+        picker_open:        false,
+        picker_filter:      Arc::from(""),
+        picker_paths:       ThinVec::new(),
+        outliner_filter:    Arc::from(""),
+        frame_time_accum:   0.0,
+        frame_count_accum:  0,
+        fps_display:        0.0,
     }).run()
 }
