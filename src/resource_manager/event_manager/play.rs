@@ -760,15 +760,15 @@ fn active_configuration_into(
 // cue_scratch.
 
 fn compute_static_troupes(script: &Script) -> ThinVec<TroupeId> {
-    // Engine pattern: flat ThinVec with linear-scan dedup, matching how
-    // Stage::cache and Level::cache are stored. Troupe counts are tiny (<<100),
-    // so .contains() beats HashSet hashing here.
+    // Collect with duplicates allowed (O(N) collection), then sort+dedup at the
+    // end (O(N log N)). Avoids the O(N²) contains() calls in the inner BT walk.
+    // TroupeId: Ord (wraps i64), so sort_unstable + dedup is always correct.
     let mut all_troupes: ThinVec<TroupeId> = ThinVec::new();
     let mut moving:      ThinVec<TroupeId> = ThinVec::new();
 
     for def in script.scenes.iter() {
         for t in def.troupes.iter() {
-            if !all_troupes.contains(t) { all_troupes.push(*t); }
+            all_troupes.push(*t);
         }
         scan_effects(&def.on_enter, &mut all_troupes, &mut moving);
         scan_effects(&def.on_exit,  &mut all_troupes, &mut moving);
@@ -778,8 +778,14 @@ fn compute_static_troupes(script: &Script) -> ThinVec<TroupeId> {
         scan_bt(&def.root, &mut all_troupes, &mut moving);
     }
 
-    // static = all_troupes \ moving.
-    all_troupes.into_iter().filter(|t| !moving.contains(t)).collect()
+    all_troupes.sort_unstable();
+    all_troupes.dedup();
+    moving.sort_unstable();
+    moving.dedup();
+
+    // static = all_troupes \ moving.  O(N log M) with binary_search on sorted `moving`.
+    all_troupes.retain(|t| moving.binary_search(t).is_err());
+    all_troupes
 }
 
 fn scan_effects(
@@ -790,10 +796,8 @@ fn scan_effects(
     for e in effects {
         match e {
             Effect::CueTroupe { troupe, delta, .. } => {
-                if !all_troupes.contains(troupe) { all_troupes.push(*troupe); }
-                if *delta != Affine3A::IDENTITY && !moving.contains(troupe) {
-                    moving.push(*troupe);
-                }
+                all_troupes.push(*troupe);
+                if *delta != Affine3A::IDENTITY { moving.push(*troupe); }
             }
             Effect::ScheduleTransition { mealy, .. } => scan_effects(mealy, all_troupes, moving),
             _ => {}
@@ -817,10 +821,8 @@ fn scan_bt(
         BtNode::Decorator { child, .. } => scan_bt(child, all_troupes, moving),
         BtNode::Leaf(op) => {
             if let Effect::CueTroupe { troupe, delta, .. } = &*op.effect {
-                if !all_troupes.contains(troupe) { all_troupes.push(*troupe); }
-                if *delta != Affine3A::IDENTITY && !moving.contains(troupe) {
-                    moving.push(*troupe);
-                }
+                all_troupes.push(*troupe);
+                if *delta != Affine3A::IDENTITY { moving.push(*troupe); }
             }
         }
     }
