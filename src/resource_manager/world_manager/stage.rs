@@ -52,9 +52,11 @@ pub struct Stage {
     // corresponding Arena slot's generation, same as Actor itself.
     pub locals:      Vec<Affine3A>,
     pub worlds:      Vec<Affine3A>,
-    /// Packed dirty bitset — one bit per actor slot indexed by `actor_h.idx`.
-    /// One `u64` word covers 64 consecutive slots; 16 words covers 1024 actors.
-    pub dirty_words: Vec<u64>,
+    /// One bool per actor slot; true means the slot has a pending transform.
+    /// Kept parallel to `locals`/`worlds` (same length). Direct bool indexing
+    /// is faster than a packed bitset here because the code uses a dirty_actors
+    /// list for iteration — the flag is only ever queried at a single known index.
+    pub dirty_flags: Vec<bool>,
 }
 
 impl Stage {
@@ -76,7 +78,7 @@ impl Stage {
             cue_scratch,
             locals:       Vec::with_capacity(MAX_ACTORS_PER_STAGE),
             worlds:       Vec::with_capacity(MAX_ACTORS_PER_STAGE),
-            dirty_words:  Vec::with_capacity((MAX_ACTORS_PER_STAGE + 63) / 64),
+            dirty_flags:  Vec::with_capacity(MAX_ACTORS_PER_STAGE),
         }
     }
 
@@ -100,11 +102,12 @@ impl Stage {
         if idx == self.locals.len() {
             self.locals.push(local);
             self.worlds.push(Affine3A::IDENTITY);
+            self.dirty_flags.push(true);
         } else {
             self.locals[idx] = local;
             self.worlds[idx] = Affine3A::IDENTITY;
+            self.dirty_flags[idx] = true;
         }
-        bit_set(&mut self.dirty_words, idx);
         self.dirty_actors.push(h);
         h
     }
@@ -130,8 +133,8 @@ impl Stage {
             components: std::array::from_fn(|_| None),
         });
         let idx = actor_h.idx as usize;
-        if !bit_get(&self.dirty_words, idx) {
-            bit_set(&mut self.dirty_words, idx);
+        if !self.dirty_flags[idx] {
+            self.dirty_flags[idx] = true;
             self.dirty_actors.push(actor_h);
         }
         Some(variant_idx)
@@ -216,8 +219,8 @@ impl Stage {
         if !self.actors.contains(actor_h) { return }
         let idx = actor_h.idx as usize;
         self.locals[idx] = t;
-        if !bit_get(&self.dirty_words, idx) {
-            bit_set(&mut self.dirty_words, idx);
+        if !self.dirty_flags[idx] {
+            self.dirty_flags[idx] = true;
             self.dirty_actors.push(actor_h);
         }
     }
@@ -230,8 +233,8 @@ impl Stage {
             sub.dirty = true;
         }
         let idx = actor_h.idx as usize;
-        if !bit_get(&self.dirty_words, idx) {
-            bit_set(&mut self.dirty_words, idx);
+        if !self.dirty_flags[idx] {
+            self.dirty_flags[idx] = true;
             self.dirty_actors.push(actor_h);
         }
     }
@@ -283,7 +286,7 @@ impl Stage {
         delta: Affine3A,
     ) {
         // Disjoint-field borrow: we mutate `cue_scratch` while reading/mutating `play`.
-        let Self { play, cue_scratch, locals, dirty_words, dirty_actors, .. } = self;
+        let Self { play, cue_scratch, locals, dirty_flags, dirty_actors, .. } = self;
         let is_identity = delta == Affine3A::IDENTITY;
 
         // Static-troupe fast path: if the script never moves this troupe AND
@@ -319,9 +322,9 @@ impl Stage {
         // Identity short-circuit: ambient cues that re-publish the current
         // pose still want every member marked dirty/cued, but pay no math.
         if is_identity {
-            apply_identity_block_soa(locals, dirty_words, dirty_actors, cue_scratch);
+            apply_identity_block_soa(locals, dirty_flags, dirty_actors, cue_scratch);
         } else {
-            apply_delta_block_soa(locals, dirty_words, dirty_actors, cue_scratch, delta);
+            apply_delta_block_soa(locals, dirty_flags, dirty_actors, cue_scratch, delta);
         }
     }
 
@@ -334,7 +337,7 @@ impl Stage {
             return;
         }
 
-        let Self { dirty_actors, locals, worlds, dirty_words, actors, .. } = self;
+        let Self { dirty_actors, locals, worlds, dirty_flags, actors, .. } = self;
         let n = dirty_actors.len();
         let cap = locals.len();
 
@@ -344,14 +347,14 @@ impl Stage {
             let h1 = dirty_actors[i + 1];
             let h2 = dirty_actors[i + 2];
             let h3 = dirty_actors[i + 3];
-            propagate_one(h0, locals, worlds, dirty_words, actors, cap);
-            propagate_one(h1, locals, worlds, dirty_words, actors, cap);
-            propagate_one(h2, locals, worlds, dirty_words, actors, cap);
-            propagate_one(h3, locals, worlds, dirty_words, actors, cap);
+            propagate_one(h0, locals, worlds, dirty_flags, actors, cap);
+            propagate_one(h1, locals, worlds, dirty_flags, actors, cap);
+            propagate_one(h2, locals, worlds, dirty_flags, actors, cap);
+            propagate_one(h3, locals, worlds, dirty_flags, actors, cap);
             i += 4;
         }
         while i < n {
-            propagate_one(dirty_actors[i], locals, worlds, dirty_words, actors, cap);
+            propagate_one(dirty_actors[i], locals, worlds, dirty_flags, actors, cap);
             i += 1;
         }
 
@@ -384,7 +387,7 @@ fn propagate_one(
     actor_h: ActorHandle,
     locals: &[Affine3A],
     worlds: &mut [Affine3A],
-    dirty_words: &mut [u64],
+    dirty_flags: &mut [bool],
     actors: &mut Arena<ActorTag, Actor>,
     cap: usize,
 ) {
@@ -398,41 +401,13 @@ fn propagate_one(
     // because spawn_actor overwrites `locals[idx]` before any tick can read it.
     let actor_world = locals[idx];
     worlds[idx] = actor_world;
-    bit_clear(dirty_words, idx);
+    dirty_flags[idx] = false;
     if let Some(actor) = actors.get_mut(actor_h) {
         for sub in actor.sub_entities.iter_mut().flatten() {
             sub.world = actor_world * sub.local;
             sub.dirty = false;
         }
     }
-}
-
-// ── Packed bitset helpers ───────────────────────────────────────────────────
-//
-// `dirty_words` is a `Vec<u64>` where bit `idx` lives in word `idx >> 6` at
-// position `idx & 63`. This packs 64 actor dirty-flags per cache line word
-// (8 bytes), reducing L1 footprint by 8× over the old `Vec<bool>` layout.
-// `bit_set` grows the vec lazily so spawn_actor only needs one call regardless
-// of whether the slot is fresh or reused.
-
-#[inline(always)]
-fn bit_get(words: &[u64], idx: usize) -> bool {
-    let word = idx >> 6;
-    if word >= words.len() { return false; }
-    (words[word] >> (idx & 63)) & 1 != 0
-}
-
-#[inline(always)]
-fn bit_set(words: &mut Vec<u64>, idx: usize) {
-    let word = idx >> 6;
-    if word >= words.len() { words.resize(word + 1, 0u64); }
-    words[word] |= 1u64 << (idx & 63);
-}
-
-#[inline(always)]
-fn bit_clear(words: &mut [u64], idx: usize) {
-    let word = idx >> 6;
-    if word < words.len() { words[word] &= !(1u64 << (idx & 63)); }
 }
 
 // ── SoA cue-batch helpers ───────────────────────────────────────────────────
@@ -446,7 +421,7 @@ fn bit_clear(words: &mut [u64], idx: usize) {
 #[inline(always)]
 fn apply_delta_block_soa(
     locals: &mut [Affine3A],
-    dirty_words: &mut Vec<u64>,
+    dirty_flags: &mut [bool],
     dirty_actors: &mut ThinVec<ActorHandle>,
     handles: &[ActorHandle],
     delta: Affine3A,
@@ -467,19 +442,19 @@ fn apply_delta_block_soa(
 
         if i0 < cap {
             locals[i0] = delta * locals[i0];
-            if !bit_get(dirty_words, i0) { bit_set(dirty_words, i0); dirty_actors.push(h0); }
+            if !dirty_flags[i0] { dirty_flags[i0] = true; dirty_actors.push(h0); }
         }
         if i1 < cap {
             locals[i1] = delta * locals[i1];
-            if !bit_get(dirty_words, i1) { bit_set(dirty_words, i1); dirty_actors.push(h1); }
+            if !dirty_flags[i1] { dirty_flags[i1] = true; dirty_actors.push(h1); }
         }
         if i2 < cap {
             locals[i2] = delta * locals[i2];
-            if !bit_get(dirty_words, i2) { bit_set(dirty_words, i2); dirty_actors.push(h2); }
+            if !dirty_flags[i2] { dirty_flags[i2] = true; dirty_actors.push(h2); }
         }
         if i3 < cap {
             locals[i3] = delta * locals[i3];
-            if !bit_get(dirty_words, i3) { bit_set(dirty_words, i3); dirty_actors.push(h3); }
+            if !dirty_flags[i3] { dirty_flags[i3] = true; dirty_actors.push(h3); }
         }
         i += 4;
     }
@@ -489,7 +464,7 @@ fn apply_delta_block_soa(
         let idx = h.idx as usize;
         if idx < cap {
             locals[idx] = delta * locals[idx];
-            if !bit_get(dirty_words, idx) { bit_set(dirty_words, idx); dirty_actors.push(h); }
+            if !dirty_flags[idx] { dirty_flags[idx] = true; dirty_actors.push(h); }
         }
         i += 1;
     }
@@ -498,13 +473,13 @@ fn apply_delta_block_soa(
 #[inline(always)]
 fn apply_identity_block_soa(
     _locals: &mut [Affine3A],
-    dirty_words: &mut Vec<u64>,
+    dirty_flags: &mut [bool],
     dirty_actors: &mut ThinVec<ActorHandle>,
     handles: &[ActorHandle],
 ) {
     let mut i = 0;
     let n = handles.len();
-    // bit_get handles out-of-bounds by returning false, so no explicit cap guard needed.
+    let cap = dirty_flags.len();
 
     while i + 4 <= n {
         let h0 = handles[i];
@@ -516,17 +491,17 @@ fn apply_identity_block_soa(
         let i2 = h2.idx as usize;
         let i3 = h3.idx as usize;
 
-        if !bit_get(dirty_words, i0) { bit_set(dirty_words, i0); dirty_actors.push(h0); }
-        if !bit_get(dirty_words, i1) { bit_set(dirty_words, i1); dirty_actors.push(h1); }
-        if !bit_get(dirty_words, i2) { bit_set(dirty_words, i2); dirty_actors.push(h2); }
-        if !bit_get(dirty_words, i3) { bit_set(dirty_words, i3); dirty_actors.push(h3); }
+        if i0 < cap && !dirty_flags[i0] { dirty_flags[i0] = true; dirty_actors.push(h0); }
+        if i1 < cap && !dirty_flags[i1] { dirty_flags[i1] = true; dirty_actors.push(h1); }
+        if i2 < cap && !dirty_flags[i2] { dirty_flags[i2] = true; dirty_actors.push(h2); }
+        if i3 < cap && !dirty_flags[i3] { dirty_flags[i3] = true; dirty_actors.push(h3); }
         i += 4;
     }
 
     while i < n {
         let h = handles[i];
         let idx = h.idx as usize;
-        if !bit_get(dirty_words, idx) { bit_set(dirty_words, idx); dirty_actors.push(h); }
+        if idx < cap && !dirty_flags[idx] { dirty_flags[idx] = true; dirty_actors.push(h); }
         i += 1;
     }
 }
