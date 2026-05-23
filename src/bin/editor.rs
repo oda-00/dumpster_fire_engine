@@ -37,13 +37,18 @@ use dumpster_fire_engine::resource_manager::component::{
 use dumpster_fire_engine::resource_manager::manager::ActorHandle;
 
 struct EditorApp {
-    asset_paths: Vec<PathBuf>,
-    world:       World,
-    main_stage:  Option<(LevelHandle, StageHandle)>,
-    actors:      ThinVec<ActorHandle>,
-    cam_fitted:  bool,
-    start:       Instant,
-    win:         Option<AppHandle>,
+    asset_paths:      Vec<PathBuf>,
+    world:            World,
+    main_stage:       Option<(LevelHandle, StageHandle)>,
+    actors:           ThinVec<ActorHandle>,
+    cam_fitted:       bool,
+    start:            Instant,
+    win:              Option<AppHandle>,
+    /// Tonemap operator: 0 = Linear, 1 = Reinhard, 2 = ACES (default).
+    tonemap_op:       u32,
+    frame_time_accum: f32,
+    frame_count_accum: u32,
+    fps_display:      f32,
 }
 
 impl AppLogic for EditorApp {
@@ -122,9 +127,18 @@ impl AppLogic for EditorApp {
         false
     }
 
-    fn update(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle, _dt: f32) -> bool {
+    fn update(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle, dt: f32) -> bool {
         let Some(win) = self.win else { return true };
         if win != app { return true; }
+
+        // FPS tracking — smoothed over 0.5 s windows.
+        self.frame_time_accum  += dt;
+        self.frame_count_accum += 1;
+        if self.frame_time_accum >= 0.5 {
+            self.fps_display       = self.frame_count_accum as f32 / self.frame_time_accum;
+            self.frame_time_accum  = 0.0;
+            self.frame_count_accum = 0;
+        }
 
         ctx.poll_gltf_loaders(app).ok();
         self.world.propagate_transforms();
@@ -154,12 +168,16 @@ fn main() -> ForgeResult<()> {
         paths
     };
     AppRunner::new(EditorApp {
-        asset_paths: paths,
-        world:       World::new(dumpster_fire_engine::resource_manager::WorldId::new(1)),
-        main_stage:  None,
-        actors:      ThinVec::new(),
-        cam_fitted:  false,
-        start:       Instant::now(),
-        win:         None,
+        asset_paths:       paths,
+        world:             World::new(dumpster_fire_engine::resource_manager::WorldId::new(1)),
+        main_stage:        None,
+        actors:            ThinVec::new(),
+        cam_fitted:        false,
+        start:             Instant::now(),
+        win:               None,
+        tonemap_op:        2,   // ACES default
+        frame_time_accum:  0.0,
+        frame_count_accum: 0,
+        fps_display:       0.0,
     }).run()
 }

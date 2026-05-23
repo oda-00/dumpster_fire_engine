@@ -1,0 +1,40 @@
+use thin_vec::ThinVec;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct UiVertex {
+    pub pos:   [f32; 2],
+    pub uv:    [f32; 2],
+    pub color: [u8; 4],
+}
+
+pub struct DrawList {
+    pub vertices: ThinVec<UiVertex>,
+    pub indices:  ThinVec<u32>,
+}
+
+impl DrawList {
+    pub fn new() -> Self {
+        Self { vertices: ThinVec::new(), indices: ThinVec::new() }
+    }
+
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+    }
+
+    pub fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: [u8; 4]) {
+        let base = self.vertices.len() as u32;
+        self.vertices.extend_from_slice(&[
+            UiVertex { pos: [x,     y    ], uv: [uv[0], uv[1]], color },
+            UiVertex { pos: [x + w, y    ], uv: [uv[2], uv[1]], color },
+            UiVertex { pos: [x + w, y + h], uv: [uv[2], uv[3]], color },
+            UiVertex { pos: [x,     y + h], uv: [uv[0], uv[3]], color },
+        ]);
+        self.indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+    }
+}
+
+impl Default for DrawList {
+    fn default() -> Self { Self::new() }
+}

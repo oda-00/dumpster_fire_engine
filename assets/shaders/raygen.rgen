@@ -1,0 +1,86 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
+layout(set = 0, binding = 1, rgba16f) uniform image2D outputImage;
+
+struct LightGpu { vec4 ci; uint kind; uint flags; uint p0; uint p1; vec4 d[6]; };
+layout(set = 0, binding = 2) uniform Lights {
+    uint count; uint env_idx; uint sky_present; uint _p;
+    LightGpu lights[32];
+} u_lights;
+
+layout(push_constant) uniform Cam {
+    mat4  inv_vp;
+    vec3  cam_pos;      uint is_ortho;
+    vec3  cam_forward;  uint frame_count;
+    float aperture_radius;
+    float focus_distance;
+    uint  samples_per_pix;
+    uint  aperture_blades;
+    uvec2 pane_offset_px;
+    uvec2 pane_size_px;
+    float exposure_scale;
+    float _pad0; float _pad1; float _pad2;
+} cam;
+
+layout(location = 0) rayPayloadEXT vec4 payload;
+
+vec2 halton_2d(uint idx) {
+    uint b1 = idx; float h1 = 0.0, f1 = 0.5;
+    while (b1 > 0u) { h1 += f1 * float(b1 & 1u); b1 >>= 1u; f1 *= 0.5; }
+    uint b2 = idx; float h2 = 0.0, f2 = 1.0/3.0;
+    while (b2 > 0u) { h2 += f2 * float(b2 % 3u); b2 /= 3u; f2 /= 3.0; }
+    return vec2(h1, h2);
+}
+
+vec2 sample_aperture(uint blades, vec2 xi) {
+    if (blades < 3u) {
+        float r = sqrt(xi.x), t = 6.28318530 * xi.y;
+        return r * vec2(cos(t), sin(t));
+    }
+    uint  i = uint(xi.x * float(blades));
+    float u = fract(xi.x * float(blades)), v = xi.y;
+    if (u + v > 1.0) { u = 1.0 - u; v = 1.0 - v; }
+    float a0 = 6.28318530 * float(i)      / float(blades);
+    float a1 = 6.28318530 * float(i + 1u) / float(blades);
+    return u * vec2(cos(a0), sin(a0)) + v * vec2(cos(a1), sin(a1));
+}
+
+void main() {
+    ivec2 pix_local = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 pix       = ivec2(cam.pane_offset_px) + pix_local;
+    vec2  uv        = (vec2(pix_local) + 0.5) / vec2(cam.pane_size_px);
+    vec2  ndc       = uv * 2.0 - 1.0;
+
+    vec3 accum = vec3(0.0);
+    uint spp   = max(1u, cam.samples_per_pix);
+    for (uint s = 0u; s < spp; s++) {
+        vec2 xi = halton_2d(cam.frame_count * spp + s);
+        vec3 origin, dir;
+        if (cam.is_ortho == 1u) {
+            vec4 op = cam.inv_vp * vec4(ndc, -1.0, 1.0);
+            origin  = op.xyz / op.w;
+            dir     = normalize(cam.cam_forward);
+        } else {
+            vec4 o_h = cam.inv_vp * vec4(ndc, -1.0, 1.0);
+            vec4 t_h = cam.inv_vp * vec4(ndc,  1.0, 1.0);
+            origin   = cam.cam_pos;
+            dir      = normalize(t_h.xyz / t_h.w - o_h.xyz / o_h.w);
+            if (cam.aperture_radius > 0.0 && spp > 1u) {
+                vec2 ap       = sample_aperture(cam.aperture_blades, xi) * cam.aperture_radius;
+                vec3 focal_pt = origin + dir * cam.focus_distance;
+                vec3 right    = normalize(cross(cam.cam_forward, vec3(0.0, 1.0, 0.0)));
+                vec3 upax     = cross(right, cam.cam_forward);
+                origin        = origin + right * ap.x + upax * ap.y;
+                dir           = normalize(focal_pt - origin);
+            }
+        }
+        payload = vec4(0.0);
+        traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0xFF,
+                    0, 0, 0, origin, 0.001, dir, 10000.0, 0);
+        accum += payload.rgb;
+    }
+    accum /= float(spp);
+    imageStore(outputImage, pix, vec4(accum * cam.exposure_scale, 1.0));
+}

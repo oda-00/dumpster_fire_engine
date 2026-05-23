@@ -670,12 +670,24 @@ fn bench_deep_hsm(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches,
-    bench_world_build,
-    bench_tick_steady,
-    bench_tick_scaling,
-    bench_tick_phases,
-    bench_transition_storm,
-    bench_deep_hsm,
-);
+// ── Flamegraph profiler group (Phase 15) ─────────────────────────────────────
+//
+// Run with:
+//   cargo bench --bench game_tick -- --profile-time=10
+// Output: target/criterion/<bench>/profile/flamegraph.svg
+
+use pprof::criterion::{Output, PProfProfiler};
+
+criterion_group! {
+    name    = benches;
+    config  = Criterion::default()
+        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    targets =
+        bench_world_build,
+        bench_tick_steady,
+        bench_tick_scaling,
+        bench_tick_phases,
+        bench_transition_storm,
+        bench_deep_hsm
+}
 criterion_main!(benches);
