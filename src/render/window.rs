@@ -94,6 +94,14 @@ pub struct GraphicsState {
 
     pub current_frame: usize,
     pub needs_resize: bool,
+
+    /// Phase 8/10 — HDR tonemap + overlay passes. Built lazily; when `None`
+    /// the renderer falls back to the legacy single-pass write-direct-to-
+    /// swapchain path.
+    pub overlay: Option<crate::render::overlay::OverlayPipeline>,
+    /// Phase 9 — RT pipeline + SBT + TLAS. Same lazy-init pattern; `None`
+    /// when `has_ray_tracing == false` or build failed.
+    pub rt: Option<crate::render::rt_pipeline::RtPipeline>,
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -274,6 +282,8 @@ impl Window {
                 render_finished_semaphores,
                 current_frame: 0,
                 needs_resize: false,
+                overlay: None,
+                rt: None,
             }),
         })
     }
@@ -298,6 +308,38 @@ impl Window {
             .expect("attach_skinned_forge requires a graphics window");
         let mold = forge.compile(device, gfx.swapchain_format, gfx.depth_format, gfx.msaa_samples)?;
         gfx.skinned_mold = Some(mold);
+        Ok(())
+    }
+
+    /// Phase 8/10 — bring up the HDR tonemap + overlay passes. Builds
+    /// per-swapchain-image HDR images, the tonemap pipeline + descriptor
+    /// sets, and the overlay LOAD_OP_LOAD render pass. Idempotent: returns
+    /// `Ok(())` if already initialised.
+    pub fn init_overlay_pipeline(&mut self, device: &ash::Device) -> ForgeResult<()> {
+        let gfx = self.graphics.as_mut()
+            .expect("init_overlay_pipeline requires a graphics window");
+        if gfx.overlay.is_some() { return Ok(()); }
+        let views: ThinVec<vk::ImageView> = gfx.swapchain_image_views.iter().copied().collect();
+        let overlay = crate::render::overlay::OverlayPipeline::new(
+            device,
+            &gfx.memory_properties,
+            gfx.swapchain_format,
+            &views,
+            gfx.swapchain_extent,
+        )?;
+        gfx.overlay = Some(overlay);
+        Ok(())
+    }
+
+    /// Phase 9 — bring up the RT pipeline + SBT. Requires
+    /// `VulkanContext::has_ray_tracing == true`; otherwise no-op.
+    pub fn init_rt_pipeline(&mut self, vulkan: &crate::render::vulkan::VulkanContext) -> ForgeResult<()> {
+        if !vulkan.has_ray_tracing { return Ok(()); }
+        let gfx = self.graphics.as_mut()
+            .expect("init_rt_pipeline requires a graphics window");
+        if gfx.rt.is_some() { return Ok(()); }
+        let rt = crate::render::rt_pipeline::RtPipeline::new(vulkan)?;
+        gfx.rt = Some(rt);
         Ok(())
     }
 
@@ -351,6 +393,10 @@ impl Window {
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         if let Some(ref mut gfx) = self.graphics {
             unsafe {
+                if let Some(mut o) = gfx.overlay.take() { o.destroy(device); }
+                // rt destruction needs the VulkanContext (KHR loader) — skip;
+                // shutdown path runs after device_wait_idle so leaked handles
+                // are reclaimed at process exit.
                 for f in gfx.in_flight_fences.iter_mut() {
                     if *f != vk::Fence::null() {
                         device.destroy_fence(*f, None);
@@ -450,6 +496,11 @@ impl Window {
                 }
             }
             gfx.swapchain_image_views.clear();
+
+            // Destroy the previous overlay pipeline — its framebuffers and
+            // HDR images are sized to the old swapchain extent. Rebuilt
+            // below once the new swapchain images exist.
+            if let Some(mut o) = gfx.overlay.take() { o.destroy(device); }
         }
 
         // Rebuild via the shared helper (oldSwapchain = current handle for
@@ -497,6 +548,17 @@ impl Window {
         gfx.framebuffers = framebuffers;
         gfx.render_finished_semaphores = render_finished_semaphores;
         gfx.needs_resize = false;
+
+        // Rebuild the overlay pipeline against the new swapchain dimensions.
+        let views: ThinVec<vk::ImageView> = gfx.swapchain_image_views.iter().copied().collect();
+        let overlay = crate::render::overlay::OverlayPipeline::new(
+            device,
+            &gfx.memory_properties,
+            gfx.swapchain_format,
+            &views,
+            gfx.swapchain_extent,
+        )?;
+        gfx.overlay = Some(overlay);
 
         Ok(())
     }
@@ -1040,6 +1102,125 @@ impl Window {
             }
 
             device.cmd_end_render_pass(command_buffer);
+
+            // Phase 8 + 10 — when the HDR overlay pipeline is online, record
+            // the tonemap + overlay passes onto the same command buffer. The
+            // scene draws above wrote to the swapchain image (legacy path),
+            // so we copy that into the HDR image first to give the tonemap
+            // sampler something to read. This lets the three-pass graph land
+            // without touching every existing forge's framebuffer attachment
+            // contract.
+            if let Some(overlay) = gfx.overlay.as_ref() {
+                let swap_img = gfx.swapchain_images[image_index as usize];
+                let hdr_img = overlay.hdr_images[image_index as usize].handle;
+
+                // Swapchain: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC.
+                // HDR:       UNDEFINED → TRANSFER_DST.
+                let pre_blit = [
+                    vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                        .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .image(swap_img)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 1,
+                        }),
+                    vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .src_access_mask(vk::AccessFlags2::NONE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                        .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .image(hdr_img)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 1,
+                        }),
+                ];
+                device.cmd_pipeline_barrier2(
+                    command_buffer,
+                    &vk::DependencyInfo::default().image_memory_barriers(&pre_blit),
+                );
+
+                // Blit swapchain → HDR (linear filter, 1:1).
+                let extent = gfx.swapchain_extent;
+                let region = vk::ImageBlit {
+                    src_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0, base_array_layer: 0, layer_count: 1,
+                    },
+                    src_offsets: [
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D { x: extent.width as i32, y: extent.height as i32, z: 1 },
+                    ],
+                    dst_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0, base_array_layer: 0, layer_count: 1,
+                    },
+                    dst_offsets: [
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D { x: extent.width as i32, y: extent.height as i32, z: 1 },
+                    ],
+                };
+                device.cmd_blit_image(
+                    command_buffer,
+                    swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    hdr_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[region], vk::Filter::LINEAR,
+                );
+
+                // HDR: TRANSFER_DST → COLOR_ATTACHMENT_OPTIMAL (so `overlay.record`
+                // can transition it to SHADER_READ_ONLY_OPTIMAL with its standard
+                // barrier). Swapchain: TRANSFER_SRC → COLOR_ATTACHMENT_OPTIMAL
+                // for the tonemap pass output.
+                let post_blit = [
+                    vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .image(hdr_img)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 1,
+                        }),
+                    vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                        .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                        .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .image(swap_img)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0, level_count: 1,
+                            base_array_layer: 0, layer_count: 1,
+                        }),
+                ];
+                device.cmd_pipeline_barrier2(
+                    command_buffer,
+                    &vk::DependencyInfo::default().image_memory_barriers(&post_blit),
+                );
+
+                // Run the tonemap + overlay passes.
+                overlay.record(device, command_buffer, image_index, crate::render::overlay::TonemapPush {
+                    exposure_scale: 1.0,
+                    op:             2, // ACES default
+                    _pad:           [0; 2],
+                });
+            }
+
             device.end_command_buffer(command_buffer).map_err(ForgeError::Vk)?;
         }
 
