@@ -1,2 +1,4 @@
 /target
 .claude/
+.env.toolchain
+.env.toolchain.ps1
