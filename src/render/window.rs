@@ -343,6 +343,39 @@ impl Window {
         Ok(())
     }
 
+    /// Phase 12 — upload UI draw data for the next frame. `verts` is the
+    /// flat `&[UiVertex]` byte slice and `indices` is u32 indices as bytes.
+    /// Stored into the next FIF slot of the overlay pipeline; consumed
+    /// during the overlay pass.
+    pub fn set_ui_draw(
+        &mut self,
+        device:     &ash::Device,
+        vert_bytes: &[u8],
+        idx_bytes:  &[u8],
+        vert_count: u32,
+        idx_count:  u32,
+    ) -> ForgeResult<()> {
+        let gfx = self.graphics.as_mut()
+            .expect("set_ui_draw requires a graphics window");
+        // Make sure overlay is built — bring it up on first call.
+        if gfx.overlay.is_none() {
+            let views: ThinVec<vk::ImageView> = gfx.swapchain_image_views.iter().copied().collect();
+            let overlay = crate::render::overlay::OverlayPipeline::new(
+                device,
+                &gfx.memory_properties,
+                gfx.swapchain_format,
+                &views,
+                gfx.swapchain_extent,
+            )?;
+            gfx.overlay = Some(overlay);
+        }
+        if let Some(overlay) = gfx.overlay.as_mut() {
+            let frame = gfx.current_frame;
+            overlay.upload_ui(device, frame, vert_bytes, idx_bytes, vert_count, idx_count)?;
+        }
+        Ok(())
+    }
+
     /// Wait on the fence belonging to the most recently submitted frame.
     /// After this returns, the GPU has finished that submission and any
     /// resources it referenced (descriptor sets, compute output buffers,
@@ -1218,7 +1251,7 @@ impl Window {
                     exposure_scale: 1.0,
                     op:             2, // ACES default
                     _pad:           [0; 2],
-                });
+                }, frame);
             }
 
             device.end_command_buffer(command_buffer).map_err(ForgeError::Vk)?;

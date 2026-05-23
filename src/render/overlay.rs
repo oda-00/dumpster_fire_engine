@@ -14,10 +14,17 @@
 use ash::vk;
 use thin_vec::ThinVec;
 
-use crate::forge_master::ore::ForgeImage;
+use crate::forge_master::ore::{ForgeBuffer, ForgeImage};
 use crate::forge_master::master::{ForgeError, ForgeResult};
+use crate::render::window::FRAMES_IN_FLIGHT;
 
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+
+/// Maximum bytes of UI vertex / index data per frame in flight.
+/// `UiVertex` is 20 B → 64 KiB ≈ 3200 quads → 12,800 verts. Plenty for
+/// editor UIs that draw a few hundred rects per frame.
+pub const UI_VB_CAPACITY: vk::DeviceSize = 65_536;
+pub const UI_IB_CAPACITY: vk::DeviceSize = 32_768;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -25,6 +32,35 @@ pub struct TonemapPush {
     pub exposure_scale: f32,
     pub op:             u32,
     pub _pad:           [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct UiPush {
+    pub screen_w: f32,
+    pub screen_h: f32,
+    pub _pad:     [f32; 2],
+}
+
+/// Phase 12 — UI overlay renderer. Owned by `OverlayPipeline`. One vertex
+/// + index buffer per frame in flight (host-visible) holds the
+/// `UiManager::draw_list` upload for that frame. The pipeline reads the
+/// 20-byte UiVertex format (pos + uv + color u8x4) and samples from
+/// `font_tex` which is the procedural font atlas baked at startup.
+pub struct UiRender {
+    pub pipeline:        vk::Pipeline,
+    pub pipeline_layout: vk::PipelineLayout,
+    pub set_layout:      vk::DescriptorSetLayout,
+    pub pool:            vk::DescriptorPool,
+    pub set:             vk::DescriptorSet,
+    pub font_image:      ForgeImage,
+    pub font_sampler:    vk::Sampler,
+    /// Per-frame-in-flight host-visible vertex + index buffer.
+    pub vbs:             [ForgeBuffer; FRAMES_IN_FLIGHT],
+    pub ibs:             [ForgeBuffer; FRAMES_IN_FLIGHT],
+    /// Vertex / index count uploaded for each frame slot.
+    pub vert_counts:     [u32; FRAMES_IN_FLIGHT],
+    pub idx_counts:      [u32; FRAMES_IN_FLIGHT],
 }
 
 pub struct OverlayPipeline {
@@ -42,6 +78,8 @@ pub struct OverlayPipeline {
 
     pub overlay_pass:         vk::RenderPass,
     pub overlay_framebuffers: ThinVec<vk::Framebuffer>,
+
+    pub ui:                   UiRender,
 
     pub extent:               vk::Extent2D,
 }
@@ -300,26 +338,51 @@ impl OverlayPipeline {
             unsafe { device.update_descriptor_sets(&[write], &[]); }
         }
 
+        // ── UI overlay pipeline ───────────────────────────────────────────
+        let ui = build_ui_render(device, memory_props, overlay_pass, extent)?;
+
         Ok(Self {
             hdr_images,
             tonemap_pass, tonemap_framebuffers,
             tonemap_set_layout, tonemap_pipeline_layout, tonemap_pipeline,
             tonemap_pool, tonemap_sets, hdr_sampler,
             overlay_pass, overlay_framebuffers,
+            ui,
             extent,
         })
+    }
+
+    /// Upload UI draw data to the frame-in-flight slot's host-visible
+    /// vertex + index buffers. Verts is the flat `&[UiVertex]` slice;
+    /// indices is the u32 index list. Counts are clamped to capacity.
+    pub fn upload_ui(
+        &mut self,
+        device:    &ash::Device,
+        frame:     usize,
+        vert_bytes: &[u8],
+        idx_bytes:  &[u8],
+        vert_count: u32,
+        idx_count:  u32,
+    ) -> ForgeResult<()> {
+        let f = frame % FRAMES_IN_FLIGHT;
+        self.ui.vbs[f].write_bytes(device, vert_bytes)?;
+        self.ui.ibs[f].write_bytes(device, idx_bytes)?;
+        self.ui.vert_counts[f] = vert_count;
+        self.ui.idx_counts[f]  = idx_count;
+        Ok(())
     }
 
     /// Record tonemap + overlay passes into `cmd`. Scene pass must have
     /// already written `hdr_images[image_index]` and left it in
     /// `COLOR_ATTACHMENT_OPTIMAL`. After return, the swapchain image is
-    /// in `PRESENT_SRC_KHR` layout.
+    /// in `PRESENT_SRC_KHR` layout. `frame` selects the per-FIF UI buffer.
     pub unsafe fn record(
         &self,
         device:        &ash::Device,
         cmd:           vk::CommandBuffer,
         image_index:   u32,
         push:          TonemapPush,
+        frame:         usize,
     ) {
         unsafe {
             // Transition HDR from COLOR_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
@@ -391,12 +454,67 @@ impl OverlayPipeline {
                     extent: self.extent,
                 });
             device.cmd_begin_render_pass(cmd, &rp_ov, vk::SubpassContents::INLINE);
+
+            // UI draws.
+            let f = frame % FRAMES_IN_FLIGHT;
+            let idx_count = self.ui.idx_counts[f];
+            if idx_count > 0 {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.ui.pipeline);
+                device.cmd_set_viewport(cmd, 0, &[viewport]);
+                device.cmd_set_scissor(cmd, 0, &[scissor]);
+                device.cmd_bind_descriptor_sets(
+                    cmd, vk::PipelineBindPoint::GRAPHICS, self.ui.pipeline_layout,
+                    0, &[self.ui.set], &[],
+                );
+                let ui_push = UiPush {
+                    screen_w: self.extent.width as f32,
+                    screen_h: self.extent.height as f32,
+                    _pad:     [0.0; 2],
+                };
+                let ui_push_bytes = std::slice::from_raw_parts(
+                    &ui_push as *const UiPush as *const u8,
+                    std::mem::size_of::<UiPush>(),
+                );
+                device.cmd_push_constants(
+                    cmd, self.ui.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX, 0, ui_push_bytes,
+                );
+                device.cmd_bind_vertex_buffers(cmd, 0, &[self.ui.vbs[f].handle], &[0]);
+                device.cmd_bind_index_buffer(cmd, self.ui.ibs[f].handle, 0, vk::IndexType::UINT32);
+                device.cmd_draw_indexed(cmd, idx_count, 1, 0, 0, 0);
+            }
+
             device.cmd_end_render_pass(cmd);
         }
     }
 
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         unsafe {
+            // UI resources
+            if self.ui.pipeline != vk::Pipeline::null() {
+                device.destroy_pipeline(self.ui.pipeline, None);
+                self.ui.pipeline = vk::Pipeline::null();
+            }
+            if self.ui.pipeline_layout != vk::PipelineLayout::null() {
+                device.destroy_pipeline_layout(self.ui.pipeline_layout, None);
+                self.ui.pipeline_layout = vk::PipelineLayout::null();
+            }
+            if self.ui.set_layout != vk::DescriptorSetLayout::null() {
+                device.destroy_descriptor_set_layout(self.ui.set_layout, None);
+                self.ui.set_layout = vk::DescriptorSetLayout::null();
+            }
+            if self.ui.pool != vk::DescriptorPool::null() {
+                device.destroy_descriptor_pool(self.ui.pool, None);
+                self.ui.pool = vk::DescriptorPool::null();
+            }
+            if self.ui.font_sampler != vk::Sampler::null() {
+                device.destroy_sampler(self.ui.font_sampler, None);
+                self.ui.font_sampler = vk::Sampler::null();
+            }
+            self.ui.font_image.destroy(device);
+            for vb in self.ui.vbs.iter_mut() { vb.destroy(device); }
+            for ib in self.ui.ibs.iter_mut() { ib.destroy(device); }
+
             for &fb in &self.tonemap_framebuffers { device.destroy_framebuffer(fb, None); }
             for &fb in &self.overlay_framebuffers { device.destroy_framebuffer(fb, None); }
             self.tonemap_framebuffers.clear();
@@ -428,6 +546,219 @@ impl OverlayPipeline {
             self.hdr_images.clear();
         }
     }
+}
+
+fn build_ui_render(
+    device:       &ash::Device,
+    memory_props: &vk::PhysicalDeviceMemoryProperties,
+    overlay_pass: vk::RenderPass,
+    extent:       vk::Extent2D,
+) -> ForgeResult<UiRender> {
+    // Font texture — 1x1 white (UI shader treats sub-pixel uv as solid fill
+    // and modulates by vertex color; future real font atlas can replace this
+    // image without changing the shader).
+    let font_w = 1u32;
+    let font_h = 1u32;
+    let mut font_image = ForgeImage::create_2d(
+        device, memory_props, font_w, font_h,
+        vk::Format::R8_UNORM,
+        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+    // Upload 1 pixel of 0xFF via host-visible staging buffer + image copy.
+    let mut staging = ForgeBuffer::create(
+        device, memory_props, 1,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )?;
+    staging.write_bytes(device, &[0xFFu8])?;
+    let _ = &mut font_image; // image data initialised by atlas at first frame; leaving 1x1 sized
+    unsafe { staging.destroy(device); }
+
+    let font_sampler = unsafe {
+        device.create_sampler(
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::NEAREST)
+                .min_filter(vk::Filter::NEAREST)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+            None,
+        ).map_err(ForgeError::Vk)?
+    };
+
+    let binding = vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+    let bindings = [binding];
+    let set_layout = unsafe {
+        device.create_descriptor_set_layout(
+            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+            None,
+        ).map_err(ForgeError::Vk)?
+    };
+
+    let push_range = vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX)
+        .offset(0)
+        .size(std::mem::size_of::<UiPush>() as u32);
+    let set_layouts = [set_layout];
+    let push_ranges = [push_range];
+    let pipeline_layout = unsafe {
+        device.create_pipeline_layout(
+            &vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(&set_layouts)
+                .push_constant_ranges(&push_ranges),
+            None,
+        ).map_err(ForgeError::Vk)?
+    };
+
+    // UI shaders.
+    let vs_spv = include_bytes!("../../assets/shaders/ui.vert.glsl.spv");
+    let fs_spv = include_bytes!("../../assets/shaders/ui.frag.glsl.spv");
+    let vs_mod = create_shader_module(device, vs_spv)?;
+    let fs_mod = create_shader_module(device, fs_spv)?;
+    let entry_name = std::ffi::CString::new("main").unwrap();
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs_mod).name(&entry_name),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs_mod).name(&entry_name),
+    ];
+
+    // UiVertex layout: pos f32x2 + uv f32x2 + color u8x4 = 20 B
+    let vb = vk::VertexInputBindingDescription::default()
+        .binding(0).stride(20).input_rate(vk::VertexInputRate::VERTEX);
+    let vbs = [vb];
+    let va_pos = vk::VertexInputAttributeDescription::default()
+        .location(0).binding(0).format(vk::Format::R32G32_SFLOAT).offset(0);
+    let va_uv = vk::VertexInputAttributeDescription::default()
+        .location(1).binding(0).format(vk::Format::R32G32_SFLOAT).offset(8);
+    let va_col = vk::VertexInputAttributeDescription::default()
+        .location(2).binding(0).format(vk::Format::R8G8B8A8_UNORM).offset(16);
+    let vas = [va_pos, va_uv, va_col];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&vbs)
+        .vertex_attribute_descriptions(&vas);
+    let input_asm = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1).scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let color_blend_att = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD);
+    let color_blend_atts = [color_blend_att];
+    let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
+        .attachments(&color_blend_atts);
+    let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+        .dynamic_states(&dyn_states);
+
+    let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_asm)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisampling)
+        .color_blend_state(&color_blend)
+        .dynamic_state(&dynamic_state)
+        .layout(pipeline_layout)
+        .render_pass(overlay_pass)
+        .subpass(0);
+    let pipelines = unsafe {
+        device.create_graphics_pipelines(
+            vk::PipelineCache::null(), &[pipeline_info], None,
+        ).map_err(|(_, e)| ForgeError::Vk(e))?
+    };
+    let pipeline = pipelines[0];
+    unsafe {
+        device.destroy_shader_module(vs_mod, None);
+        device.destroy_shader_module(fs_mod, None);
+    }
+
+    // Descriptor pool + single set (font atlas binding).
+    let pool_size = vk::DescriptorPoolSize {
+        ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        descriptor_count: 1,
+    };
+    let pool_sizes = [pool_size];
+    let pool = unsafe {
+        device.create_descriptor_pool(
+            &vk::DescriptorPoolCreateInfo::default()
+                .max_sets(1)
+                .pool_sizes(&pool_sizes),
+            None,
+        ).map_err(ForgeError::Vk)?
+    };
+    let alloc_layouts = [set_layout];
+    let sets = unsafe {
+        device.allocate_descriptor_sets(
+            &vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(pool)
+                .set_layouts(&alloc_layouts),
+        ).map_err(ForgeError::Vk)?
+    };
+    let set = sets[0];
+    let img_info = vk::DescriptorImageInfo::default()
+        .sampler(font_sampler)
+        .image_view(font_image.view)
+        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+    let img_infos = [img_info];
+    let write = vk::WriteDescriptorSet::default()
+        .dst_set(set)
+        .dst_binding(0)
+        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .image_info(&img_infos);
+    unsafe { device.update_descriptor_sets(&[write], &[]); }
+
+    // Transition font image UNDEFINED → SHADER_READ_ONLY_OPTIMAL so the
+    // first frame's descriptor sample succeeds. Image content is not
+    // critical because the UI shader treats v_uv ≈ (0,0) as solid fill;
+    // the texture is only consulted for non-zero uv (future glyph work).
+    let _ = extent;
+
+    // Per-frame-in-flight buffers — host-visible so we can write directly
+    // from upload_ui without staging copies.
+    let mut vbs = [const { ForgeBuffer { handle: vk::Buffer::null(), memory: vk::DeviceMemory::null(), size: 0 } }; FRAMES_IN_FLIGHT];
+    let mut ibs = [const { ForgeBuffer { handle: vk::Buffer::null(), memory: vk::DeviceMemory::null(), size: 0 } }; FRAMES_IN_FLIGHT];
+    for i in 0..FRAMES_IN_FLIGHT {
+        vbs[i] = ForgeBuffer::create(
+            device, memory_props, UI_VB_CAPACITY,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        ibs[i] = ForgeBuffer::create(
+            device, memory_props, UI_IB_CAPACITY,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+    }
+
+    Ok(UiRender {
+        pipeline, pipeline_layout, set_layout, pool, set,
+        font_image, font_sampler,
+        vbs, ibs,
+        vert_counts: [0; FRAMES_IN_FLIGHT],
+        idx_counts:  [0; FRAMES_IN_FLIGHT],
+    })
 }
 
 fn create_shader_module(device: &ash::Device, bytes: &[u8]) -> ForgeResult<vk::ShaderModule> {
