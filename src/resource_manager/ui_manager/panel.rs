@@ -1,13 +1,12 @@
 use thin_vec::ThinVec;
-use crate::resource_manager::manager::Handle;
-use super::layout::Rect;
+pub use super::tag::{PanelTag, PanelHandle};
 use super::widget::WidgetHandle;
-
-pub struct PanelTag;
-pub type PanelHandle = Handle<PanelTag>;
+use super::layout::{Rect, LayoutSpec};
+use super::input::UiInputState;
 
 pub struct Panel {
     pub rect:     Rect,
+    pub layout:   LayoutSpec,
     pub children: ThinVec<WidgetHandle>,
     pub scissor:  bool,
     pub visible:  bool,
@@ -15,6 +14,31 @@ pub struct Panel {
 
 impl Panel {
     pub fn new(rect: Rect) -> Self {
-        Self { rect, children: ThinVec::new(), scissor: false, visible: true }
+        Self {
+            rect,
+            layout: LayoutSpec::default(),
+            children: ThinVec::new(),
+            scissor: false,
+            visible: true,
+        }
+    }
+
+    /// Cascade-tick gear: Panel forwards into each child Widget directly.
+    /// Cascade order: World → UiManager → Panel → Widget.
+    pub fn tick(
+        &mut self,
+        widgets: &mut crate::resource_manager::manager::Arena<
+            crate::resource_manager::ui_manager::widget::WidgetTag,
+            crate::resource_manager::ui_manager::widget::Widget,
+        >,
+        input: &UiInputState,
+        dt: f32,
+    ) {
+        if !self.visible { return; }
+        for &child_h in &self.children {
+            if let Some(w) = widgets.get_mut(child_h) {
+                w.tick(input, dt);
+            }
+        }
     }
 }

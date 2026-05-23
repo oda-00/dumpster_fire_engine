@@ -405,6 +405,11 @@ impl World {
                         });
                 }
             }
+            Effect::UiAction { .. } => {
+                // UiAction effects are observed by the consumer (editor / game)
+                // by draining the per-tick effect buffer; World itself has no
+                // direct UI-action handler.
+            }
         }
     }
 }
