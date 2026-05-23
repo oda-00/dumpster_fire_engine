@@ -1129,6 +1129,36 @@ fn image_layout_barrier_mips(
             .base_array_layer(0).layer_count(1))
 }
 
+// ─── Mesh records (RT closest-hit lookup table) ──────────────────────────────
+//
+// `MeshRecord` is one entry per mesh primitive in a single SSBO at
+// `set = 0, binding = 3` of the RT pipeline. The chit shader uses
+// `gl_InstanceCustomIndexEXT` to index this table, then reads back the
+// vertex+index buffer device addresses + the material index for that
+// primitive. `emissive_area` is the sum of triangle areas weighted by
+// emissive_factor — used by `Mesh` light NEE in the chit shader.
+//
+// Built once after all gltf primitives upload; rebuilt only when an asset
+// list changes (e.g. user spawns a new glb actor in the editor).
+
+#[repr(C, align(16))]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct MeshRecord {
+    pub vertex_addr:   u64,   // BDA of ForgeVertex[]
+    pub index_addr:    u64,   // BDA of u32[]
+    pub vertex_stride: u32,   // sizeof(ForgeVertex) = 48
+    pub material_idx:  u32,   // index into materials[]
+    pub emissive_area: f32,   // sum of emissive-triangle areas (0 if non-emissive)
+    pub _pad:          u32,
+}
+
+// Compile-time layout assertion — std430 SSBO; the chit shader's struct
+// must mirror this exactly.
+const _: () = {
+    assert!(core::mem::size_of::<MeshRecord>()  == 32);
+    assert!(core::mem::align_of::<MeshRecord>() == 16);
+};
+
 // ─── Light substrate (GPU side) ──────────────────────────────────────────────
 //
 // `LightGpu` is the fragment / chit shader's view of one light: a flat 128-byte

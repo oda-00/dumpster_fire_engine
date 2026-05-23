@@ -22,11 +22,20 @@ layout(set = 3, binding = 0) readonly buffer Instances {
 
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outUv;
+// Phase 7: world-space (instance-frame) position for the 20-kind lighting
+// loop. With a single model the instance frame IS the world frame; for
+// instanced/transformed actors the host's MVP collapses the actor world
+// into pc.mvp, so light-position deltas in this frame stay consistent
+// when lights are also given in instance-local coordinates (the editor's
+// default scene framing). When the engine splits model from view-proj
+// (push constants growing to 128 B), this becomes the true world-space.
+layout(location = 2) out vec3 outWorldPos;
 
 void main() {
     mat4 instance_offset = instances.m[gl_InstanceIndex];
     vec4 world_pos = instance_offset * vec4(inPosition, 1.0);
-    gl_Position = pc.mvp * world_pos;
-    outNormal   = mat3(instance_offset) * inNormal;
-    outUv       = inUv;
+    gl_Position  = pc.mvp * world_pos;
+    outNormal    = mat3(instance_offset) * inNormal;
+    outUv        = inUv;
+    outWorldPos  = world_pos.xyz;
 }

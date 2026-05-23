@@ -30,14 +30,26 @@ pub enum GraphicsOreKind {
     /// depth write off. Back-to-front order is enforced by the
     /// SplatSort compute Ore that runs ahead.
     GaussianSplat,
+    /// Procedural wire grid + world-axis emphasis + per-pane ortho overlays
+    /// + light/camera gizmos. Geometry is generated in the vertex shader
+    /// from `gl_VertexIndex` — zero vertex bindings, one `cmd_draw` per
+    /// pane in the overlay pass. See `assets/shaders/debug_lines.vert.glsl`
+    /// and the `DebugLinesPush` host-side struct in `render::debug_lines`.
+    DebugLines,
+    /// Full-screen HDR→sRGB tonemap (Linear / Reinhard / ACES). Runs in
+    /// its own pass between the scene pass and the overlay pass; reads the
+    /// HDR scene image at set 0 binding 0 and writes the swapchain image.
+    Tonemap,
 }
 
 impl GraphicsOreKind {
-    pub const ALL: [GraphicsOreKind; 4] = [
+    pub const ALL: [GraphicsOreKind; 6] = [
         GraphicsOreKind::ForwardLit,
         GraphicsOreKind::SkinnedForwardLit,
         GraphicsOreKind::Ui,
         GraphicsOreKind::GaussianSplat,
+        GraphicsOreKind::DebugLines,
+        GraphicsOreKind::Tonemap,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -125,7 +137,7 @@ impl OreKind {
     pub const COMPUTE_COUNT: usize = Self::COMPUTE_ALL.len();
 
     /// Every kind, compute + every graphics sub-kind, in `index()` order.
-    pub const ALL: [OreKind; 18] = [
+    pub const ALL: [OreKind; 20] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -144,6 +156,8 @@ impl OreKind {
         OreKind::Graphics(GraphicsOreKind::SkinnedForwardLit),
         OreKind::Graphics(GraphicsOreKind::Ui),
         OreKind::Graphics(GraphicsOreKind::GaussianSplat),
+        OreKind::Graphics(GraphicsOreKind::DebugLines),
+        OreKind::Graphics(GraphicsOreKind::Tonemap),
     ];
 
     pub const COUNT: usize = Self::ALL.len();

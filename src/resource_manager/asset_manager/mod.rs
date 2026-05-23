@@ -1,5 +1,7 @@
 pub mod asset;
+pub mod env_loader;
 pub mod gltf_loader;
+pub mod ies_loader;
 pub mod send;
 pub mod fetch;
 pub mod pipe;
@@ -7,6 +9,10 @@ pub mod pipeline;
 
 pub use asset::*;
 pub use gltf_loader::*;
+// `ies_loader::parse` and `env_loader::parse` both publish `parse` so they
+// stay namespaced — callers say `ies_loader::parse(...)` / `env_loader::parse(...)`.
+pub use ies_loader::{IesProfile, IesError, IES_LUT_W, IES_LUT_H};
+pub use env_loader::{EnvironmentMap, EnvError};
 pub use send::*;
 pub use fetch::*;
 pub use pipe::*;

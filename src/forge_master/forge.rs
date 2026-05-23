@@ -316,22 +316,28 @@ impl GraphicsForge {
         })
     }
 
-    /// Descriptor bindings for this forge's kind. The compute path uses
-    /// `STORAGE_BUFFER` everywhere; here `ForwardLit` exposes a camera UBO at
-    /// binding 0 (vertex stage) and an actor-transform SSBO at binding 1
-    /// (vertex stage). `Ui` has no descriptors — the shader generates
-    /// vertices from `gl_VertexIndex` alone (perfect for the hello-triangle
-    /// path, which baked positions into the shader).
+    /// Descriptor bindings for this forge's kind.
+    ///
+    /// `ForwardLit` / `SkinnedForwardLit` carry the lights UBO at set 0
+    /// binding 1 (FRAGMENT stage); their material / palette descriptors live
+    /// in sets 1 and 2. MVP comes through push constants. `Ui` and
+    /// `GaussianSplat` have no set-0 bindings.
     pub fn descriptor_bindings(&self) -> ThinVec<vk::DescriptorSetLayoutBinding<'static>> {
-        // ForwardLit / SkinnedForwardLit consume MVP via a push constant and
-        // their material / palette descriptors live in sets 1 and 2 — set 0
-        // is an unused slot kept for future "camera + actor SSBO" data. Keep
-        // the descriptor set itself (so set indices in the shader stay
-        // stable) but with zero bindings — Vulkan accepts empty layouts,
-        // and we never need to bind a set 0 descriptor.
-        //
-        // Ui has no descriptor sets at all (gl_VertexIndex-driven shader).
-        ThinVec::new()
+        use crate::forge_master::ore::GraphicsOreKind;
+        match self.kind {
+            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit => {
+                let mut b = ThinVec::new();
+                b.push(
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(1)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                );
+                b
+            }
+            _ => ThinVec::new(),
+        }
     }
 
     /// Build the device-side mold (render pass + pipeline) against a concrete
@@ -548,6 +554,20 @@ impl GraphicsForge {
                     .stage_flags(vk::ShaderStageFlags::VERTEX)
                     .offset(0)
                     .size(64)], // sizeof(mat4)
+            // DebugLines carries `DebugLinesPushPacked` (160 B) visible to
+            // both stages: vertex uses mvp + extent/spacing/flags; frag uses
+            // colors[] + flags for axis-emphasis tinting.
+            GraphicsOreKind::DebugLines =>
+                &[vk::PushConstantRange::default()
+                    .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                    .offset(0)
+                    .size(160)],
+            // Tonemap: 8 B (exposure_scale: f32, operator: u32) in fragment.
+            GraphicsOreKind::Tonemap =>
+                &[vk::PushConstantRange::default()
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                    .offset(0)
+                    .size(8)],
             GraphicsOreKind::Ui | GraphicsOreKind::GaussianSplat => &[],
         };
         // Build set_layouts slice. ForwardLit / SkinnedForwardLit both
@@ -666,6 +686,10 @@ impl GraphicsForge {
             GraphicsOreKind::SkinnedForwardLit => &bd_skinned,
             GraphicsOreKind::Ui                => &[],
             GraphicsOreKind::GaussianSplat     => &bd_splat,
+            // DebugLines & Tonemap both generate vertices in-shader from
+            // `gl_VertexIndex`. No vertex bindings.
+            GraphicsOreKind::DebugLines        => &[],
+            GraphicsOreKind::Tonemap           => &[],
         };
         // ForgeVertex layout: position[0..12], normal[12..24], tangent[24..40], uv[40..48]
         // SkinVertex   layout: joints_packed[0..8 = uvec2 = 4×u16], weights[8..24 = vec4]
@@ -722,12 +746,17 @@ impl GraphicsForge {
             GraphicsOreKind::SkinnedForwardLit => &ad_skinned,
             GraphicsOreKind::Ui                => &[],
             GraphicsOreKind::GaussianSplat     => &ad_splat,
+            GraphicsOreKind::DebugLines        => &[],
+            GraphicsOreKind::Tonemap           => &[],
         };
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(binding_descs)
             .vertex_attribute_descriptions(attr_descs);
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            .topology(match self.kind {
+                GraphicsOreKind::DebugLines => vk::PrimitiveTopology::LINE_LIST,
+                _                           => vk::PrimitiveTopology::TRIANGLE_LIST,
+            });
         // Dynamic viewport + scissor — pipeline doesn't bake in extent,
         // so swapchain resize doesn't require pipeline rebuild.
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
@@ -759,7 +788,11 @@ impl GraphicsForge {
             .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD)];
         let color_blend_attachments: &[vk::PipelineColorBlendAttachmentState] = match self.kind {
-            GraphicsOreKind::GaussianSplat => &premul_blend,
+            // Premultiplied-alpha blend for translucent layers: splats,
+            // wire-grid lines (distance fade), UI overlay glyphs / quads.
+            GraphicsOreKind::GaussianSplat
+            | GraphicsOreKind::DebugLines
+            | GraphicsOreKind::Ui          => &premul_blend,
             _                              => &opaque_blend,
         };
         let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
@@ -787,6 +820,20 @@ impl GraphicsForge {
                 .depth_write_enable(false)
                 .depth_compare_op(vk::CompareOp::LESS)
                 .depth_bounds_test_enable(false)
+                .stencil_test_enable(false),
+            // DebugLines: depth-test ON so scene geometry occludes the grid,
+            // depth-write OFF so we don't pollute the depth target the
+            // overlay re-uses for gizmos behind translucent surfaces.
+            GraphicsOreKind::DebugLines => vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(true)
+                .depth_write_enable(false)
+                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+                .depth_bounds_test_enable(false)
+                .stencil_test_enable(false),
+            // Tonemap: full-screen quad; depth irrelevant.
+            GraphicsOreKind::Tonemap => vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(false)
+                .depth_write_enable(false)
                 .stencil_test_enable(false),
         };
 

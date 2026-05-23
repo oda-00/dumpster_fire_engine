@@ -42,6 +42,38 @@ pub struct VulkanContext {
     /// colour and depth framebuffer attachments. `TYPE_1` when the
     /// driver (e.g. lavapipe) doesn't expose multi-sample storage.
     pub msaa_samples: vk::SampleCountFlags,
+
+    // ── Ray-tracing capability ───────────────────────────────────────────
+    /// True when all eight RT-required extensions were present on the
+    /// chosen device AND the `DFE_RT` env var did not disable RT.
+    pub has_ray_tracing: bool,
+    /// Acceleration-structure extension loader. `Some` when `has_ray_tracing`.
+    pub rt_accel:    Option<ash::khr::acceleration_structure::Device>,
+    /// Ray-tracing pipeline extension loader. `Some` when `has_ray_tracing`.
+    pub rt_pipeline: Option<ash::khr::ray_tracing_pipeline::Device>,
+    /// Deferred-host-ops extension loader (required by RT pipeline build).
+    pub rt_deferred: Option<ash::khr::deferred_host_operations::Device>,
+    /// SBT alignment + recursion-depth properties pulled at device init.
+    pub rt_props: RtProps,
+}
+
+/// Ray-tracing pipeline properties extracted from
+/// `VkPhysicalDeviceRayTracingPipelinePropertiesKHR` at device init.
+/// Stored as plain values so `VulkanContext` keeps no `'static`-lifetime
+/// `pNext` chain pointers around past device creation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RtProps {
+    pub shader_group_handle_size:         u32,
+    pub shader_group_handle_alignment:    u32,
+    pub shader_group_base_alignment:      u32,
+    pub max_pipeline_ray_recursion_depth: u32,
+    pub max_shader_group_stride:          u32,
+}
+
+/// Honour the `DFE_RT` env var: any value other than `"0"` enables RT when
+/// the device supports it. Default (unset) = RT enabled.
+fn env_allows_rt() -> bool {
+    std::env::var("DFE_RT").map(|v| v != "0").unwrap_or(true)
 }
 
 impl VulkanContext {
@@ -321,16 +353,84 @@ impl VulkanContext {
         }
         device_extensions.push(sync2_ext);
 
+        // ── Ray-tracing extension detection ─────────────────────────────
+        // All eight required: enable RT path. Env DFE_RT=0 forces off for
+        // A/B raster/RT comparison. We enumerate device extensions once
+        // and check each name against the supported list.
+        let dev_ext_props: Vec<vk::ExtensionProperties> = unsafe {
+            instance
+                .enumerate_device_extension_properties(physical_device)
+                .unwrap_or_default()
+        };
+        let has_dev_ext = |needle: &CStr| -> bool {
+            dev_ext_props.iter().any(|p| {
+                let n = unsafe { CStr::from_ptr(p.extension_name.as_ptr()) };
+                n == needle
+            })
+        };
+        let rt_ext_names: [&CStr; 8] = [
+            ash::khr::acceleration_structure::NAME,
+            ash::khr::ray_tracing_pipeline::NAME,
+            ash::khr::deferred_host_operations::NAME,
+            ash::khr::buffer_device_address::NAME,
+            ash::khr::spirv_1_4::NAME,
+            ash::khr::shader_float_controls::NAME,
+            ash::ext::descriptor_indexing::NAME,
+            ash::ext::scalar_block_layout::NAME,
+        ];
+        let all_rt_ext_present = want_graphics
+            && rt_ext_names.iter().all(|n| has_dev_ext(n));
+        let has_ray_tracing = all_rt_ext_present && env_allows_rt();
+        if has_ray_tracing {
+            println!("vulkan: ray-tracing path enabled (all 8 RT extensions present)");
+            for n in rt_ext_names.iter() { device_extensions.push(n.as_ptr()); }
+        } else if all_rt_ext_present {
+            println!("vulkan: ray-tracing extensions present but DFE_RT=0 — using raster fallback");
+        } else if want_graphics {
+            let missing: Vec<&str> = rt_ext_names.iter()
+                .filter(|n| !has_dev_ext(n))
+                .map(|n| n.to_str().unwrap_or("?"))
+                .collect();
+            println!(
+                "vulkan: ray-tracing disabled — missing extensions: {}",
+                missing.join(", ")
+            );
+        }
+
         // Enable the synchronization2 feature — required by every
         // cmd_pipeline_barrier2 / queue_submit2 / VK_KHR_synchronization2
         // call. Baked into Vulkan 1.3 but we explicitly request the KHR
         // extension so the loader pulls it in on 1.2 drivers too.
         let mut sync2_features = vk::PhysicalDeviceSynchronization2Features::default()
             .synchronization2(true);
-        let device_info = vk::DeviceCreateInfo::default()
+        // RT feature chain — only chained when has_ray_tracing.
+        let mut bda_features = vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
+            .buffer_device_address(true);
+        let mut idx_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default()
+            .runtime_descriptor_array(true)
+            .descriptor_binding_partially_bound(true)
+            .descriptor_binding_variable_descriptor_count(true)
+            .descriptor_binding_sampled_image_update_after_bind(true)
+            .shader_sampled_image_array_non_uniform_indexing(true);
+        let mut scalar_features = vk::PhysicalDeviceScalarBlockLayoutFeatures::default()
+            .scalar_block_layout(true);
+        let mut accel_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+            .acceleration_structure(true);
+        let mut rt_features = vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default()
+            .ray_tracing_pipeline(true);
+
+        let mut device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extensions)
             .push_next(&mut sync2_features);
+        if has_ray_tracing {
+            device_info = device_info
+                .push_next(&mut bda_features)
+                .push_next(&mut idx_features)
+                .push_next(&mut scalar_features)
+                .push_next(&mut accel_features)
+                .push_next(&mut rt_features);
+        }
 
         let device = match unsafe { instance.create_device(physical_device, &device_info, None) } {
             Ok(d) => d,
@@ -417,6 +517,36 @@ impl VulkanContext {
                       else                                                       { vk::SampleCountFlags::TYPE_1  };
         println!("vulkan: MSAA capability — using {msaa_samples:?}");
 
+        // ── RT loaders + properties ─────────────────────────────────────
+        // Built only when the device was created with the RT extensions.
+        let (rt_accel, rt_pipeline, rt_deferred, rt_props) = if has_ray_tracing {
+            let accel = ash::khr::acceleration_structure::Device::new(&instance, &device);
+            let rtpl  = ash::khr::ray_tracing_pipeline::Device::new(&instance, &device);
+            let dho   = ash::khr::deferred_host_operations::Device::new(&instance, &device);
+
+            // Query RT pipeline properties via VkPhysicalDeviceProperties2.
+            let mut rt_props_khr = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
+            let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut rt_props_khr);
+            unsafe { instance.get_physical_device_properties2(physical_device, &mut props2); }
+            let props = RtProps {
+                shader_group_handle_size:         rt_props_khr.shader_group_handle_size,
+                shader_group_handle_alignment:    rt_props_khr.shader_group_handle_alignment,
+                shader_group_base_alignment:      rt_props_khr.shader_group_base_alignment,
+                max_pipeline_ray_recursion_depth: rt_props_khr.max_ray_recursion_depth,
+                max_shader_group_stride:          rt_props_khr.max_shader_group_stride,
+            };
+            println!(
+                "vulkan: RT props — handle_size={} handle_align={} base_align={} max_recursion={}",
+                props.shader_group_handle_size,
+                props.shader_group_handle_alignment,
+                props.shader_group_base_alignment,
+                props.max_pipeline_ray_recursion_depth,
+            );
+            (Some(accel), Some(rtpl), Some(dho), props)
+        } else {
+            (None, None, None, RtProps::default())
+        };
+
         Ok(Self {
             entry,
             instance,
@@ -432,6 +562,11 @@ impl VulkanContext {
             depth_format,
             device_name,
             msaa_samples,
+            has_ray_tracing,
+            rt_accel,
+            rt_pipeline,
+            rt_deferred,
+            rt_props,
         })
     }
 }
