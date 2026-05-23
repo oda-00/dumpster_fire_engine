@@ -1,4 +1,5 @@
 /target
+tools/setup/target/
 .claude/
 .env.toolchain
 .env.toolchain.ps1
