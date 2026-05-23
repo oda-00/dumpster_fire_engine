@@ -366,6 +366,7 @@ impl AppLogic for EditorApp {
         self.draw_toolbar(ctx, app);
         self.draw_outliner(ctx, app);
         self.draw_inspector(ctx, app);
+        self.draw_trs_gizmo(ctx, app);
         if self.picker_open { self.draw_file_picker(ctx, app); }
         // Frame is built — consume the per-frame click edge so it doesn't
         // re-fire next tick.
@@ -742,6 +743,111 @@ impl EditorApp {
             self.picker_open = false;
         }
         if cancel { self.picker_open = false; }
+    }
+}
+
+// ── TRS gizmo (rendered in 2D screen space projected from focused pane) ───
+
+impl EditorApp {
+    fn draw_trs_gizmo(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        let Some(ah) = self.world.selection else { return };
+        let Some((lh, sh)) = self.main_stage else { return };
+        let Some(grid) = ctx.viewport_grid(app) else { return };
+        let focused_h = grid.focused;
+        let Some(vp) = grid.get(focused_h) else { return };
+        let (win_w, win_h) = (grid.win_w, grid.win_h);
+        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else { return };
+        let world_t = match stage.worlds.get(ah.idx as usize) {
+            Some(t) => *t,
+            None    => return,
+        };
+        let center = Vec3::from(world_t.translation);
+
+        let Some(cam) = ctx.cameras.get(vp.camera_handle) else { return };
+        let aspect = vp.rect.pixel_aspect(win_w, win_h);
+        let vp_mat = Mat4::from_cols_array(&cam.view_projection_matrix(aspect));
+
+        // Compute pane pixel rect for NDC → screen conversion.
+        let pane_x = vp.rect.x * win_w;
+        let pane_y = vp.rect.y * win_h;
+        let pane_w = vp.rect.w * win_w;
+        let pane_h = vp.rect.h * win_h;
+
+        // Project a world point into pane-screen pixels. Returns None when
+        // the point is behind the near plane.
+        let project = |p: Vec3| -> Option<[f32; 2]> {
+            let clip = vp_mat * Vec4::new(p.x, p.y, p.z, 1.0);
+            if clip.w <= 1e-5 { return None; }
+            let ndc_x = clip.x / clip.w;
+            let ndc_y = clip.y / clip.w;
+            let sx = pane_x + (ndc_x * 0.5 + 0.5) * pane_w;
+            let sy = pane_y + (ndc_y * 0.5 + 0.5) * pane_h;
+            Some([sx, sy])
+        };
+
+        // Constant-screen-size by tying world length to camera distance.
+        let cam_pos = Vec3::from_array(cam.position);
+        let dist = (cam_pos - center).length().max(0.5);
+        let len  = 0.15 * dist;
+
+        let Some(origin_s) = project(center) else { return };
+        let axes: [(Vec3, [u8; 4]); 3] = [
+            (Vec3::X, [220,  60,  60, 255]),
+            (Vec3::Y, [ 70, 200,  70, 255]),
+            (Vec3::Z, [ 70, 100, 220, 255]),
+        ];
+
+        let dl = &mut self.world.ui.draw_list;
+
+        match self.gizmo_mode {
+            GizmoMode::Translate | GizmoMode::Scale => {
+                for (axis, color) in axes {
+                    let tip_world = center + axis * len;
+                    if let Some(tip_s) = project(tip_world) {
+                        dl.push_line(origin_s[0], origin_s[1], tip_s[0], tip_s[1], 2.5, color);
+                        // Tip glyph: small box for both translate (arrowhead
+                        // stand-in) and scale.
+                        let sz = 8.0_f32;
+                        dl.push_rect(tip_s[0] - sz * 0.5, tip_s[1] - sz * 0.5,
+                                     sz, sz, [0.0, 0.0, 1.0, 1.0], color);
+                    }
+                }
+                // Central yellow free-move / uniform-scale handle.
+                let sz = 10.0_f32;
+                dl.push_rect(origin_s[0] - sz * 0.5, origin_s[1] - sz * 0.5,
+                             sz, sz, [0.0, 0.0, 1.0, 1.0], [230, 220, 70, 255]);
+            }
+            GizmoMode::Rotate => {
+                // Three rings: one perpendicular to each axis. Sample 32
+                // points; project each; connect with line segments.
+                const N: usize = 32;
+                let basis = [
+                    (Vec3::Y, Vec3::Z, [220,  60,  60, 255]), // ring ⟂ X
+                    (Vec3::X, Vec3::Z, [ 70, 200,  70, 255]), // ring ⟂ Y
+                    (Vec3::X, Vec3::Y, [ 70, 100, 220, 255]), // ring ⟂ Z
+                ];
+                for (u, v, color) in basis {
+                    let mut prev: Option<[f32; 2]> = None;
+                    let mut first: Option<[f32; 2]> = None;
+                    for i in 0..=N {
+                        let t = (i as f32) / (N as f32) * std::f32::consts::TAU;
+                        let p = center + (u * t.cos() + v * t.sin()) * len;
+                        if let Some(s) = project(p) {
+                            if let Some(prev_s) = prev {
+                                dl.push_line(prev_s[0], prev_s[1], s[0], s[1], 1.8, color);
+                            }
+                            if first.is_none() { first = Some(s); }
+                            prev = Some(s);
+                        }
+                    }
+                    let _ = first;
+                }
+                // Center screen-space rotation circle (yellow dot).
+                let sz = 8.0_f32;
+                dl.push_rect(origin_s[0] - sz * 0.5, origin_s[1] - sz * 0.5,
+                             sz, sz, [0.0, 0.0, 1.0, 1.0], [230, 220, 70, 255]);
+            }
+        }
     }
 }
 
