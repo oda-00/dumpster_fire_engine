@@ -1143,7 +1143,7 @@ impl Window {
             // sampler something to read. This lets the three-pass graph land
             // without touching every existing forge's framebuffer attachment
             // contract.
-            if let Some(overlay) = gfx.overlay.as_ref() {
+            if let Some(overlay) = gfx.overlay.as_mut() {
                 let swap_img = gfx.swapchain_images[image_index as usize];
                 let hdr_img = overlay.hdr_images[image_index as usize].handle;
 

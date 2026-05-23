@@ -25,6 +25,8 @@
 
 use ash::vk;
 use std::io;
+use std::num::NonZeroU32;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 use thin_vec::ThinVec;
@@ -34,6 +36,11 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::{CursorGrabMode, Window as WinitWindow, WindowId};
+
+#[cfg(feature = "wgpu-backend")]
+use crate::render::backend::{DrawListSnapshot, GpuSurface, RenderSceneInput};
+#[cfg(feature = "wgpu-backend")]
+use crate::render::wgpu_surface::WgpuSurface;
 
 use crate::forge_master::master::{ForgeError, ForgeResult};
 use crate::forge_master::ore::MAT4_IDENTITY;
@@ -374,6 +381,12 @@ struct AppData {
     compute_waits:  ThinVec<(AppHandle, ThinVec<vk::Semaphore>)>,
     /// Wall-clock start time — exposed via AppCtx::elapsed().
     start:          Instant,
+    /// wgpu fallback surface — set when Vulkan is unavailable.
+    #[cfg(feature = "wgpu-backend")]
+    wgpu_surface:   Option<WgpuSurface>,
+    /// winit window for the wgpu path (needed for cursor grab / resize).
+    #[cfg(feature = "wgpu-backend")]
+    wgpu_winit:     Option<Arc<WinitWindow>>,
 }
 
 impl AppData {
@@ -388,6 +401,10 @@ impl AppData {
             next_camera_id: 1,
             compute_waits:  ThinVec::new(),
             start:          Instant::now(),
+            #[cfg(feature = "wgpu-backend")]
+            wgpu_surface:   None,
+            #[cfg(feature = "wgpu-backend")]
+            wgpu_winit:     None,
         }
     }
 
@@ -408,8 +425,8 @@ impl AppData {
 // windows) so the logic field stays mutably borrowed from `self.data.logic`.
 
 pub struct AppCtx<'a> {
-    pub renderer:     &'a mut Renderer,
-    pub vulkan:       &'a VulkanContext,
+    pub renderer:     Option<&'a mut Renderer>,
+    pub vulkan:       Option<&'a VulkanContext>,
     pub cameras:      &'a mut CameraArena,
     pub windows:      &'a mut Arena<AppTag, WindowResources>,
     pub gltf_assets:  &'a mut GltfAssetCache,
@@ -417,6 +434,10 @@ pub struct AppCtx<'a> {
     pub next_camera_id: &'a mut i64,
     compute_waits: &'a mut ThinVec<(AppHandle, ThinVec<vk::Semaphore>)>,
     start:         Instant,
+    #[cfg(feature = "wgpu-backend")]
+    wgpu_surface: &'a mut Option<WgpuSurface>,
+    #[cfg(feature = "wgpu-backend")]
+    wgpu_winit:   &'a mut Option<Arc<WinitWindow>>,
 }
 
 impl<'a> AppCtx<'a> {
@@ -447,7 +468,6 @@ impl<'a> AppCtx<'a> {
         move_speed:    f32,
         mouse_sens:    f32,
     ) -> ForgeResult<AppHandle> {
-        let ctx = self.vulkan;
         let attrs = WinitWindow::default_attributes()
             .with_title(title)
             .with_inner_size(winit::dpi::LogicalSize::new(width, height));
@@ -457,37 +477,60 @@ impl<'a> AppCtx<'a> {
         );
         let winit_id = winit_window.id();
 
-        let graphics_forge = self.renderer.forge
-            .graphics_forge(GraphicsOreKind::ForwardLit)
-            .ok_or_else(|| ForgeError::Io(io::Error::other("No ForwardLit forge registered")))?;
-
-        let window = Window::new_with_surface(
-            RenderWindowId::new(*self.next_app_id),
-            title,
-            winit_window.clone(),
-            &ctx.instance,
-            ctx.physical_device,
-            &ctx.device,
-            ctx.queue,
-            ctx.queue_family_index,
-            &ctx.memory_properties,
-            ctx.depth_format,
-            ctx.msaa_samples,
-            &ctx.entry,
-            graphics_forge,
-        )?;
-
-        let window_handle = self.renderer.add_window(window);
-        let material_layout = self.renderer
-            .window(window_handle)
-            .and_then(|w| w.graphics.as_ref())
-            .map(|g| g.mold.material_set_layout)
-            .unwrap_or(vk::DescriptorSetLayout::null());
-        let material_pool   = create_material_pool(&ctx.device, 4096)?;
-        let skin_set_layout = create_skin_palette_set_layout(&ctx.device)?;
-        let skin_pool       = create_skin_palette_pool(&ctx.device, 256)?;
-        let instance_layout = create_instance_set_layout(&ctx.device)?;
-        let instance_pool   = create_instance_pool(&ctx.device, 4096)?;
+        // ── Backend-specific window setup ──────────────────────────────────
+        let (window_handle, material_pool, skin_pool, skin_set_layout,
+             material_layout, instance_pool, instance_layout) =
+        if let Some(ctx) = self.vulkan {
+            let renderer = self.renderer.as_deref_mut()
+                .ok_or_else(|| ForgeError::Io(io::Error::other("renderer not ready")))?;
+            let graphics_forge = renderer.forge
+                .graphics_forge(GraphicsOreKind::ForwardLit)
+                .ok_or_else(|| ForgeError::Io(io::Error::other("No ForwardLit forge registered")))?;
+            let window = Window::new_with_surface(
+                RenderWindowId::new(*self.next_app_id),
+                title,
+                winit_window.clone(),
+                &ctx.instance,
+                ctx.physical_device,
+                &ctx.device,
+                ctx.queue,
+                ctx.queue_family_index,
+                &ctx.memory_properties,
+                ctx.depth_format,
+                ctx.msaa_samples,
+                &ctx.entry,
+                graphics_forge,
+            )?;
+            let wh = renderer.add_window(window);
+            let ml = renderer
+                .window(wh)
+                .and_then(|w| w.graphics.as_ref())
+                .map(|g| g.mold.material_set_layout)
+                .unwrap_or(vk::DescriptorSetLayout::null());
+            let mp = create_material_pool(&ctx.device, 4096)?;
+            let sl = create_skin_palette_set_layout(&ctx.device)?;
+            let sp = create_skin_palette_pool(&ctx.device, 256)?;
+            let il = create_instance_set_layout(&ctx.device)?;
+            let ip = create_instance_pool(&ctx.device, 4096)?;
+            (wh, mp, sp, sl, ml, ip, il)
+        } else {
+            // wgpu fallback path — create the wgpu surface lazily on the first window.
+            #[cfg(feature = "wgpu-backend")]
+            if self.wgpu_surface.is_none() {
+                *self.wgpu_surface = Some(WgpuSurface::new(winit_window.clone())?);
+                *self.wgpu_winit   = Some(winit_window.clone());
+            }
+            // Sentinel handle: idx out of any arena range → Renderer::window() returns None.
+            let dummy_handle = crate::render::window::WindowHandle {
+                idx:        u32::MAX,
+                generation: NonZeroU32::new(1).unwrap(),
+                _tag:       PhantomData,
+            };
+            (dummy_handle,
+             vk::DescriptorPool::null(),      vk::DescriptorPool::null(),
+             vk::DescriptorSetLayout::null(), vk::DescriptorSetLayout::null(),
+             vk::DescriptorPool::null(),      vk::DescriptorSetLayout::null())
+        };
 
         let camera_handle = self.cameras.insert(camera);
         let controller    = CameraController::new(move_speed, mouse_sens);
@@ -532,10 +575,12 @@ impl<'a> AppCtx<'a> {
     /// Deduplicated by path; returns a handle immediately.
     /// Call `poll_gltf_loaders` each frame to finalize.
     pub fn load_gltf(&mut self, app: AppHandle, path: std::path::PathBuf) -> ForgeResult<GltfHandle> {
+        let ctx = self.vulkan
+            .ok_or_else(|| ForgeError::Io(io::Error::other("glTF loading requires Vulkan backend")))?;
         let (device, material_layout) = {
             let res = self.windows.get(app)
                 .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?;
-            (self.vulkan.device.clone(), res.material_layout)
+            (ctx.device.clone(), res.material_layout)
         };
         let path_str: Arc<str> = Arc::from(path.to_str().unwrap_or(""));
         self.gltf_assets.load(path_str, device, material_layout)
@@ -543,7 +588,8 @@ impl<'a> AppCtx<'a> {
 
     /// Drive background loaders; GPU-upload any that have completed.
     pub fn poll_gltf_loaders(&mut self, _app: AppHandle) -> ForgeResult<()> {
-        self.gltf_assets.poll(self.vulkan)
+        let Some(ctx) = self.vulkan else { return Ok(()); };
+        self.gltf_assets.poll(ctx)
     }
 
     /// Render every visible actor in `world` to `app`'s window.
@@ -553,6 +599,26 @@ impl<'a> AppCtx<'a> {
         app:     AppHandle,
         elapsed: f32,
     ) -> ForgeResult<Option<vk::Semaphore>> {
+        // ── wgpu path ──────────────────────────────────────────────────────
+        #[cfg(feature = "wgpu-backend")]
+        if self.vulkan.is_none() {
+            if let Some(ws) = self.wgpu_surface.as_mut() {
+                let dl = &world.ui.draw_list;
+                let snapshot = DrawListSnapshot {
+                    vertices: &dl.vertices,
+                    indices:  &dl.indices,
+                };
+                let scene = RenderSceneInput { world, elapsed };
+                ws.draw_frame(&scene, &snapshot)?;
+            }
+            return Ok(None);
+        }
+
+        // ── Vulkan path ────────────────────────────────────────────────────
+        let ctx = self.vulkan.expect("vulkan checked above");
+        let renderer = self.renderer.as_deref_mut()
+            .ok_or_else(|| ForgeError::Io(io::Error::other("renderer not ready")))?;
+
         let (window_h, cam_views) = {
             let res = self.windows.get(app)
                 .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?;
@@ -575,8 +641,7 @@ impl<'a> AppCtx<'a> {
             (wh, views)
         };
 
-        // Push the UI draw list into the window's overlay pipeline so the
-        // overlay pass has something to draw. Cheap host-visible upload.
+        // Push the UI draw list into the window's overlay pipeline.
         let dl = &world.ui.draw_list;
         if !dl.indices.is_empty() {
             let vert_bytes = unsafe {
@@ -591,28 +656,26 @@ impl<'a> AppCtx<'a> {
                     std::mem::size_of_val(dl.indices.as_slice()),
                 )
             };
-            if let Some(window) = self.renderer.window_mut(window_h) {
+            if let Some(window) = renderer.window_mut(window_h) {
                 let _ = window.set_ui_draw(
-                    &self.vulkan.device,
+                    &ctx.device,
                     vert_bytes, idx_bytes,
                     dl.vertices.len() as u32,
                     dl.indices.len()  as u32,
                 );
             }
         } else {
-            // Clear the per-FIF UI counts so a previously-uploaded list
-            // isn't redrawn after the editor empties its draw_list.
-            if let Some(window) = self.renderer.window_mut(window_h) {
-                let _ = window.set_ui_draw(&self.vulkan.device, &[], &[], 0, 0);
+            if let Some(window) = renderer.window_mut(window_h) {
+                let _ = window.set_ui_draw(&ctx.device, &[], &[], 0, 0);
             }
         }
 
         collect_and_submit(
             world,
             self.gltf_assets,
-            self.renderer,
+            renderer,
             window_h,
-            self.vulkan,
+            ctx,
             &cam_views,
             elapsed,
         )
@@ -764,7 +827,8 @@ impl<'a> AppCtx<'a> {
 
         let (win_w, win_h) = {
             let wh = self.windows.get(app).unwrap().window_handle;
-            self.renderer.window(wh)
+            self.renderer.as_deref()
+                .and_then(|r| r.window(wh))
                 .and_then(|w| w.graphics.as_ref())
                 .map(|g| (g.swapchain_extent.width as f32, g.swapchain_extent.height as f32))
                 .unwrap_or((1280.0, 720.0))
@@ -864,37 +928,54 @@ impl<T: AppLogic> AppRunner<T> {
     }
 
     /// Initialise VulkanContext + Renderer lazily on first `resumed()`.
+    /// Falls back to the wgpu surface when `wgpu-backend` feature is enabled
+    /// and Vulkan is unavailable.
     fn ensure_initialised(&mut self, event_loop: &ActiveEventLoop) -> ForgeResult<()> {
         if self.data.ctx.is_some() { return Ok(()); }
+        // Already using wgpu (surface created in spawn_window_with_camera).
+        #[cfg(feature = "wgpu-backend")]
+        if self.data.wgpu_surface.is_some() { return Ok(()); }
+
         let display_handle = event_loop.display_handle()
             .map_err(|e| ForgeError::Io(io::Error::other(format!("{e}"))))?
             .as_raw();
-        let ctx = VulkanContext::with_surface(display_handle)?;
-        let mut forge = ForgeMaster::new(
-            ctx.device.clone(), ctx.queue, ctx.command_pool, ctx.memory_properties,
-        )?;
-        // Register engine defaults so apps don't have to.
-        forge.add_graphics_forge_from_spirv_bytes(
-            GraphicsForgeId::new(1), GraphicsOreKind::ForwardLit,
-            FORWARD_LIT_VERT, FORWARD_LIT_FRAG,
-        )?;
-        forge.add_graphics_forge_from_spirv_bytes(
-            GraphicsForgeId::new(2), GraphicsOreKind::SkinnedForwardLit,
-            SKINNED_VERT, FORWARD_LIT_FRAG,
-        )?;
-        register_skin_morph_forges(&mut forge)?;
-        // App-specific forges on top of the defaults.
-        self.logic.register_forges(&mut forge)?;
-        let renderer = Renderer::new(forge);
-        self.data.ctx      = Some(ctx);
-        self.data.renderer = Some(renderer);
+
+        match VulkanContext::with_surface(display_handle) {
+            Ok(ctx) => {
+                let mut forge = ForgeMaster::new(
+                    ctx.device.clone(), ctx.queue, ctx.command_pool, ctx.memory_properties,
+                )?;
+                forge.add_graphics_forge_from_spirv_bytes(
+                    GraphicsForgeId::new(1), GraphicsOreKind::ForwardLit,
+                    FORWARD_LIT_VERT, FORWARD_LIT_FRAG,
+                )?;
+                forge.add_graphics_forge_from_spirv_bytes(
+                    GraphicsForgeId::new(2), GraphicsOreKind::SkinnedForwardLit,
+                    SKINNED_VERT, FORWARD_LIT_FRAG,
+                )?;
+                register_skin_morph_forges(&mut forge)?;
+                self.logic.register_forges(&mut forge)?;
+                let renderer = Renderer::new(forge);
+                self.data.ctx      = Some(ctx);
+                self.data.renderer = Some(renderer);
+            }
+            Err(e) => {
+                #[cfg(feature = "wgpu-backend")]
+                {
+                    eprintln!("Vulkan unavailable ({e}), falling back to wgpu");
+                    // wgpu surface is created lazily in spawn_window_with_camera
+                }
+                #[cfg(not(feature = "wgpu-backend"))]
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
     fn ctx_for_logic<'a>(data: &'a mut AppData) -> AppCtx<'a> {
         AppCtx {
-            renderer:     data.renderer.as_mut().expect("renderer ready"),
-            vulkan:       data.ctx.as_ref().expect("vulkan ready"),
+            renderer:     data.renderer.as_mut(),
+            vulkan:       data.ctx.as_ref(),
             cameras:      &mut data.cameras,
             windows:      &mut data.windows,
             gltf_assets:  &mut data.gltf_assets,
@@ -902,6 +983,10 @@ impl<T: AppLogic> AppRunner<T> {
             next_camera_id: &mut data.next_camera_id,
             compute_waits:  &mut data.compute_waits,
             start:          data.start,
+            #[cfg(feature = "wgpu-backend")]
+            wgpu_surface: &mut data.wgpu_surface,
+            #[cfg(feature = "wgpu-backend")]
+            wgpu_winit:   &mut data.wgpu_winit,
         }
     }
 }
@@ -946,9 +1031,14 @@ impl<T: AppLogic> ApplicationHandler for AppRunner<T> {
             WindowEvent::Resized(size) => {
                 if let Some(res) = self.data.windows.get_mut(app_handle) {
                     res.update_aspect(size.width, size.height);
-                    if let Some(renderer) = self.data.renderer.as_mut() {
+                }
+                let (w, h) = (size.width, size.height);
+                #[cfg(feature = "wgpu-backend")]
+                { if let Some(ws) = self.data.wgpu_surface.as_mut() { ws.resize(w, h); return; } }
+                if let Some(renderer) = self.data.renderer.as_mut() {
+                    if let Some(res) = self.data.windows.get(app_handle) {
                         if let Some(window) = renderer.window_mut(res.window_handle) {
-                            window.resize(size.width, size.height);
+                            window.resize(w, h);
                         }
                     }
                 }
@@ -1084,6 +1174,11 @@ impl<T: AppLogic> ApplicationHandler for AppRunner<T> {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(feature = "wgpu-backend")]
+        if let Some(w) = self.data.wgpu_winit.as_ref() {
+            w.request_redraw();
+            return;
+        }
         if let Some(renderer) = self.data.renderer.as_ref() {
             for res in self.data.windows.values() {
                 if let Some(window) = renderer.window(res.window_handle) {
@@ -1157,6 +1252,11 @@ impl<T: AppLogic> AppRunner<T> {
                 return;
             }
         }
+        // On the wgpu path, render_world (called inside logic.update above) already
+        // presented the frame — nothing more to do here.
+        #[cfg(feature = "wgpu-backend")]
+        if self.data.ctx.is_none() { return; }
+
         let compute_sems: ThinVec<vk::Semaphore> = {
             let pos = self.data.compute_waits.iter().position(|(h, _)| *h == app_handle);
             if let Some(i) = pos {
@@ -1192,11 +1292,17 @@ impl<T: AppLogic> AppRunner<T> {
     }
 
     fn set_cursor_grab(&self, app_handle: AppHandle, grabbed: bool) {
+        let mode = if grabbed { CursorGrabMode::Locked } else { CursorGrabMode::None };
+        #[cfg(feature = "wgpu-backend")]
+        if let Some(w) = self.data.wgpu_winit.as_ref() {
+            let _ = w.set_cursor_grab(mode);
+            let _ = w.set_cursor_visible(!grabbed);
+            return;
+        }
         let Some(res) = self.data.windows.get(app_handle) else { return };
         if let Some(renderer) = self.data.renderer.as_ref() {
             if let Some(window) = renderer.window(res.window_handle) {
                 if let Some(gfx) = &window.graphics {
-                    let mode = if grabbed { CursorGrabMode::Locked } else { CursorGrabMode::None };
                     let _ = gfx.winit_window.set_cursor_grab(mode);
                     let _ = gfx.winit_window.set_cursor_visible(!grabbed);
                 }

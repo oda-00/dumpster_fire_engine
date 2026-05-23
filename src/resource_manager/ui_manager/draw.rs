@@ -1,5 +1,10 @@
 use thin_vec::ThinVec;
 
+/// UV passed to `push_rect` for opaque solid-color quads.
+/// All four vertices share (0,0) so every fragment triggers the shader's
+/// degenerate-UV bypass and uses vertex color directly (no atlas sample).
+pub const SOLID: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct UiVertex {
@@ -32,6 +37,24 @@ impl DrawList {
             UiVertex { pos: [x,     y + h], uv: [uv[0], uv[3]], color },
         ]);
         self.indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+    }
+
+    pub fn push_panel_bg(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
+        self.push_rect(x, y, w, h, SOLID, color);
+    }
+
+    pub fn push_title_bar(&mut self, x: f32, y: f32, w: f32, h: f32,
+                           bg: [u8; 4], sep: [u8; 4]) {
+        self.push_rect(x, y, w, h, SOLID, bg);
+        self.push_line(x, y + h, x + w, y + h, 1.0, sep);
+    }
+
+    pub fn push_vsep(&mut self, x: f32, y: f32, h: f32, color: [u8; 4]) {
+        self.push_line(x, y, x, y + h, 1.5, color);
+    }
+
+    pub fn push_hsep(&mut self, x: f32, y: f32, w: f32, color: [u8; 4]) {
+        self.push_line(x, y, x + w, y, 1.5, color);
     }
 
     /// Push an arbitrary-angle line segment as a rotated thin quad.

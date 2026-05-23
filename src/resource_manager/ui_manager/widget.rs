@@ -79,12 +79,40 @@ declare_widgets! {
 }
 
 impl Widget {
-    /// Per-widget tick: receives input + dt, lets retained state update
-    /// (e.g. dropdown collapse on outside click). No-op for Spacer.
-    pub fn tick(&mut self, _input: &super::input::UiInputState, _dt: f32) {
-        if let Widget::Dropdown(d) = self {
-            // collapse on next frame after click handled
-            if d.expanded && d.on_change.is_some() { /* placeholder for outside-click logic */ }
+    /// Per-widget tick: updates retained hover/pressed/dragging state from input.
+    pub fn tick(&mut self, input: &super::input::UiInputState, _dt: f32) {
+        match self {
+            Widget::Button(b) => {
+                let hov = b.last_rect.contains(input.cursor[0], input.cursor[1]);
+                b.state = if hov && input.left_just_pressed { ButtonState::Pressed }
+                          else if hov { ButtonState::Hovered }
+                          else { ButtonState::Idle };
+            }
+            Widget::Checkbox(c) => {
+                if input.left_just_pressed
+                    && c.last_rect.contains(input.cursor[0], input.cursor[1]) {
+                    c.checked = !c.checked;
+                }
+            }
+            Widget::Dropdown(d) => {
+                if d.expanded && input.left_just_pressed
+                    && !d.last_rect.contains(input.cursor[0], input.cursor[1]) {
+                    d.expanded = false;
+                }
+            }
+            Widget::Slider(s) => {
+                if s.dragging && !input.left_down { s.dragging = false; }
+                if input.left_just_pressed
+                    && s.last_rect.contains(input.cursor[0], input.cursor[1]) {
+                    s.dragging = true;
+                }
+                if s.dragging {
+                    let t = ((input.cursor[0] - s.last_rect.x)
+                             / s.last_rect.w.max(1e-5)).clamp(0.0, 1.0);
+                    s.apply(s.min + t * (s.max - s.min));
+                }
+            }
+            _ => {}
         }
     }
 }
