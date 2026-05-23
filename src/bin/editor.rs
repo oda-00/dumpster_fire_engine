@@ -76,6 +76,14 @@ struct EditorApp {
     frame_time_accum:  f32,
     frame_count_accum: u32,
     fps_display:       f32,
+
+    // ── UI input (cursor + mouse state for immediate-mode hit tests).
+    ui_cursor:         [f32; 2],
+    ui_left_down:      bool,
+    ui_left_just_pressed: bool,
+    /// True when the most recent left-click was over a UI panel — the
+    /// editor swallows the click so viewport-pick doesn't also fire.
+    ui_consumed_click: bool,
 }
 
 impl EditorApp {
@@ -285,11 +293,40 @@ impl AppLogic for EditorApp {
                 }
             }
 
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                if let (Some(win), Some(cursor)) = (self.win, ctx.windows.get(app).and_then(|w| w.last_cursor)) {
-                    if let Some(ah) = self.pick_actor(ctx, win, cursor) {
-                        self.world.selection = Some(ah);
-                        return true;
+            WindowEvent::CursorMoved { position, .. } => {
+                self.ui_cursor = [position.x as f32, position.y as f32];
+            }
+
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                match state {
+                    ElementState::Pressed => {
+                        self.ui_left_down         = true;
+                        self.ui_left_just_pressed = true;
+                        // Hit-test UI panels first. The toolbar (top 36px),
+                        // outliner+inspector (right 280px), and file picker
+                        // modal all consume the click.
+                        let (win_w, win_h) = ctx.viewport_grid(app)
+                            .map(|g| (g.win_w, g.win_h))
+                            .unwrap_or((1280.0, 720.0));
+                        let in_toolbar  = self.ui_cursor[1] < 36.0;
+                        let in_side     = self.ui_cursor[0] > win_w - 280.0;
+                        let in_picker   = self.picker_open;
+                        let in_spawn    = self.spawn_menu_open
+                            && self.ui_cursor[0] > 200.0 && self.ui_cursor[0] < 360.0
+                            && self.ui_cursor[1] > 36.0  && self.ui_cursor[1] < 236.0;
+                        self.ui_consumed_click = in_toolbar || in_side || in_picker || in_spawn;
+                        if !self.ui_consumed_click {
+                            if let Some(win) = self.win {
+                                if let Some(ah) = self.pick_actor(ctx, win, (self.ui_cursor[0], self.ui_cursor[1])) {
+                                    self.world.selection = Some(ah);
+                                    return true;
+                                }
+                            }
+                        }
+                        let _ = win_h;
+                    }
+                    ElementState::Released => {
+                        self.ui_left_down = false;
                     }
                 }
             }
@@ -329,7 +366,12 @@ impl AppLogic for EditorApp {
         self.draw_toolbar(ctx, app);
         self.draw_outliner(ctx, app);
         self.draw_inspector(ctx, app);
+        self.draw_trs_gizmo(ctx, app);
         if self.picker_open { self.draw_file_picker(ctx, app); }
+        // Frame is built — consume the per-frame click edge so it doesn't
+        // re-fire next tick.
+        self.ui_left_just_pressed = false;
+        self.ui_consumed_click    = false;
 
         let elapsed = self.start.elapsed().as_secs_f32();
         match ctx.render_world(&self.world, app, elapsed) {
@@ -344,6 +386,15 @@ impl AppLogic for EditorApp {
 // ── Toolbar ────────────────────────────────────────────────────────────────
 
 impl EditorApp {
+    fn ui_input(&self) -> dumpster_fire_engine::resource_manager::ui_manager::UiInputState {
+        use dumpster_fire_engine::resource_manager::ui_manager::UiInputState;
+        let mut s = UiInputState::default();
+        s.cursor            = self.ui_cursor;
+        s.left_down         = self.ui_left_down;
+        s.left_just_pressed = self.ui_left_just_pressed;
+        s
+    }
+
     fn draw_toolbar(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
         use dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui;
         use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
@@ -367,6 +418,7 @@ impl EditorApp {
         let r_col = if self.gizmo_mode == GizmoMode::Rotate    { [80,160,80,255u8] } else { [60,60,70,255] };
         let s_col = if self.gizmo_mode == GizmoMode::Scale     { [80,160,80,255u8] } else { [60,60,70,255] };
         let sp_col = if self.gizmo_space == GizmoSpace::Local  { [100,100,200,255u8] } else { [60,60,70,255] };
+        let input = self.ui_input();
 
         // Build draw list — mutable borrow of self.world ends at end of block.
         let (layout_clicked, frame_all_clicked, spawn_clicked, tonemap_clicked) = {
@@ -374,7 +426,7 @@ impl EditorApp {
             let dl   = &mut self.world.ui.draw_list;
             dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0, 0.0, 1.0, 1.0], [30, 30, 35, 255]);
 
-            let mut ui = Ui::new(dl, Rect { x: 4.0, y: 4.0, w: win_w - 8.0, h: 28.0 });
+            let mut ui = Ui::with_input(dl, Rect { x: 4.0, y: 4.0, w: win_w - 8.0, h: 28.0 }, input);
             let layout_c  = ui.button(layout_label);
             ui.checkbox("Grid", &mut self.grid_enabled);
             let frame_c   = ui.button("Frame All");
@@ -412,15 +464,41 @@ impl EditorApp {
         if self.spawn_menu_open {
             let ox = 200.0_f32;
             let oy = 36.0_f32;
-            let dl = &mut self.world.ui.draw_list;
-            dl.push_rect(ox, oy, 160.0, 200.0, [0.0,0.0,1.0,1.0], [25, 25, 35, 245]);
+            let click_x = self.ui_cursor[0];
+            let click_y = self.ui_cursor[1];
+            let just_clicked = self.ui_left_just_pressed;
             let entries: &[&str] = &[
                 "Mesh Actor…", "Light: Point", "Light: Spot", "Light: Directional",
                 "Camera", "Empty", "Trigger Volume", "Audio Emitter",
             ];
-            for (i, _label) in entries.iter().enumerate() {
-                let item_y = oy + i as f32 * 24.0 + 4.0;
-                dl.push_rect(ox + 4.0, item_y, 152.0, 20.0, [0.0,0.0,1.0,1.0], [45, 45, 60, 255]);
+            let mut chosen: Option<usize> = None;
+            {
+                let dl = &mut self.world.ui.draw_list;
+                dl.push_rect(ox, oy, 160.0, 200.0, [0.0,0.0,1.0,1.0], [25, 25, 35, 245]);
+                for (i, _label) in entries.iter().enumerate() {
+                    let item_y = oy + i as f32 * 24.0 + 4.0;
+                    let hovered = click_x >= ox + 4.0 && click_x < ox + 156.0
+                                && click_y >= item_y && click_y < item_y + 20.0;
+                    let bg = if hovered { [70, 70, 100, 255] } else { [45, 45, 60, 255] };
+                    dl.push_rect(ox + 4.0, item_y, 152.0, 20.0, [0.0,0.0,1.0,1.0], bg);
+                    if hovered && just_clicked { chosen = Some(i); }
+                }
+            }
+            if let Some(idx) = chosen {
+                self.spawn_menu_open = false;
+                match idx {
+                    0 => self.picker_open = true,
+                    1 => self.spawn_light(LightKind::Point),
+                    2 => self.spawn_light(LightKind::Spot {
+                        cone_inner: 0.5, cone_outer: 0.8, direction: [0.0, -1.0, 0.0],
+                    }),
+                    3 => self.spawn_light(LightKind::Directional { direction: [0.0, -1.0, 0.0] }),
+                    4 => self.spawn_empty("Camera"),
+                    5 => self.spawn_empty("Empty"),
+                    6 => self.spawn_empty("TriggerVolume"),
+                    7 => self.spawn_empty("AudioEmitter"),
+                    _ => {}
+                }
             }
         }
     }
@@ -531,7 +609,18 @@ impl EditorApp {
         let world_t   = stage.worlds.get(world_idx).copied().unwrap_or(Affine3A::IDENTITY);
         let pos       = world_t.translation;
 
-        let mut ui = Ui::new(dl, Rect { x: rect.x + 4.0, y: rect.y + 26.0, w: rect.w - 8.0, h: rect.h - 30.0 });
+        let input = dumpster_fire_engine::resource_manager::ui_manager::UiInputState {
+            cursor:             self.ui_cursor,
+            cursor_prev:        self.ui_cursor,
+            left_down:          self.ui_left_down,
+            left_just_pressed:  self.ui_left_just_pressed,
+            left_just_released: false,
+            right_down:         false,
+            mods:               Default::default(),
+            scroll:             [0.0, 0.0],
+            chars:              thin_vec::ThinVec::new(),
+        };
+        let mut ui = Ui::with_input(dl, Rect { x: rect.x + 4.0, y: rect.y + 26.0, w: rect.w - 8.0, h: rect.h - 30.0 }, input);
 
         if has_transform {
             ui.label("Transform");
@@ -625,10 +714,11 @@ impl EditorApp {
 
         let mut load_path: Option<Arc<str>> = None;
         let mut cancel = false;
+        let input = self.ui_input();
 
         {
             let dl2 = &mut self.world.ui.draw_list;
-            let mut ui = Ui::new(dl2, Rect { x: rect.x + 4.0, y: rect.y + 32.0, w: rect.w - 8.0, h: ph - 60.0 });
+            let mut ui = Ui::with_input(dl2, Rect { x: rect.x + 4.0, y: rect.y + 32.0, w: rect.w - 8.0, h: ph - 60.0 }, input.clone());
             ui.label("Select .glb file");
 
             for path in &filtered {
@@ -640,7 +730,7 @@ impl EditorApp {
             }
 
             let footer = Rect { x: rect.x + 4.0, y: rect.y + ph - 32.0, w: rect.w - 8.0, h: 28.0 };
-            let mut u2 = Ui::new(dl2, footer);
+            let mut u2 = Ui::with_input(dl2, footer, input);
             if u2.button("Cancel") { cancel = true; }
         }
 
@@ -653,6 +743,111 @@ impl EditorApp {
             self.picker_open = false;
         }
         if cancel { self.picker_open = false; }
+    }
+}
+
+// ── TRS gizmo (rendered in 2D screen space projected from focused pane) ───
+
+impl EditorApp {
+    fn draw_trs_gizmo(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        let Some(ah) = self.world.selection else { return };
+        let Some((lh, sh)) = self.main_stage else { return };
+        let Some(grid) = ctx.viewport_grid(app) else { return };
+        let focused_h = grid.focused;
+        let Some(vp) = grid.get(focused_h) else { return };
+        let (win_w, win_h) = (grid.win_w, grid.win_h);
+        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else { return };
+        let world_t = match stage.worlds.get(ah.idx as usize) {
+            Some(t) => *t,
+            None    => return,
+        };
+        let center = Vec3::from(world_t.translation);
+
+        let Some(cam) = ctx.cameras.get(vp.camera_handle) else { return };
+        let aspect = vp.rect.pixel_aspect(win_w, win_h);
+        let vp_mat = Mat4::from_cols_array(&cam.view_projection_matrix(aspect));
+
+        // Compute pane pixel rect for NDC → screen conversion.
+        let pane_x = vp.rect.x * win_w;
+        let pane_y = vp.rect.y * win_h;
+        let pane_w = vp.rect.w * win_w;
+        let pane_h = vp.rect.h * win_h;
+
+        // Project a world point into pane-screen pixels. Returns None when
+        // the point is behind the near plane.
+        let project = |p: Vec3| -> Option<[f32; 2]> {
+            let clip = vp_mat * Vec4::new(p.x, p.y, p.z, 1.0);
+            if clip.w <= 1e-5 { return None; }
+            let ndc_x = clip.x / clip.w;
+            let ndc_y = clip.y / clip.w;
+            let sx = pane_x + (ndc_x * 0.5 + 0.5) * pane_w;
+            let sy = pane_y + (ndc_y * 0.5 + 0.5) * pane_h;
+            Some([sx, sy])
+        };
+
+        // Constant-screen-size by tying world length to camera distance.
+        let cam_pos = Vec3::from_array(cam.position);
+        let dist = (cam_pos - center).length().max(0.5);
+        let len  = 0.15 * dist;
+
+        let Some(origin_s) = project(center) else { return };
+        let axes: [(Vec3, [u8; 4]); 3] = [
+            (Vec3::X, [220,  60,  60, 255]),
+            (Vec3::Y, [ 70, 200,  70, 255]),
+            (Vec3::Z, [ 70, 100, 220, 255]),
+        ];
+
+        let dl = &mut self.world.ui.draw_list;
+
+        match self.gizmo_mode {
+            GizmoMode::Translate | GizmoMode::Scale => {
+                for (axis, color) in axes {
+                    let tip_world = center + axis * len;
+                    if let Some(tip_s) = project(tip_world) {
+                        dl.push_line(origin_s[0], origin_s[1], tip_s[0], tip_s[1], 2.5, color);
+                        // Tip glyph: small box for both translate (arrowhead
+                        // stand-in) and scale.
+                        let sz = 8.0_f32;
+                        dl.push_rect(tip_s[0] - sz * 0.5, tip_s[1] - sz * 0.5,
+                                     sz, sz, [0.0, 0.0, 1.0, 1.0], color);
+                    }
+                }
+                // Central yellow free-move / uniform-scale handle.
+                let sz = 10.0_f32;
+                dl.push_rect(origin_s[0] - sz * 0.5, origin_s[1] - sz * 0.5,
+                             sz, sz, [0.0, 0.0, 1.0, 1.0], [230, 220, 70, 255]);
+            }
+            GizmoMode::Rotate => {
+                // Three rings: one perpendicular to each axis. Sample 32
+                // points; project each; connect with line segments.
+                const N: usize = 32;
+                let basis = [
+                    (Vec3::Y, Vec3::Z, [220,  60,  60, 255]), // ring ⟂ X
+                    (Vec3::X, Vec3::Z, [ 70, 200,  70, 255]), // ring ⟂ Y
+                    (Vec3::X, Vec3::Y, [ 70, 100, 220, 255]), // ring ⟂ Z
+                ];
+                for (u, v, color) in basis {
+                    let mut prev: Option<[f32; 2]> = None;
+                    let mut first: Option<[f32; 2]> = None;
+                    for i in 0..=N {
+                        let t = (i as f32) / (N as f32) * std::f32::consts::TAU;
+                        let p = center + (u * t.cos() + v * t.sin()) * len;
+                        if let Some(s) = project(p) {
+                            if let Some(prev_s) = prev {
+                                dl.push_line(prev_s[0], prev_s[1], s[0], s[1], 1.8, color);
+                            }
+                            if first.is_none() { first = Some(s); }
+                            prev = Some(s);
+                        }
+                    }
+                    let _ = first;
+                }
+                // Center screen-space rotation circle (yellow dot).
+                let sz = 8.0_f32;
+                dl.push_rect(origin_s[0] - sz * 0.5, origin_s[1] - sz * 0.5,
+                             sz, sz, [0.0, 0.0, 1.0, 1.0], [230, 220, 70, 255]);
+            }
+        }
     }
 }
 
@@ -714,5 +909,9 @@ fn main() -> ForgeResult<()> {
         frame_time_accum:   0.0,
         frame_count_accum:  0,
         fps_display:        0.0,
+        ui_cursor:          [0.0, 0.0],
+        ui_left_down:       false,
+        ui_left_just_pressed: false,
+        ui_consumed_click:  false,
     }).run()
 }

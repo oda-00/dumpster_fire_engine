@@ -574,6 +574,39 @@ impl<'a> AppCtx<'a> {
             }
             (wh, views)
         };
+
+        // Push the UI draw list into the window's overlay pipeline so the
+        // overlay pass has something to draw. Cheap host-visible upload.
+        let dl = &world.ui.draw_list;
+        if !dl.indices.is_empty() {
+            let vert_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    dl.vertices.as_ptr() as *const u8,
+                    std::mem::size_of_val(dl.vertices.as_slice()),
+                )
+            };
+            let idx_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    dl.indices.as_ptr() as *const u8,
+                    std::mem::size_of_val(dl.indices.as_slice()),
+                )
+            };
+            if let Some(window) = self.renderer.window_mut(window_h) {
+                let _ = window.set_ui_draw(
+                    &self.vulkan.device,
+                    vert_bytes, idx_bytes,
+                    dl.vertices.len() as u32,
+                    dl.indices.len()  as u32,
+                );
+            }
+        } else {
+            // Clear the per-FIF UI counts so a previously-uploaded list
+            // isn't redrawn after the editor empties its draw_list.
+            if let Some(window) = self.renderer.window_mut(window_h) {
+                let _ = window.set_ui_draw(&self.vulkan.device, &[], &[], 0, 0);
+            }
+        }
+
         collect_and_submit(
             world,
             self.gltf_assets,
