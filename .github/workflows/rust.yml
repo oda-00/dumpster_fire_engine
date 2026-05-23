@@ -17,8 +17,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - name: Install Vulkan dev + GLSL compiler
-        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslang-tools
+      - name: Install LLVM 18
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s 18 all
+          echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+          echo "/usr/lib/llvm-18/bin" >> $GITHUB_PATH
+      - name: Install Vulkan dev + GLSL compiler + Valgrind
+        run: sudo apt-get install -y libvulkan-dev glslang-tools valgrind
+      - name: Install iai-callgrind-runner
+        run: cargo install iai-callgrind-runner --version 0.16.1 --locked
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
