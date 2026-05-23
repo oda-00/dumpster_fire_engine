@@ -50,11 +50,11 @@ pub struct Stage {
     // (push-on-grow, overwrite on free-list reuse). Stage::despawn_actor leaves
     // the entries as garbage; next reuse overwrites. Validity is gated by the
     // corresponding Arena slot's generation, same as Actor itself.
-    pub locals:      ThinVec<Affine3A>,
-    pub worlds:      ThinVec<Affine3A>,
+    pub locals:      Vec<Affine3A>,
+    pub worlds:      Vec<Affine3A>,
     /// Packed dirty bitset — one bit per actor slot indexed by `actor_h.idx`.
     /// One `u64` word covers 64 consecutive slots; 16 words covers 1024 actors.
-    pub dirty_words: ThinVec<u64>,
+    pub dirty_words: Vec<u64>,
 }
 
 impl Stage {
@@ -74,9 +74,9 @@ impl Stage {
             dirty_actors,
             play:         None,
             cue_scratch,
-            locals:       ThinVec::with_capacity(MAX_ACTORS_PER_STAGE),
-            worlds:       ThinVec::with_capacity(MAX_ACTORS_PER_STAGE),
-            dirty_words:  ThinVec::with_capacity((MAX_ACTORS_PER_STAGE + 63) / 64),
+            locals:       Vec::with_capacity(MAX_ACTORS_PER_STAGE),
+            worlds:       Vec::with_capacity(MAX_ACTORS_PER_STAGE),
+            dirty_words:  Vec::with_capacity((MAX_ACTORS_PER_STAGE + 63) / 64),
         }
     }
 
@@ -409,7 +409,7 @@ fn propagate_one(
 
 // ── Packed bitset helpers ───────────────────────────────────────────────────
 //
-// `dirty_words` is a `ThinVec<u64>` where bit `idx` lives in word `idx >> 6` at
+// `dirty_words` is a `Vec<u64>` where bit `idx` lives in word `idx >> 6` at
 // position `idx & 63`. This packs 64 actor dirty-flags per cache line word
 // (8 bytes), reducing L1 footprint by 8× over the old `Vec<bool>` layout.
 // `bit_set` grows the vec lazily so spawn_actor only needs one call regardless
@@ -423,7 +423,7 @@ fn bit_get(words: &[u64], idx: usize) -> bool {
 }
 
 #[inline(always)]
-fn bit_set(words: &mut ThinVec<u64>, idx: usize) {
+fn bit_set(words: &mut Vec<u64>, idx: usize) {
     let word = idx >> 6;
     if word >= words.len() { words.resize(word + 1, 0u64); }
     words[word] |= 1u64 << (idx & 63);
@@ -438,7 +438,7 @@ fn bit_clear(words: &mut [u64], idx: usize) {
 // ── SoA cue-batch helpers ───────────────────────────────────────────────────
 //
 // Free functions so disjoint-field borrows on Stage pass through cleanly.
-// Iterates a tightly-packed `ThinVec<Affine3A>` (the SoA hot array) — one cache
+// Iterates a tightly-packed `Vec<Affine3A>` (the SoA hot array) — one cache
 // line of work per actor instead of pulling 1-2 KB Actor cache lines.
 // 4-way unrolled so LLVM can keep multiple `Affine3A * Affine3A` SSE multiplies
 // in flight (each multiply is independent across actors).
@@ -446,7 +446,7 @@ fn bit_clear(words: &mut [u64], idx: usize) {
 #[inline(always)]
 fn apply_delta_block_soa(
     locals: &mut [Affine3A],
-    dirty_words: &mut ThinVec<u64>,
+    dirty_words: &mut Vec<u64>,
     dirty_actors: &mut ThinVec<ActorHandle>,
     handles: &[ActorHandle],
     delta: Affine3A,
@@ -498,7 +498,7 @@ fn apply_delta_block_soa(
 #[inline(always)]
 fn apply_identity_block_soa(
     _locals: &mut [Affine3A],
-    dirty_words: &mut ThinVec<u64>,
+    dirty_words: &mut Vec<u64>,
     dirty_actors: &mut ThinVec<ActorHandle>,
     handles: &[ActorHandle],
 ) {
