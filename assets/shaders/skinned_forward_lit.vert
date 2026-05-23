@@ -31,6 +31,7 @@ layout(set = 3, binding = 0, std430) readonly buffer Instances {
 
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outUv;
+layout(location = 2) out vec3 outWorldPos;
 
 void main() {
     uvec4 j = uvec4(
@@ -57,6 +58,7 @@ void main() {
     // Transform normal by the upper-left 3x3 of (instance * skin). For uniform
     // scale this is exact; for non-uniform scale the engine would need to
     // pass an inverse-transpose palette — out of scope here.
-    outNormal = mat3(instance_offset) * mat3(skin) * inNormal;
-    outUv     = inUv;
+    outNormal   = mat3(instance_offset) * mat3(skin) * inNormal;
+    outUv       = inUv;
+    outWorldPos = posed_pos.xyz;
 }
