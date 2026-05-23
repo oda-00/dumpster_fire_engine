@@ -76,6 +76,14 @@ struct EditorApp {
     frame_time_accum:  f32,
     frame_count_accum: u32,
     fps_display:       f32,
+
+    // ── UI input (cursor + mouse state for immediate-mode hit tests).
+    ui_cursor:         [f32; 2],
+    ui_left_down:      bool,
+    ui_left_just_pressed: bool,
+    /// True when the most recent left-click was over a UI panel — the
+    /// editor swallows the click so viewport-pick doesn't also fire.
+    ui_consumed_click: bool,
 }
 
 impl EditorApp {
@@ -285,11 +293,40 @@ impl AppLogic for EditorApp {
                 }
             }
 
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                if let (Some(win), Some(cursor)) = (self.win, ctx.windows.get(app).and_then(|w| w.last_cursor)) {
-                    if let Some(ah) = self.pick_actor(ctx, win, cursor) {
-                        self.world.selection = Some(ah);
-                        return true;
+            WindowEvent::CursorMoved { position, .. } => {
+                self.ui_cursor = [position.x as f32, position.y as f32];
+            }
+
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                match state {
+                    ElementState::Pressed => {
+                        self.ui_left_down         = true;
+                        self.ui_left_just_pressed = true;
+                        // Hit-test UI panels first. The toolbar (top 36px),
+                        // outliner+inspector (right 280px), and file picker
+                        // modal all consume the click.
+                        let (win_w, win_h) = ctx.viewport_grid(app)
+                            .map(|g| (g.win_w, g.win_h))
+                            .unwrap_or((1280.0, 720.0));
+                        let in_toolbar  = self.ui_cursor[1] < 36.0;
+                        let in_side     = self.ui_cursor[0] > win_w - 280.0;
+                        let in_picker   = self.picker_open;
+                        let in_spawn    = self.spawn_menu_open
+                            && self.ui_cursor[0] > 200.0 && self.ui_cursor[0] < 360.0
+                            && self.ui_cursor[1] > 36.0  && self.ui_cursor[1] < 236.0;
+                        self.ui_consumed_click = in_toolbar || in_side || in_picker || in_spawn;
+                        if !self.ui_consumed_click {
+                            if let Some(win) = self.win {
+                                if let Some(ah) = self.pick_actor(ctx, win, (self.ui_cursor[0], self.ui_cursor[1])) {
+                                    self.world.selection = Some(ah);
+                                    return true;
+                                }
+                            }
+                        }
+                        let _ = win_h;
+                    }
+                    ElementState::Released => {
+                        self.ui_left_down = false;
                     }
                 }
             }
@@ -330,6 +367,10 @@ impl AppLogic for EditorApp {
         self.draw_outliner(ctx, app);
         self.draw_inspector(ctx, app);
         if self.picker_open { self.draw_file_picker(ctx, app); }
+        // Frame is built — consume the per-frame click edge so it doesn't
+        // re-fire next tick.
+        self.ui_left_just_pressed = false;
+        self.ui_consumed_click    = false;
 
         let elapsed = self.start.elapsed().as_secs_f32();
         match ctx.render_world(&self.world, app, elapsed) {
@@ -344,6 +385,15 @@ impl AppLogic for EditorApp {
 // ── Toolbar ────────────────────────────────────────────────────────────────
 
 impl EditorApp {
+    fn ui_input(&self) -> dumpster_fire_engine::resource_manager::ui_manager::UiInputState {
+        use dumpster_fire_engine::resource_manager::ui_manager::UiInputState;
+        let mut s = UiInputState::default();
+        s.cursor            = self.ui_cursor;
+        s.left_down         = self.ui_left_down;
+        s.left_just_pressed = self.ui_left_just_pressed;
+        s
+    }
+
     fn draw_toolbar(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
         use dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui;
         use dumpster_fire_engine::resource_manager::ui_manager::layout::Rect;
@@ -367,6 +417,7 @@ impl EditorApp {
         let r_col = if self.gizmo_mode == GizmoMode::Rotate    { [80,160,80,255u8] } else { [60,60,70,255] };
         let s_col = if self.gizmo_mode == GizmoMode::Scale     { [80,160,80,255u8] } else { [60,60,70,255] };
         let sp_col = if self.gizmo_space == GizmoSpace::Local  { [100,100,200,255u8] } else { [60,60,70,255] };
+        let input = self.ui_input();
 
         // Build draw list — mutable borrow of self.world ends at end of block.
         let (layout_clicked, frame_all_clicked, spawn_clicked, tonemap_clicked) = {
@@ -374,7 +425,7 @@ impl EditorApp {
             let dl   = &mut self.world.ui.draw_list;
             dl.push_rect(rect.x, rect.y, rect.w, rect.h, [0.0, 0.0, 1.0, 1.0], [30, 30, 35, 255]);
 
-            let mut ui = Ui::new(dl, Rect { x: 4.0, y: 4.0, w: win_w - 8.0, h: 28.0 });
+            let mut ui = Ui::with_input(dl, Rect { x: 4.0, y: 4.0, w: win_w - 8.0, h: 28.0 }, input);
             let layout_c  = ui.button(layout_label);
             ui.checkbox("Grid", &mut self.grid_enabled);
             let frame_c   = ui.button("Frame All");
@@ -412,15 +463,41 @@ impl EditorApp {
         if self.spawn_menu_open {
             let ox = 200.0_f32;
             let oy = 36.0_f32;
-            let dl = &mut self.world.ui.draw_list;
-            dl.push_rect(ox, oy, 160.0, 200.0, [0.0,0.0,1.0,1.0], [25, 25, 35, 245]);
+            let click_x = self.ui_cursor[0];
+            let click_y = self.ui_cursor[1];
+            let just_clicked = self.ui_left_just_pressed;
             let entries: &[&str] = &[
                 "Mesh Actor…", "Light: Point", "Light: Spot", "Light: Directional",
                 "Camera", "Empty", "Trigger Volume", "Audio Emitter",
             ];
-            for (i, _label) in entries.iter().enumerate() {
-                let item_y = oy + i as f32 * 24.0 + 4.0;
-                dl.push_rect(ox + 4.0, item_y, 152.0, 20.0, [0.0,0.0,1.0,1.0], [45, 45, 60, 255]);
+            let mut chosen: Option<usize> = None;
+            {
+                let dl = &mut self.world.ui.draw_list;
+                dl.push_rect(ox, oy, 160.0, 200.0, [0.0,0.0,1.0,1.0], [25, 25, 35, 245]);
+                for (i, _label) in entries.iter().enumerate() {
+                    let item_y = oy + i as f32 * 24.0 + 4.0;
+                    let hovered = click_x >= ox + 4.0 && click_x < ox + 156.0
+                                && click_y >= item_y && click_y < item_y + 20.0;
+                    let bg = if hovered { [70, 70, 100, 255] } else { [45, 45, 60, 255] };
+                    dl.push_rect(ox + 4.0, item_y, 152.0, 20.0, [0.0,0.0,1.0,1.0], bg);
+                    if hovered && just_clicked { chosen = Some(i); }
+                }
+            }
+            if let Some(idx) = chosen {
+                self.spawn_menu_open = false;
+                match idx {
+                    0 => self.picker_open = true,
+                    1 => self.spawn_light(LightKind::Point),
+                    2 => self.spawn_light(LightKind::Spot {
+                        cone_inner: 0.5, cone_outer: 0.8, direction: [0.0, -1.0, 0.0],
+                    }),
+                    3 => self.spawn_light(LightKind::Directional { direction: [0.0, -1.0, 0.0] }),
+                    4 => self.spawn_empty("Camera"),
+                    5 => self.spawn_empty("Empty"),
+                    6 => self.spawn_empty("TriggerVolume"),
+                    7 => self.spawn_empty("AudioEmitter"),
+                    _ => {}
+                }
             }
         }
     }
@@ -531,7 +608,18 @@ impl EditorApp {
         let world_t   = stage.worlds.get(world_idx).copied().unwrap_or(Affine3A::IDENTITY);
         let pos       = world_t.translation;
 
-        let mut ui = Ui::new(dl, Rect { x: rect.x + 4.0, y: rect.y + 26.0, w: rect.w - 8.0, h: rect.h - 30.0 });
+        let input = dumpster_fire_engine::resource_manager::ui_manager::UiInputState {
+            cursor:             self.ui_cursor,
+            cursor_prev:        self.ui_cursor,
+            left_down:          self.ui_left_down,
+            left_just_pressed:  self.ui_left_just_pressed,
+            left_just_released: false,
+            right_down:         false,
+            mods:               Default::default(),
+            scroll:             [0.0, 0.0],
+            chars:              thin_vec::ThinVec::new(),
+        };
+        let mut ui = Ui::with_input(dl, Rect { x: rect.x + 4.0, y: rect.y + 26.0, w: rect.w - 8.0, h: rect.h - 30.0 }, input);
 
         if has_transform {
             ui.label("Transform");
@@ -625,10 +713,11 @@ impl EditorApp {
 
         let mut load_path: Option<Arc<str>> = None;
         let mut cancel = false;
+        let input = self.ui_input();
 
         {
             let dl2 = &mut self.world.ui.draw_list;
-            let mut ui = Ui::new(dl2, Rect { x: rect.x + 4.0, y: rect.y + 32.0, w: rect.w - 8.0, h: ph - 60.0 });
+            let mut ui = Ui::with_input(dl2, Rect { x: rect.x + 4.0, y: rect.y + 32.0, w: rect.w - 8.0, h: ph - 60.0 }, input.clone());
             ui.label("Select .glb file");
 
             for path in &filtered {
@@ -640,7 +729,7 @@ impl EditorApp {
             }
 
             let footer = Rect { x: rect.x + 4.0, y: rect.y + ph - 32.0, w: rect.w - 8.0, h: 28.0 };
-            let mut u2 = Ui::new(dl2, footer);
+            let mut u2 = Ui::with_input(dl2, footer, input);
             if u2.button("Cancel") { cancel = true; }
         }
 
@@ -714,5 +803,9 @@ fn main() -> ForgeResult<()> {
         frame_time_accum:   0.0,
         frame_count_accum:  0,
         fps_display:        0.0,
+        ui_cursor:          [0.0, 0.0],
+        ui_left_down:       false,
+        ui_left_just_pressed: false,
+        ui_consumed_click:  false,
     }).run()
 }
