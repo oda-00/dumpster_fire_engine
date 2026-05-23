@@ -131,6 +131,10 @@ harness = false
 name = "script_hot_reload"
 harness = false
 
+[[bench]]
+name = "full_system"
+harness = false
+
 [[bin]]
 name = "hello_triangle"
 path = "src/bin/hello_triangle.rs"

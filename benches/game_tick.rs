@@ -83,7 +83,7 @@ fn build_world(scale: Scale) -> (World, ThinVec<StageHandles>) {
                     ActorType::Character(Character {
                         id: CharacterId::new(character_id_counter),
                         name: format!("c{character_id_counter}").into(),
-                        visible: true, physical: true, playable: false,
+                        visible: true, physical: true, playable: false, mesh: None,
                     }),
                     Affine3A::IDENTITY,
                 ).unwrap();
@@ -111,6 +111,7 @@ fn build_world(scale: Scale) -> (World, ThinVec<StageHandles>) {
                         stackable:   false,
                         visible:     true,
                         physical:    false,
+                        mesh:        None,
                     }),
                     Affine3A::from_translation(Vec3::new(0.0, 1.0, 0.0)),
                 ).unwrap();
@@ -534,7 +535,7 @@ fn build_world_storm(scale: Scale) -> (World, Vec<StageHandles>) {
                     ActorType::Character(Character {
                         id: CharacterId::new(char_id_counter),
                         name: format!("c{char_id_counter}").into(),
-                        visible: true, physical: true, playable: false,
+                        visible: true, physical: true, playable: false, mesh: None,
                     }),
                     Affine3A::IDENTITY,
                 ).unwrap();

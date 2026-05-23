@@ -94,7 +94,7 @@ fn set_sub_entity_local_first_dirty(b: Bencher) {
             ActorType::Character(Character {
                 id: CharacterId::new(i as i64 + 1),
                 name: "n".into(),
-                visible: true, physical: true, playable: false,
+                visible: true, physical: true, playable: false, mesh: None,
             }),
             Affine3A::IDENTITY,
         );
