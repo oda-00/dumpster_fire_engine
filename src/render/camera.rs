@@ -22,9 +22,9 @@ pub type CameraId = Id<CameraMarker>;
 /// Physical-lens parameters. `fov_y` is derived from focal_length and sensor_h.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Lens {
-    pub focal_length_mm: f32,  // e.g., 50.0
-    pub sensor_w_mm:     f32,  // e.g., 36.0 (full-frame)
-    pub sensor_h_mm:     f32,  // e.g., 24.0
+    pub focal_length_mm: f32, // e.g., 50.0
+    pub sensor_w_mm: f32,     // e.g., 36.0 (full-frame)
+    pub sensor_h_mm: f32,     // e.g., 24.0
 }
 
 impl Lens {
@@ -44,10 +44,10 @@ impl Lens {
 /// Exposure multiplier = 2^(EV_REF - ev)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Exposure {
-    pub aperture_fstop:  f32,  // e.g., 5.6
-    pub shutter_seconds: f32,  // e.g., 1.0/60.0
-    pub iso:             f32,  // e.g., 100.0
-    pub ev_compensation: f32,  // user offset in stops; e.g., 0.0
+    pub aperture_fstop: f32,  // e.g., 5.6
+    pub shutter_seconds: f32, // e.g., 1.0/60.0
+    pub iso: f32,             // e.g., 100.0
+    pub ev_compensation: f32, // user offset in stops; e.g., 0.0
 }
 
 impl Exposure {
@@ -67,9 +67,9 @@ impl Exposure {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Dof {
-    pub focus_distance_m: f32,  // e.g., 5.0
-    pub aperture_blades:  u32,  // e.g., 6
-    pub samples_per_pix:  u32,  // 1 = off; >= 2 enables RT bokeh
+    pub focus_distance_m: f32, // e.g., 5.0
+    pub aperture_blades: u32,  // e.g., 6
+    pub samples_per_pix: u32,  // 1 = off; >= 2 enables RT bokeh
 }
 
 impl Dof {
@@ -99,7 +99,7 @@ pub enum CameraMode {
 /// the existing perspective path — all legacy call-sites are unaffected.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProjectionMode {
-    Perspective  { fov: f32,  near: f32, far: f32 },
+    Perspective { fov: f32, near: f32, far: f32 },
     Orthographic { size: f32, near: f32, far: f32 },
 }
 
@@ -107,21 +107,21 @@ pub enum ProjectionMode {
 
 #[derive(Debug, Clone)]
 pub struct Camera {
-    pub id:         CameraId,
-    pub name:       Arc<str>,
-    pub mode:       CameraMode,
-    pub position:   [f32; 3],
-    pub yaw:        f32,
-    pub pitch:      f32,
-    pub roll:       f32,
-    pub fov:        f32,
-    pub near:       f32,
-    pub far:        f32,
+    pub id: CameraId,
+    pub name: Arc<str>,
+    pub mode: CameraMode,
+    pub position: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub roll: f32,
+    pub fov: f32,
+    pub near: f32,
+    pub far: f32,
     /// When `Some`, overrides `fov`/`near`/`far`. `None` = backwards-compat perspective.
     pub projection: Option<ProjectionMode>,
-    pub lens:       Lens,      // NEW
-    pub exposure:   Exposure,  // NEW
-    pub dof:        Dof,       // NEW
+    pub lens: Lens,         // NEW
+    pub exposure: Exposure, // NEW
+    pub dof: Dof,           // NEW
 }
 
 impl Camera {
@@ -140,9 +140,9 @@ impl Camera {
             projection: None,
             lens: Lens::FULL_FRAME,
             exposure: Exposure {
-                aperture_fstop:  5.6,
+                aperture_fstop: 5.6,
                 shutter_seconds: 1.0 / 60.0,
-                iso:             100.0,
+                iso: 100.0,
                 ev_compensation: 0.0,
             },
             dof: Dof::OFF,
@@ -172,9 +172,9 @@ impl Camera {
             projection: None,
             lens: Lens::FULL_FRAME,
             exposure: Exposure {
-                aperture_fstop:  5.6,
+                aperture_fstop: 5.6,
                 shutter_seconds: 1.0 / 60.0,
-                iso:             100.0,
+                iso: 100.0,
                 ev_compensation: 0.0,
             },
             dof: Dof::OFF,
@@ -197,11 +197,11 @@ impl Camera {
     fn basis(&self) -> (Vec3, Vec3, Vec3) {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
-        let forward    = Vec3::new(cp * cy, sp, cp * sy).normalize();
+        let forward = Vec3::new(cp * cy, sp, cp * sy).normalize();
         let right_base = Vec3::new(-sy, 0.0, cy).normalize();
-        let up_base    = right_base.cross(forward).normalize();
-        let up         = Quat::from_axis_angle(forward, self.roll) * up_base;
-        let right      = forward.cross(up).normalize();
+        let up_base = right_base.cross(forward).normalize();
+        let up = Quat::from_axis_angle(forward, self.roll) * up_base;
+        let right = forward.cross(up).normalize();
         (forward, right, up)
     }
 
@@ -233,12 +233,13 @@ impl Camera {
     #[inline]
     pub fn view_projection_matrix(&self, aspect: f32) -> [f32; 16] {
         let (forward, _, up) = self.basis();
-        let pos  = Vec3::from(self.position);
+        let pos = Vec3::from(self.position);
         let view = Mat4::look_at_rh(pos, pos + forward, up);
         let mut proj = match self.projection {
             None => Mat4::perspective_rh(self.lens.fov_y(), aspect, self.near, self.far),
-            Some(ProjectionMode::Perspective { fov, near, far }) =>
-                Mat4::perspective_rh(fov, aspect, near, far),
+            Some(ProjectionMode::Perspective { fov, near, far }) => {
+                Mat4::perspective_rh(fov, aspect, near, far)
+            }
             Some(ProjectionMode::Orthographic { size, near, far }) => {
                 let hw = size * aspect * 0.5;
                 let hh = size * 0.5;
@@ -307,6 +308,12 @@ pub struct CameraArena {
     cache: ThinVec<CameraHandle>,
 }
 
+impl Default for CameraArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CameraArena {
     pub fn new() -> Self {
         Self {
@@ -344,57 +351,61 @@ impl CameraArena {
     pub fn len(&self) -> usize {
         self.cameras.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.cameras.is_empty()
+    }
 }
 
 // ── Camera controller ───────────────────────────────────────────────────────
 
 pub struct CameraController {
-    forward:           bool,
-    backward:          bool,
-    left:              bool,
-    right:             bool,
-    up:                bool,
-    down:              bool,
-    roll_left:         bool,
-    roll_right:        bool,
-    mouse_grabbed:     bool,
-    middle_grabbed:    bool,
+    forward: bool,
+    backward: bool,
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+    roll_left: bool,
+    roll_right: bool,
+    mouse_grabbed: bool,
+    middle_grabbed: bool,
     mouse_sensitivity: f32,
-    move_speed:        f32,
-    roll_speed:        f32,
-    pan_sensitivity:   f32,
+    move_speed: f32,
+    roll_speed: f32,
+    pan_sensitivity: f32,
 }
 
 impl CameraController {
     pub fn new(move_speed: f32, mouse_sensitivity: f32) -> Self {
         Self {
-            forward:           false,
-            backward:          false,
-            left:              false,
-            right:             false,
-            up:                false,
-            down:              false,
-            roll_left:         false,
-            roll_right:        false,
-            mouse_grabbed:     false,
-            middle_grabbed:    false,
+            forward: false,
+            backward: false,
+            left: false,
+            right: false,
+            up: false,
+            down: false,
+            roll_left: false,
+            roll_right: false,
+            mouse_grabbed: false,
+            middle_grabbed: false,
             move_speed,
             mouse_sensitivity,
-            roll_speed:        1.0,
-            pan_sensitivity:   0.01,
+            roll_speed: 1.0,
+            pan_sensitivity: 0.01,
         }
     }
 
     pub fn handle_key(&mut self, key: KeyCode, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
-            KeyCode::KeyW => self.forward    = pressed,
-            KeyCode::KeyS => self.backward   = pressed,
-            KeyCode::KeyA => self.left       = pressed,
-            KeyCode::KeyD => self.right      = pressed,
-            KeyCode::KeyQ => self.up         = pressed,
-            KeyCode::KeyE => self.down       = pressed,
-            KeyCode::KeyZ => self.roll_left  = pressed,
+            KeyCode::KeyW => self.forward = pressed,
+            KeyCode::KeyS => self.backward = pressed,
+            KeyCode::KeyA => self.left = pressed,
+            KeyCode::KeyD => self.right = pressed,
+            KeyCode::KeyQ => self.up = pressed,
+            KeyCode::KeyE => self.down = pressed,
+            KeyCode::KeyZ => self.roll_left = pressed,
             KeyCode::KeyC => self.roll_right = pressed,
             _ => {}
         }
@@ -404,7 +415,7 @@ impl CameraController {
         if !self.mouse_grabbed {
             return (0.0, 0.0);
         }
-        let yaw   = -dx * self.mouse_sensitivity;
+        let yaw = -dx * self.mouse_sensitivity;
         let pitch = -dy * self.mouse_sensitivity;
         (yaw, pitch)
     }
@@ -446,14 +457,30 @@ impl CameraController {
 
     pub fn update(&self, camera: &mut Camera, dt: f32) {
         let speed = self.move_speed * dt;
-        if self.forward    { camera.move_forward(speed);  }
-        if self.backward   { camera.move_forward(-speed); }
-        if self.right      { camera.move_right(speed);    }
-        if self.left       { camera.move_right(-speed);   }
-        if self.up         { camera.move_up(speed);       }
-        if self.down       { camera.move_up(-speed);      }
-        if self.roll_left  { camera.roll += self.roll_speed * dt; }
-        if self.roll_right { camera.roll -= self.roll_speed * dt; }
+        if self.forward {
+            camera.move_forward(speed);
+        }
+        if self.backward {
+            camera.move_forward(-speed);
+        }
+        if self.right {
+            camera.move_right(speed);
+        }
+        if self.left {
+            camera.move_right(-speed);
+        }
+        if self.up {
+            camera.move_up(speed);
+        }
+        if self.down {
+            camera.move_up(-speed);
+        }
+        if self.roll_left {
+            camera.roll += self.roll_speed * dt;
+        }
+        if self.roll_right {
+            camera.roll -= self.roll_speed * dt;
+        }
     }
 }
 
@@ -462,29 +489,29 @@ impl CameraController {
 /// Scene (raster) push constants. Packed for 128 B (Vulkan typical limit).
 #[repr(C)]
 pub struct ScenePush {
-    pub view_proj:      [f32; 16],
-    pub cam_pos:        [f32; 3],
-    pub _pad0:          f32,
-    pub cam_forward:    [f32; 3],
-    pub _pad1:          f32,
+    pub view_proj: [f32; 16],
+    pub cam_pos: [f32; 3],
+    pub _pad0: f32,
+    pub cam_forward: [f32; 3],
+    pub _pad1: f32,
     pub exposure_scale: f32,
-    pub _pad2:          [f32; 3],
+    pub _pad2: [f32; 3],
 }
 
 /// Ray-tracing push constants. Exactly 128 B (one 4x32-bit register block).
 #[repr(C)]
 pub struct RayCameraPush {
-    pub inv_vp:         [f32; 16],
-    pub cam_pos:        [f32; 3],
-    pub is_ortho:       u32,
-    pub cam_forward:    [f32; 3],
-    pub frame_count:    u32,
+    pub inv_vp: [f32; 16],
+    pub cam_pos: [f32; 3],
+    pub is_ortho: u32,
+    pub cam_forward: [f32; 3],
+    pub frame_count: u32,
     pub aperture_radius: f32,
     pub focus_distance: f32,
     pub samples_per_pix: u32,
     pub aperture_blades: u32,
     pub pane_offset_px: [u32; 2],
-    pub pane_size_px:   [u32; 2],
+    pub pane_size_px: [u32; 2],
     pub exposure_scale: f32,
-    pub _pad:           [f32; 3],
+    pub _pad: [f32; 3],
 }

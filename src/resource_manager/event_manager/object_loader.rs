@@ -13,12 +13,12 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+use object::{
+    Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarget, SectionKind,
+    SymbolSection,
+};
 use std::sync::Arc;
 use thin_vec::ThinVec;
-use object::{
-    Object, ObjectSection, ObjectSymbol,
-    RelocationKind, RelocationTarget, SectionKind, SymbolSection,
-};
 
 // ── OS memory primitives ──────────────────────────────────────────────────────
 //
@@ -32,11 +32,11 @@ mod sys {
 
     unsafe extern "C" {
         pub fn mmap(
-            addr:   *mut c_void,
-            len:    usize,
-            prot:   c_int,
-            flags:  c_int,
-            fd:     c_int,
+            addr: *mut c_void,
+            len: usize,
+            prot: c_int,
+            flags: c_int,
+            fd: c_int,
             offset: i64,
         ) -> *mut c_void;
         pub fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int;
@@ -48,9 +48,9 @@ mod sys {
         pub fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
     }
 
-    pub const PROT_READ:  c_int = 1;
+    pub const PROT_READ: c_int = 1;
     pub const PROT_WRITE: c_int = 2;
-    pub const PROT_EXEC:  c_int = 4;
+    pub const PROT_EXEC: c_int = 4;
     pub const MAP_PRIVATE: c_int = 2;
 
     #[cfg(target_os = "linux")]
@@ -64,7 +64,7 @@ mod sys {
 }
 #[cfg(windows)]
 mod sys {
-    use core::ffi::{c_void, c_int};
+    use core::ffi::{c_int, c_void};
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -90,7 +90,7 @@ mod sys {
         pub fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
     }
 
-    pub const MEM_COMMIT:  u32 = 0x00001000;
+    pub const MEM_COMMIT: u32 = 0x00001000;
     pub const MEM_RESERVE: u32 = 0x00002000;
     pub const MEM_RELEASE: u32 = 0x00008000;
     pub const PAGE_READWRITE: u32 = 0x04;
@@ -124,21 +124,18 @@ impl MmapRegion {
         if ptr == sys::MAP_FAILED || ptr.is_null() {
             return None;
         }
-        Some(MmapRegion { ptr: ptr as *mut u8, len })
+        Some(MmapRegion {
+            ptr: ptr as *mut u8,
+            len,
+        })
     }
 
     #[cfg(unix)]
     fn make_exec(&self) -> bool {
-        unsafe {
-            sys::mprotect(
-                self.ptr as _,
-                self.len,
-                sys::PROT_READ | sys::PROT_EXEC,
-            ) == 0
-        }
+        unsafe { sys::mprotect(self.ptr as _, self.len, sys::PROT_READ | sys::PROT_EXEC) == 0 }
     }
-    
-        #[cfg(windows)]
+
+    #[cfg(windows)]
     fn alloc(size: usize) -> Option<Self> {
         debug_assert!(size > 0);
         let len = align_up(size, 4096);
@@ -150,10 +147,15 @@ impl MmapRegion {
                 sys::PAGE_READWRITE,
             )
         };
-        if ptr.is_null() { return None; }
-        Some(MmapRegion { ptr: ptr as *mut u8, len })
+        if ptr.is_null() {
+            return None;
+        }
+        Some(MmapRegion {
+            ptr: ptr as *mut u8,
+            len,
+        })
     }
-        #[cfg(windows)]
+    #[cfg(windows)]
     fn make_exec(&self) -> bool {
         let mut old = 0u32;
         unsafe {
@@ -164,17 +166,23 @@ impl MmapRegion {
 
 impl Drop for MmapRegion {
     fn drop(&mut self) {
-        if self.ptr.is_null() { return; }
+        if self.ptr.is_null() {
+            return;
+        }
         #[cfg(unix)]
         {
             if self.len > 0 {
-                unsafe { sys::munmap(self.ptr as _, self.len); }
+                unsafe {
+                    sys::munmap(self.ptr as _, self.len);
+                }
             }
         }
         #[cfg(windows)]
         {
             if self.len > 0 {
-                unsafe { sys::VirtualFree(self.ptr as _, 0, sys::MEM_RELEASE); }
+                unsafe {
+                    sys::VirtualFree(self.ptr as _, 0, sys::MEM_RELEASE);
+                }
             }
         }
     }
@@ -206,11 +214,11 @@ pub enum LoadError {
 impl core::fmt::Display for LoadError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            LoadError::Io(s)              => write!(f, "io: {s}"),
-            LoadError::Parse(s)           => write!(f, "parse: {s}"),
-            LoadError::Relocation(s)      => write!(f, "relocation: {s}"),
+            LoadError::Io(s) => write!(f, "io: {s}"),
+            LoadError::Parse(s) => write!(f, "parse: {s}"),
+            LoadError::Relocation(s) => write!(f, "relocation: {s}"),
             LoadError::UndefinedSymbol(s) => write!(f, "undefined symbol `{s}`"),
-            LoadError::Mmap               => write!(f, "mmap failed"),
+            LoadError::Mmap => write!(f, "mmap failed"),
         }
     }
 }
@@ -231,7 +239,8 @@ impl LoadedObject {
     /// Return the runtime address of `name`, or `None` if not found.
     pub fn symbol(&self, name: &str) -> Option<usize> {
         let i = self.symbols.partition_point(|(n, _)| n.as_ref() < name);
-        self.symbols.get(i)
+        self.symbols
+            .get(i)
             .filter(|(n, _)| n.as_ref() == name)
             .map(|(_, addr)| *addr)
     }
@@ -273,7 +282,10 @@ fn load_impl(obj: &object::File<'_>) -> Result<LoadedObject, LoadError> {
 
     if region_size == 0 {
         return Ok(LoadedObject {
-            _region:  MmapRegion { ptr: core::ptr::null_mut(), len: 0 },
+            _region: MmapRegion {
+                ptr: core::ptr::null_mut(),
+                len: 0,
+            },
             symbols: ThinVec::new(),
         });
     }
@@ -290,10 +302,10 @@ fn load_impl(obj: &object::File<'_>) -> Result<LoadedObject, LoadError> {
             continue;
         };
         let dst = unsafe { region.ptr.add(offset) };
-        if let Ok(data) = section.data() {
-            if !data.is_empty() {
-                unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len()) };
-            }
+        if let Ok(data) = section.data()
+            && !data.is_empty()
+        {
+            unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len()) };
         }
     }
 
@@ -350,7 +362,10 @@ fn load_impl(obj: &object::File<'_>) -> Result<LoadedObject, LoadError> {
         symbols.insert(ins, (Arc::from(name), addr));
     }
 
-    Ok(LoadedObject { _region: region, symbols })
+    Ok(LoadedObject {
+        _region: region,
+        symbols,
+    })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -366,10 +381,10 @@ fn is_loadable(kind: SectionKind) -> bool {
     )
 }
 
-fn layout_entry<'a>(
-    layout: &'a ThinVec<(usize, usize, usize)>,
+fn layout_entry(
+    layout: &ThinVec<(usize, usize, usize)>,
     idx: usize,
-) -> Option<&'a (usize, usize, usize)> {
+) -> Option<&(usize, usize, usize)> {
     layout.iter().find(|(i, _, _)| *i == idx)
 }
 
@@ -384,9 +399,9 @@ fn resolve_target(
             let sym = match obj.symbol_by_index(sym_idx) {
                 Ok(s) => s,
                 Err(e) => {
-                    return Err(LoadError::Relocation(
-                        Arc::<str>::from(format!("symbol lookup: {e}").as_str()),
-                    ));
+                    return Err(LoadError::Relocation(Arc::<str>::from(
+                        format!("symbol lookup: {e}").as_str(),
+                    )));
                 }
             };
             if sym.is_undefined() {
@@ -407,12 +422,10 @@ fn resolve_target(
                 }
             }
         }
-        RelocationTarget::Section(s_idx) => {
-            match layout_entry(layout, s_idx.0) {
-                Some(&(_, off, _)) => Ok(Some(region.ptr as usize + off)),
-                None => Ok(None),
-            }
-        }
+        RelocationTarget::Section(s_idx) => match layout_entry(layout, s_idx.0) {
+            Some(&(_, off, _)) => Ok(Some(region.ptr as usize + off)),
+            None => Ok(None),
+        },
         _ => Ok(None),
     }
 }
@@ -420,15 +433,15 @@ fn resolve_target(
 fn resolve_external(name: &str) -> Result<usize, LoadError> {
     #[cfg(unix)]
     match name {
-        "memset"  => return Ok(sys::memset  as *const () as usize),
-        "memcpy"  => return Ok(sys::memcpy  as *const () as usize),
+        "memset" => return Ok(sys::memset as *const () as usize),
+        "memcpy" => return Ok(sys::memcpy as *const () as usize),
         "memmove" => return Ok(sys::memmove as *const () as usize),
         _ => {}
     }
-        #[cfg(windows)]
+    #[cfg(windows)]
     match name {
-        "memset"  => return Ok(sys::memset  as *const () as usize),
-        "memcpy"  => return Ok(sys::memcpy  as *const () as usize),
+        "memset" => return Ok(sys::memset as *const () as usize),
+        "memcpy" => return Ok(sys::memcpy as *const () as usize),
         "memmove" => return Ok(sys::memmove as *const () as usize),
         _ => {}
     }

@@ -9,11 +9,20 @@ use thin_vec::ThinVec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Interpolation { Step, Linear, CubicSpline }
+pub enum Interpolation {
+    Step,
+    Linear,
+    CubicSpline,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum AnimPath { Translation, Rotation, Scale, MorphWeights }
+pub enum AnimPath {
+    Translation,
+    Rotation,
+    Scale,
+    MorphWeights,
+}
 
 #[derive(Debug, Clone)]
 pub enum SamplerOutput {
@@ -28,15 +37,15 @@ pub enum SamplerOutput {
 #[derive(Debug, Clone)]
 pub struct AnimSampler {
     pub interpolation: Interpolation,
-    pub input:         ThinVec<f32>,   // keyframe times, seconds
-    pub output:        SamplerOutput,
+    pub input: ThinVec<f32>, // keyframe times, seconds
+    pub output: SamplerOutput,
 }
 
 #[derive(Debug, Clone)]
 pub struct AnimChannel {
     pub target_node: u32,
     pub target_path: AnimPath,
-    pub sampler:     u32,
+    pub sampler: u32,
 }
 
 /// KHR_animation_pointer — replaces a channel's `target.node` with a JSON
@@ -51,9 +60,9 @@ pub struct AnimPointerChannel {
 
 #[derive(Debug, Clone)]
 pub struct Animation {
-    pub name:             Option<String>,
-    pub samplers:         ThinVec<AnimSampler>,
-    pub channels:         ThinVec<AnimChannel>,
+    pub name: Option<String>,
+    pub samplers: ThinVec<AnimSampler>,
+    pub channels: ThinVec<AnimChannel>,
     /// KHR_animation_pointer channels (sibling to `channels`).
     pub pointer_channels: ThinVec<AnimPointerChannel>,
 }
@@ -75,11 +84,6 @@ impl Animation {
 // between neighbouring keyframes; CUBICSPLINE uses Hermite interpolation
 // over (in-tangent, value, out-tangent) triplets.
 
-fn locate_segment(times: &[f32], t: f32) -> (usize, usize, f32) {
-    let mut hint = 0u32;
-    locate_segment_hinted(times, t, &mut hint)
-}
-
 /// Monotonic-time hint variant of `locate_segment`. Fast path: when the
 /// caller's previously-cached segment index still bounds `t`, return in
 /// O(1). When `t` advanced past the hint, forward-scan one step at a
@@ -87,10 +91,19 @@ fn locate_segment(times: &[f32], t: f32) -> (usize, usize, f32) {
 /// binary search on backward seek or first call. `hint` is updated
 /// in-place so the next call benefits.
 pub fn locate_segment_hinted(times: &[f32], t: f32, hint: &mut u32) -> (usize, usize, f32) {
-    if times.is_empty() { *hint = 0; return (0, 0, 0.0); }
-    if t <= times[0]    { *hint = 0; return (0, 0, 0.0); }
+    if times.is_empty() {
+        *hint = 0;
+        return (0, 0, 0.0);
+    }
+    if t <= times[0] {
+        *hint = 0;
+        return (0, 0, 0.0);
+    }
     let last = times.len() - 1;
-    if t >= times[last] { *hint = last as u32; return (last, last, 0.0); }
+    if t >= times[last] {
+        *hint = last as u32;
+        return (last, last, 0.0);
+    }
 
     // Fast path — hint still bounds `t`.
     let h = (*hint as usize).min(last.saturating_sub(1));
@@ -102,7 +115,9 @@ pub fn locate_segment_hinted(times: &[f32], t: f32, hint: &mut u32) -> (usize, u
     // Forward scan (monotonic time advanced past the hint).
     if t > times[h + 1] {
         let mut k = h + 1;
-        while k + 1 <= last && t > times[k + 1] { k += 1; }
+        while k < last && t > times[k + 1] {
+            k += 1;
+        }
         if k < last && t >= times[k] && t <= times[k + 1] {
             *hint = k as u32;
             let span = (times[k + 1] - times[k]).max(1e-12);
@@ -115,7 +130,11 @@ pub fn locate_segment_hinted(times: &[f32], t: f32, hint: &mut u32) -> (usize, u
     let mut hi = last;
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
-        if times[mid] <= t { lo = mid; } else { hi = mid; }
+        if times[mid] <= t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
     }
     *hint = lo as u32;
     let span = (times[hi] - times[lo]).max(1e-12);
@@ -145,13 +164,18 @@ fn slerp_quat(a: [f32; 4], b: [f32; 4], u: f32) -> [f32; 4] {
             a[2] + (b[2] - a[2]) * u,
             a[3] + (b[3] - a[3]) * u,
         ];
-        let len = (out[0]*out[0] + out[1]*out[1] + out[2]*out[2] + out[3]*out[3]).sqrt().max(1e-12);
-        out[0] /= len; out[1] /= len; out[2] /= len; out[3] /= len;
+        let len = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3])
+            .sqrt()
+            .max(1e-12);
+        out[0] /= len;
+        out[1] /= len;
+        out[2] /= len;
+        out[3] /= len;
         return out;
     }
     let theta_0 = dot.clamp(-1.0, 1.0).acos();
-    let theta   = theta_0 * u;
-    let sin_t0  = theta_0.sin().max(1e-12);
+    let theta = theta_0 * u;
+    let sin_t0 = theta_0.sin().max(1e-12);
     let s1 = ((1.0 - u) * theta_0).sin() / sin_t0;
     let s2 = theta.sin() / sin_t0;
     [
@@ -180,11 +204,15 @@ pub fn sample_vec3(s: &AnimSampler, t: f32) -> [f32; 3] {
 /// playback (the common case) skip O(log N) binary search and step
 /// forward in O(1). See `locate_segment_hinted`.
 pub fn sample_vec3_hinted(s: &AnimSampler, t: f32, hint: &mut u32) -> [f32; 3] {
-    let SamplerOutput::Vec3(out) = &s.output else { return [0.0; 3]; };
-    if out.is_empty() { return [0.0; 3]; }
+    let SamplerOutput::Vec3(out) = &s.output else {
+        return [0.0; 3];
+    };
+    if out.is_empty() {
+        return [0.0; 3];
+    }
     let (lo, hi, u) = locate_segment_hinted(&s.input, t, hint);
     match s.interpolation {
-        Interpolation::Step   => out[lo],
+        Interpolation::Step => out[lo],
         Interpolation::Linear => lerp_vec3(out[lo], out[hi], u),
         Interpolation::CubicSpline => {
             // Output is [in_tan_0, value_0, out_tan_0, in_tan_1, value_1, ...]
@@ -211,7 +239,13 @@ pub fn sample_scalar(s: &AnimSampler, t: f32, stride: usize, k: usize) -> f32 {
     sample_scalar_hinted(s, t, stride, k, &mut hint)
 }
 
-pub fn sample_scalar_hinted(s: &AnimSampler, t: f32, stride: usize, k: usize, hint: &mut u32) -> f32 {
+pub fn sample_scalar_hinted(
+    s: &AnimSampler,
+    t: f32,
+    stride: usize,
+    k: usize,
+    hint: &mut u32,
+) -> f32 {
     let SamplerOutput::Scalars(out) = &s.output else {
         return match &s.output {
             SamplerOutput::Vec3(_) => {
@@ -225,9 +259,13 @@ pub fn sample_scalar_hinted(s: &AnimSampler, t: f32, stride: usize, k: usize, hi
             _ => 0.0,
         };
     };
-    if out.is_empty() || stride == 0 { return 0.0; }
+    if out.is_empty() || stride == 0 {
+        return 0.0;
+    }
     let frames = out.len() / stride;
-    if frames == 0 { return 0.0; }
+    if frames == 0 {
+        return 0.0;
+    }
 
     let (lo, hi, u) = locate_segment_hinted(&s.input, t, hint);
     let pick = |frame: usize, slot: usize| -> f32 {
@@ -235,7 +273,7 @@ pub fn sample_scalar_hinted(s: &AnimSampler, t: f32, stride: usize, k: usize, hi
         out.get(i).copied().unwrap_or(0.0)
     };
     match s.interpolation {
-        Interpolation::Step   => pick(lo, k),
+        Interpolation::Step => pick(lo, k),
         Interpolation::Linear => {
             let a = pick(lo, k);
             let b = pick(hi, k);
@@ -266,11 +304,15 @@ pub fn sample_quat(s: &AnimSampler, t: f32) -> [f32; 4] {
 }
 
 pub fn sample_quat_hinted(s: &AnimSampler, t: f32, hint: &mut u32) -> [f32; 4] {
-    let SamplerOutput::Vec4(out) = &s.output else { return [0.0, 0.0, 0.0, 1.0]; };
-    if out.is_empty() { return [0.0, 0.0, 0.0, 1.0]; }
+    let SamplerOutput::Vec4(out) = &s.output else {
+        return [0.0, 0.0, 0.0, 1.0];
+    };
+    if out.is_empty() {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
     let (lo, hi, u) = locate_segment_hinted(&s.input, t, hint);
     match s.interpolation {
-        Interpolation::Step   => out[lo],
+        Interpolation::Step => out[lo],
         Interpolation::Linear => slerp_quat(out[lo], out[hi], u),
         Interpolation::CubicSpline => {
             let p0 = out[lo * 3 + 1];
@@ -284,13 +326,17 @@ pub fn sample_quat_hinted(s: &AnimSampler, t: f32, hint: &mut u32) -> [f32; 4] {
                 hermite(p0[2], m0[2] * dt, p1[2], m1[2] * dt, u),
                 hermite(p0[3], m0[3] * dt, p1[3], m1[3] * dt, u),
             ];
-            let len = (q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]).sqrt().max(1e-12);
-            q[0] /= len; q[1] /= len; q[2] /= len; q[3] /= len;
+            let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
+                .sqrt()
+                .max(1e-12);
+            q[0] /= len;
+            q[1] /= len;
+            q[2] /= len;
+            q[3] /= len;
             q
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -317,11 +363,15 @@ mod tests {
             .iter()
             .zip(mid_neg.iter())
             .all(|(p, n)| (p - n).abs() < 1e-5)
-        || mid_pos
-            .iter()
-            .zip(mid_neg.iter())
-            .all(|(p, n)| (p + n).abs() < 1e-5);
-        assert!(same_or_negated, "slerp short-path violated: pos={:?} neg={:?}", mid_pos, mid_neg);
+            || mid_pos
+                .iter()
+                .zip(mid_neg.iter())
+                .all(|(p, n)| (p + n).abs() < 1e-5);
+        assert!(
+            same_or_negated,
+            "slerp short-path violated: pos={:?} neg={:?}",
+            mid_pos, mid_neg
+        );
     }
 
     /// CubicSpline rotation tangents that produce a non-unit quaternion
@@ -334,18 +384,23 @@ mod tests {
         // the un-normalised hermite output is far from unit length.
         let sampler = AnimSampler {
             input: thin_vec::ThinVec::from(&[0.0_f32, 1.0][..]),
-            output: SamplerOutput::Vec4(thin_vec::ThinVec::from(&[
-                [0.0_f32, 0.0, 0.0, 0.0],  // in_tan_0
-                [0.0, 0.0, 0.0, 1.0],      // value_0   (identity)
-                [5.0, 5.0, 5.0, 5.0],      // out_tan_0 (huge)
-                [-5.0, -5.0, -5.0, -5.0],  // in_tan_1  (huge)
-                [1.0, 0.0, 0.0, 0.0],      // value_1   (180° around X)
-                [0.0, 0.0, 0.0, 0.0],      // out_tan_1
-            ][..])),
+            output: SamplerOutput::Vec4(thin_vec::ThinVec::from(
+                &[
+                    [0.0_f32, 0.0, 0.0, 0.0], // in_tan_0
+                    [0.0, 0.0, 0.0, 1.0],     // value_0   (identity)
+                    [5.0, 5.0, 5.0, 5.0],     // out_tan_0 (huge)
+                    [-5.0, -5.0, -5.0, -5.0], // in_tan_1  (huge)
+                    [1.0, 0.0, 0.0, 0.0],     // value_1   (180° around X)
+                    [0.0, 0.0, 0.0, 0.0],     // out_tan_1
+                ][..],
+            )),
             interpolation: Interpolation::CubicSpline,
         };
         let q = sample_quat(&sampler, 0.5);
-        let len2 = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
-        assert!((len2 - 1.0).abs() < 1e-4, "post-CubicSpline quat not unit: |q|²={len2}");
+        let len2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+        assert!(
+            (len2 - 1.0).abs() < 1e-4,
+            "post-CubicSpline quat not unit: |q|²={len2}"
+        );
     }
 }

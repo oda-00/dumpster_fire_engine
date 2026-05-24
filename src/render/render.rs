@@ -82,7 +82,7 @@ impl Renderer {
     pub fn build_compute_factory(
         &mut self,
         window_h: WindowHandle,
-        proto:    Proto<ComputeTag>,
+        proto: Proto<ComputeTag>,
     ) -> ForgeResult<FactoryHandle> {
         let device = self.forge.device.clone();
         let window = self
@@ -97,7 +97,7 @@ impl Renderer {
     pub fn build_compute_factory_async(
         &mut self,
         window_h: WindowHandle,
-        proto:    Proto<ComputeTag>,
+        proto: Proto<ComputeTag>,
     ) -> ForgeResult<(FactoryHandle, ash::vk::Semaphore)> {
         let device = self.forge.device.clone();
         let window = self
@@ -110,7 +110,7 @@ impl Renderer {
     pub fn build_graphics_factory(
         &mut self,
         window_h: WindowHandle,
-        proto:    Proto<GraphicsTag>,
+        proto: Proto<GraphicsTag>,
     ) -> FactoryHandle {
         let device = self.forge.device.clone();
         let window = self
@@ -126,7 +126,9 @@ impl Renderer {
     /// Replaces `device_wait_idle` for single-window apps.
     pub fn wait_for_last_submission(&self, window_h: WindowHandle) -> ForgeResult<()> {
         let device = self.forge.device.clone();
-        let window = self.windows.get(window_h)
+        let window = self
+            .windows
+            .get(window_h)
             .expect("window handle is stale or was never valid");
         window.wait_for_last_submission(&device)
     }

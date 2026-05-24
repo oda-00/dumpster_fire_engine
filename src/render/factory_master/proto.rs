@@ -18,13 +18,13 @@ pub type ProtoId = Id<ProtoMarker>;
 pub struct ComputeTag;
 pub struct GraphicsTag;
 
-pub type ComputeProto  = Proto<ComputeTag>;
+pub type ComputeProto = Proto<ComputeTag>;
 pub type GraphicsProto = Proto<GraphicsTag>;
 
 // ── Proto<Tag> ──────────────────────────────────────────────────────────────
 
 pub struct Proto<Tag> {
-    pub id:   ProtoId,
+    pub id: ProtoId,
     pub name: Arc<str>,
     // Both vecs always present; only one is populated depending on Tag.
     // ThinVec<T> is a single null pointer when empty, so the unused field is

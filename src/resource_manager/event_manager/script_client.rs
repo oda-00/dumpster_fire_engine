@@ -27,19 +27,19 @@ pub enum ScriptClientError {
 impl core::fmt::Display for ScriptClientError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ScriptClientError::Spawn(e)     => write!(f, "spawn langcd: {e}"),
-            ScriptClientError::Io(e)        => write!(f, "ipc io: {e}"),
-            ScriptClientError::DaemonDied   => write!(f, "langcd exited unexpectedly"),
+            ScriptClientError::Spawn(e) => write!(f, "spawn langcd: {e}"),
+            ScriptClientError::Io(e) => write!(f, "ipc io: {e}"),
+            ScriptClientError::DaemonDied => write!(f, "langcd exited unexpectedly"),
         }
     }
 }
 
 /// Persistent client over a spawned `langcd` process.
 pub struct ScriptClient {
-    child:  Child,
-    stdin:  BufWriter<ChildStdin>,
+    child: Child,
+    stdin: BufWriter<ChildStdin>,
     /// Inbound queue of decoded daemon messages, populated by a background reader thread.
-    rx:     Receiver<DaemonMsg>,
+    rx: Receiver<DaemonMsg>,
     /// Snapshot of received messages drained out of `rx` by `drain_pending`.
     pending: ThinVec<DaemonMsg>,
 }
@@ -54,14 +54,19 @@ impl ScriptClient {
             .spawn()
             .map_err(ScriptClientError::Spawn)?;
 
-        let stdin  = child.stdin.take().expect("piped stdin");
+        let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
-        let stdin  = BufWriter::new(stdin);
+        let stdin = BufWriter::new(stdin);
 
         let (tx, rx) = channel();
         std::thread::spawn(move || reader_loop(stdout, tx));
 
-        Ok(ScriptClient { child, stdin, rx, pending: ThinVec::new() })
+        Ok(ScriptClient {
+            child,
+            stdin,
+            rx,
+            pending: ThinVec::new(),
+        })
     }
 
     /// Ask the daemon to watch `path` under `script_id`.  The first
@@ -87,16 +92,17 @@ impl ScriptClient {
 
     /// Non-blocking poll — returns the next daemon message, if any.
     pub fn poll_event(&mut self) -> Option<DaemonMsg> {
-        if let Some(m) = self.pending.pop() { return Some(m); }
-        match self.rx.try_recv() {
-            Ok(m) => Some(m),
-            Err(_) => None,
+        if let Some(m) = self.pending.pop() {
+            return Some(m);
         }
+        self.rx.try_recv().ok()
     }
 
     /// Blocking wait up to `timeout` for the next message.
     pub fn wait_for_event(&mut self, timeout: std::time::Duration) -> Option<DaemonMsg> {
-        if let Some(m) = self.pending.pop() { return Some(m); }
+        if let Some(m) = self.pending.pop() {
+            return Some(m);
+        }
         self.rx.recv_timeout(timeout).ok()
     }
 
@@ -120,9 +126,15 @@ fn reader_loop(stdout: ChildStdout, tx: std::sync::mpsc::Sender<DaemonMsg>) {
     let mut r = BufReader::new(stdout);
     loop {
         match read_daemon_msg(&mut r) {
-            Ok(m)  => if tx.send(m).is_err() { break; }
+            Ok(m) => {
+                if tx.send(m).is_err() {
+                    break;
+                }
+            }
             Err(e) => {
-                if matches!(e.kind(), std::io::ErrorKind::UnexpectedEof) { break; }
+                if matches!(e.kind(), std::io::ErrorKind::UnexpectedEof) {
+                    break;
+                }
                 eprintln!("ScriptClient reader: {e}");
                 break;
             }

@@ -1,5 +1,4 @@
 use ash::vk;
-use std::ffi::CStr;
 use std::io::Cursor;
 use std::mem::size_of;
 
@@ -76,8 +75,7 @@ impl Forge {
         let shader_info = vk::ShaderModuleCreateInfo::default().code(spirv);
         let shader = unsafe { device.create_shader_module(&shader_info, None)? };
 
-        let entry =
-            CStr::from_bytes_with_nul(b"main\0").expect("static shader entry is nul-terminated");
+        let entry = c"main";
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader)
@@ -120,6 +118,9 @@ impl Forge {
         self.mold.descriptor_layout
     }
 
+    /// # Safety
+    /// `command_buffer` must be in the recording state and `descriptor_set` must
+    /// be compatible with this pipeline's layout. Called from a valid Vulkan context.
     pub unsafe fn record_dispatch(
         &self,
         device: &ash::Device,
@@ -150,6 +151,9 @@ impl Forge {
         }
     }
 
+    /// # Safety
+    /// The Vulkan `device` must be the same device used to create this pipeline,
+    /// and no command buffers referencing it may be in-flight.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         unsafe {
             if self.mold.compute != vk::Pipeline::null() {
@@ -365,11 +369,19 @@ impl GraphicsForge {
                 .format(color_format)
                 .samples(sample_count)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(if is_msaa { vk::AttachmentStoreOp::DONT_CARE } else { vk::AttachmentStoreOp::STORE })
+                .store_op(if is_msaa {
+                    vk::AttachmentStoreOp::DONT_CARE
+                } else {
+                    vk::AttachmentStoreOp::STORE
+                })
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(if is_msaa { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL } else { vk::ImageLayout::PRESENT_SRC_KHR }),
+                .final_layout(if is_msaa {
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+                } else {
+                    vk::ImageLayout::PRESENT_SRC_KHR
+                }),
         );
         attachments.push(
             vk::AttachmentDescription::default()
@@ -438,15 +450,15 @@ impl GraphicsForge {
         let bindings = self.descriptor_bindings();
         let descriptor_set_layout_info =
             vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        let descriptor_set_layout = match unsafe {
-            device.create_descriptor_set_layout(&descriptor_set_layout_info, None)
-        } {
-            Ok(l) => l,
-            Err(e) => {
-                unsafe { device.destroy_render_pass(render_pass, None) };
-                return Err(ForgeError::Vk(e));
-            }
-        };
+        let descriptor_set_layout =
+            match unsafe { device.create_descriptor_set_layout(&descriptor_set_layout_info, None) }
+            {
+                Ok(l) => l,
+                Err(e) => {
+                    unsafe { device.destroy_render_pass(render_pass, None) };
+                    return Err(ForgeError::Vk(e));
+                }
+            };
 
         // Set 1 — material descriptor layout (ForwardLit + SkinnedForwardLit).
         let material_set_layout = if matches!(
@@ -549,32 +561,36 @@ impl GraphicsForge {
         // GaussianSplat reads its pre-projected vertices straight from a
         // compute-output buffer (no MVP needed in the shader).
         let push_ranges: &[vk::PushConstantRange] = match self.kind {
-            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit =>
+            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit => {
                 &[vk::PushConstantRange::default()
                     .stage_flags(vk::ShaderStageFlags::VERTEX)
                     .offset(0)
-                    .size(64)], // sizeof(mat4)
+                    .size(64)]
+            } // sizeof(mat4)
             // DebugLines carries `DebugLinesPushPacked` (160 B) visible to
             // both stages: vertex uses mvp + extent/spacing/flags; frag uses
             // colors[] + flags for axis-emphasis tinting.
-            GraphicsOreKind::DebugLines =>
-                &[vk::PushConstantRange::default()
-                    .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-                    .offset(0)
-                    .size(160)],
+            GraphicsOreKind::DebugLines => &[vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                .offset(0)
+                .size(160)],
             // Tonemap: 8 B (exposure_scale: f32, operator: u32) in fragment.
-            GraphicsOreKind::Tonemap =>
-                &[vk::PushConstantRange::default()
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-                    .offset(0)
-                    .size(8)],
+            GraphicsOreKind::Tonemap => &[vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .offset(0)
+                .size(8)],
             GraphicsOreKind::Ui | GraphicsOreKind::GaussianSplat => &[],
         };
         // Build set_layouts slice. ForwardLit / SkinnedForwardLit both
         // have 4 slots [camera_actor, material, skin/empty, instance];
         // Ui only has 1 (camera_actor).
-        let set_layouts_four = [descriptor_set_layout, material_set_layout, skin_set_layout, instance_set_layout];
-        let set_layouts_one  = [descriptor_set_layout];
+        let set_layouts_four = [
+            descriptor_set_layout,
+            material_set_layout,
+            skin_set_layout,
+            instance_set_layout,
+        ];
+        let set_layouts_one = [descriptor_set_layout];
         let set_layouts_ref: &[vk::DescriptorSetLayout] =
             if instance_set_layout != vk::DescriptorSetLayout::null() {
                 &set_layouts_four
@@ -584,27 +600,26 @@ impl GraphicsForge {
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(set_layouts_ref)
             .push_constant_ranges(push_ranges);
-        let pipeline_layout = match unsafe {
-            device.create_pipeline_layout(&pipeline_layout_info, None)
-        } {
-            Ok(l) => l,
-            Err(e) => {
-                unsafe {
-                    if instance_set_layout != vk::DescriptorSetLayout::null() {
-                        device.destroy_descriptor_set_layout(instance_set_layout, None);
+        let pipeline_layout =
+            match unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) } {
+                Ok(l) => l,
+                Err(e) => {
+                    unsafe {
+                        if instance_set_layout != vk::DescriptorSetLayout::null() {
+                            device.destroy_descriptor_set_layout(instance_set_layout, None);
+                        }
+                        if skin_set_layout != vk::DescriptorSetLayout::null() {
+                            device.destroy_descriptor_set_layout(skin_set_layout, None);
+                        }
+                        if material_set_layout != vk::DescriptorSetLayout::null() {
+                            device.destroy_descriptor_set_layout(material_set_layout, None);
+                        }
+                        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                        device.destroy_render_pass(render_pass, None);
                     }
-                    if skin_set_layout != vk::DescriptorSetLayout::null() {
-                        device.destroy_descriptor_set_layout(skin_set_layout, None);
-                    }
-                    if material_set_layout != vk::DescriptorSetLayout::null() {
-                        device.destroy_descriptor_set_layout(material_set_layout, None);
-                    }
-                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
-                    device.destroy_render_pass(render_pass, None);
+                    return Err(ForgeError::Vk(e));
                 }
-                return Err(ForgeError::Vk(e));
-            }
-        };
+            };
 
         // Shader modules — destroyed before returning regardless of outcome.
         let destroy_layouts = |device: &ash::Device| unsafe {
@@ -645,7 +660,7 @@ impl GraphicsForge {
             }
         };
 
-        let entry = CStr::from_bytes_with_nul(b"main\0").expect("static entry is nul-terminated");
+        let entry = c"main";
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
@@ -682,80 +697,106 @@ impl GraphicsForge {
             .stride(40)
             .input_rate(vk::VertexInputRate::VERTEX)];
         let binding_descs: &[vk::VertexInputBindingDescription] = match self.kind {
-            GraphicsOreKind::ForwardLit        => &bd_forward,
+            GraphicsOreKind::ForwardLit => &bd_forward,
             GraphicsOreKind::SkinnedForwardLit => &bd_skinned,
-            GraphicsOreKind::Ui                => &[],
-            GraphicsOreKind::GaussianSplat     => &bd_splat,
+            GraphicsOreKind::Ui => &[],
+            GraphicsOreKind::GaussianSplat => &bd_splat,
             // DebugLines & Tonemap both generate vertices in-shader from
             // `gl_VertexIndex`. No vertex bindings.
-            GraphicsOreKind::DebugLines        => &[],
-            GraphicsOreKind::Tonemap           => &[],
+            GraphicsOreKind::DebugLines => &[],
+            GraphicsOreKind::Tonemap => &[],
         };
         // ForgeVertex layout: position[0..12], normal[12..24], tangent[24..40], uv[40..48]
         // SkinVertex   layout: joints_packed[0..8 = uvec2 = 4×u16], weights[8..24 = vec4]
         let ad_forward = [
             vk::VertexInputAttributeDescription::default()
-                .location(0).binding(0)
-                .format(vk::Format::R32G32B32_SFLOAT).offset(0),
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
             vk::VertexInputAttributeDescription::default()
-                .location(1).binding(0)
-                .format(vk::Format::R32G32B32_SFLOAT).offset(12),
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(12),
             vk::VertexInputAttributeDescription::default()
-                .location(2).binding(0)
-                .format(vk::Format::R32G32B32A32_SFLOAT).offset(24),
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(24),
             vk::VertexInputAttributeDescription::default()
-                .location(3).binding(0)
-                .format(vk::Format::R32G32_SFLOAT).offset(40),
+                .location(3)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(40),
         ];
         let ad_skinned = [
             vk::VertexInputAttributeDescription::default()
-                .location(0).binding(0)
-                .format(vk::Format::R32G32B32_SFLOAT).offset(0),
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
             vk::VertexInputAttributeDescription::default()
-                .location(1).binding(0)
-                .format(vk::Format::R32G32B32_SFLOAT).offset(12),
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(12),
             vk::VertexInputAttributeDescription::default()
-                .location(2).binding(0)
-                .format(vk::Format::R32G32B32A32_SFLOAT).offset(24),
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(24),
             vk::VertexInputAttributeDescription::default()
-                .location(3).binding(0)
-                .format(vk::Format::R32G32_SFLOAT).offset(40),
+                .location(3)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(40),
             vk::VertexInputAttributeDescription::default()
-                .location(4).binding(1)
-                .format(vk::Format::R32G32_UINT).offset(0),
+                .location(4)
+                .binding(1)
+                .format(vk::Format::R32G32_UINT)
+                .offset(0),
             vk::VertexInputAttributeDescription::default()
-                .location(5).binding(1)
-                .format(vk::Format::R32G32B32A32_SFLOAT).offset(8),
+                .location(5)
+                .binding(1)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(8),
         ];
         let ad_splat = [
             // clip-space position vec4 — offset 0..16
             vk::VertexInputAttributeDescription::default()
-                .location(0).binding(0)
-                .format(vk::Format::R32G32B32A32_SFLOAT).offset(0),
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(0),
             // ellipse-local UV vec2 — offset 16..24
             vk::VertexInputAttributeDescription::default()
-                .location(1).binding(0)
-                .format(vk::Format::R32G32_SFLOAT).offset(16),
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(16),
             // colour RGBA vec4 — offset 24..40
             vk::VertexInputAttributeDescription::default()
-                .location(2).binding(0)
-                .format(vk::Format::R32G32B32A32_SFLOAT).offset(24),
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(24),
         ];
         let attr_descs: &[vk::VertexInputAttributeDescription] = match self.kind {
-            GraphicsOreKind::ForwardLit        => &ad_forward,
+            GraphicsOreKind::ForwardLit => &ad_forward,
             GraphicsOreKind::SkinnedForwardLit => &ad_skinned,
-            GraphicsOreKind::Ui                => &[],
-            GraphicsOreKind::GaussianSplat     => &ad_splat,
-            GraphicsOreKind::DebugLines        => &[],
-            GraphicsOreKind::Tonemap           => &[],
+            GraphicsOreKind::Ui => &[],
+            GraphicsOreKind::GaussianSplat => &ad_splat,
+            GraphicsOreKind::DebugLines => &[],
+            GraphicsOreKind::Tonemap => &[],
         };
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(binding_descs)
             .vertex_attribute_descriptions(attr_descs);
-        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(match self.kind {
+        let input_assembly =
+            vk::PipelineInputAssemblyStateCreateInfo::default().topology(match self.kind {
                 GraphicsOreKind::DebugLines => vk::PrimitiveTopology::LINE_LIST,
-                _                           => vk::PrimitiveTopology::TRIANGLE_LIST,
+                _ => vk::PrimitiveTopology::TRIANGLE_LIST,
             });
         // Dynamic viewport + scissor — pipeline doesn't bake in extent,
         // so swapchain resize doesn't require pipeline rebuild.
@@ -763,15 +804,15 @@ impl GraphicsForge {
             .viewport_count(1)
             .scissor_count(1);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
-            .dynamic_states(&dynamic_states);
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::CLOCKWISE);
-        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(sample_count);
+        let multisampling =
+            vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(sample_count);
         // GaussianSplat needs premultiplied-alpha blending so the per-
         // splat opacity composites correctly back-to-front. Every other
         // pipeline is opaque.
@@ -790,13 +831,13 @@ impl GraphicsForge {
         let color_blend_attachments: &[vk::PipelineColorBlendAttachmentState] = match self.kind {
             // Premultiplied-alpha blend for translucent layers: splats,
             // wire-grid lines (distance fade), UI overlay glyphs / quads.
-            GraphicsOreKind::GaussianSplat
-            | GraphicsOreKind::DebugLines
-            | GraphicsOreKind::Ui          => &premul_blend,
-            _                              => &opaque_blend,
+            GraphicsOreKind::GaussianSplat | GraphicsOreKind::DebugLines | GraphicsOreKind::Ui => {
+                &premul_blend
+            }
+            _ => &opaque_blend,
         };
-        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(color_blend_attachments);
+        let color_blend_state =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(color_blend_attachments);
 
         // Depth-stencil: enabled for ForwardLit / SkinnedForwardLit, disabled for Ui.
         // GaussianSplat: depth test on so opaque scene geometry occludes
@@ -804,13 +845,14 @@ impl GraphicsForge {
         // alpha blending stays correct (write would self-occlude later
         // splats sorted further away).
         let depth_stencil = match self.kind {
-            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit =>
+            GraphicsOreKind::ForwardLit | GraphicsOreKind::SkinnedForwardLit => {
                 vk::PipelineDepthStencilStateCreateInfo::default()
                     .depth_test_enable(true)
                     .depth_write_enable(true)
                     .depth_compare_op(vk::CompareOp::LESS)
                     .depth_bounds_test_enable(false)
-                    .stencil_test_enable(false),
+                    .stencil_test_enable(false)
+            }
             GraphicsOreKind::Ui => vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(false)
                 .depth_write_enable(false)
@@ -892,6 +934,9 @@ impl GraphicsForge {
 }
 
 impl GraphicsMold {
+    /// # Safety
+    /// The Vulkan `device` must be the device used to create this mold and no
+    /// in-flight command buffers may reference it.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         unsafe {
             if self.pipeline != vk::Pipeline::null() {

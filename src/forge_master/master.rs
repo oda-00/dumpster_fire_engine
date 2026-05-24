@@ -13,6 +13,15 @@ use super::ore::{GraphicsOreKind, IngotSpec, Ore, OreKind};
 
 pub type ForgeResult<T> = Result<T, ForgeError>;
 
+/// Prepared batch item: (forge handle, staged buffers, ingot, descriptor set, workgroups).
+type PreparedItem = (
+    ForgeHandle,
+    super::ore::StagedOre,
+    Ingot,
+    vk::DescriptorSet,
+    [u32; 3],
+);
+
 #[derive(Debug)]
 pub enum ForgeError {
     Vk(vk::Result),
@@ -103,11 +112,11 @@ pub struct GraphicsForgeCacheEntry {
 /// Per-async-batch state tracked until the batch's fence has signalled.
 /// At that point the resources can be returned to their pools.
 struct PendingBatch {
-    fence:           vk::Fence,
-    semaphore:       vk::Semaphore,
-    command_buffer:  vk::CommandBuffer,
+    fence: vk::Fence,
+    semaphore: vk::Semaphore,
+    command_buffer: vk::CommandBuffer,
     descriptor_sets: Vec<vk::DescriptorSet>,
-    staged_inputs:   Vec<super::ore::StagedOre>,
+    staged_inputs: Vec<super::ore::StagedOre>,
 }
 
 pub struct ForgeMaster {
@@ -258,10 +267,7 @@ impl ForgeMaster {
             .and_then(|h| self.graphics_forges.get(h))
     }
 
-    pub fn graphics_handle_for_kind(
-        &self,
-        kind: GraphicsOreKind,
-    ) -> Option<GraphicsForgeHandle> {
+    pub fn graphics_handle_for_kind(&self, kind: GraphicsOreKind) -> Option<GraphicsForgeHandle> {
         self.graphics_cache[kind.index()].map(|e| e.handle)
     }
 
@@ -358,33 +364,33 @@ impl ForgeMaster {
 
         // Per-batch resources.
         let fence = unsafe {
-            self.device.create_fence(&vk::FenceCreateInfo::default(), None)
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
                 .map_err(ForgeError::Vk)?
         };
         let semaphore = unsafe {
-            self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            self.device
+                .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                 .map_err(ForgeError::Vk)?
         };
         let command_buffer = self.allocate_command_buffer()?;
 
-        let mut ingots:          Vec<Ingot>             = Vec::with_capacity(ores.len());
+        let mut ingots: Vec<Ingot> = Vec::with_capacity(ores.len());
         let mut descriptor_sets: Vec<vk::DescriptorSet> = Vec::with_capacity(ores.len());
-        let mut staged_inputs:   Vec<super::ore::StagedOre> = Vec::with_capacity(ores.len());
+        let mut staged_inputs: Vec<super::ore::StagedOre> = Vec::with_capacity(ores.len());
 
         // Stage every ore's input and pre-allocate every ore's output.
         // Any failure here cleanly tears down only the resources we've
         // already allocated.
-        let prepared: Result<
-            Vec<(ForgeHandle, super::ore::StagedOre, Ingot, vk::DescriptorSet, [u32; 3])>,
-            ForgeError,
-        > = ores
+        let prepared: Result<Vec<PreparedItem>, ForgeError> = ores
             .into_iter()
             .map(|ore| {
                 let forge_handle = self
                     .handle_for_kind(ore.kind)
                     .ok_or(ForgeError::MissingForge(ore.kind))?;
                 let staged = ore.stage(&self.device, &self.memory_properties)?;
-                let ingot = Ingot::create(ore.kind, &ore.output, &self.device, &self.memory_properties)?;
+                let ingot =
+                    Ingot::create(ore.kind, &ore.output, &self.device, &self.memory_properties)?;
                 let descriptor_set =
                     self.allocate_descriptor_set(self.forges[forge_handle].descriptor_layout())?;
                 write_forge_descriptors(&self.device, descriptor_set, &staged, &ingot);
@@ -397,7 +403,8 @@ impl ForgeMaster {
                 unsafe {
                     self.device.destroy_fence(fence, None);
                     self.device.destroy_semaphore(semaphore, None);
-                    self.device.free_command_buffers(self.command_pool, &[command_buffer]);
+                    self.device
+                        .free_command_buffers(self.command_pool, &[command_buffer]);
                 }
                 return Err(e);
             }
@@ -410,7 +417,8 @@ impl ForgeMaster {
         unsafe {
             let begin = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(command_buffer, &begin)
+            self.device
+                .begin_command_buffer(command_buffer, &begin)
                 .map_err(ForgeError::Vk)?;
 
             for (forge_handle, staged, ingot, descriptor_set, workgroups) in &prepared {
@@ -424,14 +432,14 @@ impl ForgeMaster {
                 );
             }
 
-            self.device.end_command_buffer(command_buffer)
+            self.device
+                .end_command_buffer(command_buffer)
                 .map_err(ForgeError::Vk)?;
 
             // Submit via Sync2: signal the semaphore at COMPUTE_SHADER
             // stage so any downstream graphics wait at
             // VERTEX_ATTRIBUTE_INPUT|VERTEX_SHADER gets correct ordering.
-            let cb_infos = [vk::CommandBufferSubmitInfo::default()
-                .command_buffer(command_buffer)];
+            let cb_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)];
             let sig_infos = [vk::SemaphoreSubmitInfo::default()
                 .semaphore(semaphore)
                 .stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
@@ -473,7 +481,9 @@ impl ForgeMaster {
             match signalled {
                 Ok(true) => {
                     let batch = self.pending.pop_front().unwrap();
-                    unsafe { self.destroy_pending_batch(batch); }
+                    unsafe {
+                        self.destroy_pending_batch(batch);
+                    }
                 }
                 Ok(false) => break,
                 Err(e) => return Err(ForgeError::Vk(e)),
@@ -487,20 +497,31 @@ impl ForgeMaster {
     /// fence-mode `refine()` so the legacy path doesn't observe stale
     /// async state.
     pub fn await_pending(&mut self) -> ForgeResult<()> {
-        if self.pending.is_empty() { return Ok(()); }
+        if self.pending.is_empty() {
+            return Ok(());
+        }
         let fences: Vec<vk::Fence> = self.pending.iter().map(|p| p.fence).collect();
-        unsafe { self.device.wait_for_fences(&fences, true, u64::MAX).map_err(ForgeError::Vk)? };
+        unsafe {
+            self.device
+                .wait_for_fences(&fences, true, u64::MAX)
+                .map_err(ForgeError::Vk)?
+        };
         while let Some(batch) = self.pending.pop_front() {
-            unsafe { self.destroy_pending_batch(batch); }
+            unsafe {
+                self.destroy_pending_batch(batch);
+            }
         }
         Ok(())
     }
 
     unsafe fn destroy_pending_batch(&self, mut batch: PendingBatch) {
         unsafe {
-            self.device.free_command_buffers(self.command_pool, &[batch.command_buffer]);
+            self.device
+                .free_command_buffers(self.command_pool, &[batch.command_buffer]);
             if !batch.descriptor_sets.is_empty() {
-                let _ = self.device.free_descriptor_sets(self.descriptor_pool, &batch.descriptor_sets);
+                let _ = self
+                    .device
+                    .free_descriptor_sets(self.descriptor_pool, &batch.descriptor_sets);
             }
             for staged in batch.staged_inputs.iter_mut() {
                 staged.destroy(&self.device);
@@ -546,13 +567,18 @@ impl ForgeMaster {
         Ok(buffers[0])
     }
 
+    /// # Safety
+    /// All submitted GPU work must have completed or been drained before calling
+    /// this. After returning, all Vulkan resources owned by this master are freed.
     pub unsafe fn destroy(&mut self) {
         // Drain any in-flight async batches BEFORE tearing down the
         // device-owned resources they reference. await_pending blocks
         // on every batch's fence and frees the per-batch state.
         let _ = self.await_pending();
         for forge in self.forges.values_mut() {
-            unsafe { forge.destroy(&self.device); }
+            unsafe {
+                forge.destroy(&self.device);
+            }
         }
         self.cache = [None; OreKind::COMPUTE_COUNT];
         unsafe {

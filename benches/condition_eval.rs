@@ -2,13 +2,15 @@
 //
 //   cargo bench --bench condition_eval
 
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
+use dumpster_fire_engine::resource_manager::*;
 use glam::{Affine3A, Vec3};
 use std::sync::Arc;
 use thin_vec::{ThinVec, thin_vec};
-use dumpster_fire_engine::resource_manager::*;
 
-fn main() { divan::main(); }
+fn main() {
+    divan::main();
+}
 
 // ── Shared fixture: a populated EvalCtx the conditions can read against ────
 
@@ -33,24 +35,41 @@ fn build_fixture(troupe_size: usize, n_events: usize) -> Fixture {
     let mut active: ThinVec<ActiveActor> = ThinVec::with_capacity(troupe_size);
     for i in 0..troupe_size {
         let aid = ActorId::new(i as i64 + 1);
-        let ah = world.spawn_actor(
-            lh, sh, aid,
-            Affine3A::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
-        ).unwrap();
+        let ah = world
+            .spawn_actor(
+                lh,
+                sh,
+                aid,
+                Affine3A::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
+            )
+            .unwrap();
         // Give every actor a Character sub-entity with one Component for
         // ActorHasComponent to find.
         world.spawn_sub_entity(
-            lh, sh, ah,
+            lh,
+            sh,
+            ah,
             ActorType::Character(Character {
                 id: CharacterId::new(i as i64 + 1),
                 name: "n".into(),
-                visible: true, physical: true, playable: false, mesh: None,
+                visible: true,
+                physical: true,
+                playable: false,
+                mesh: None,
             }),
             Affine3A::IDENTITY,
         );
-        world.add_component(lh, sh, ah, 0, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
+        world.add_component(
+            lh,
+            sh,
+            ah,
+            0,
+            PhysicsComponent {
+                mass: 1.0,
+                velocity: (0.0, 0.0, 0.0),
+                acceleration: (0.0, 0.0, 0.0),
+            },
+        );
         active.push(ActiveActor::new(lh, sh, ah, aid));
         actor_ids.push(aid);
     }
@@ -63,20 +82,29 @@ fn build_fixture(troupe_size: usize, n_events: usize) -> Fixture {
         .map(|i| Event::Custom(EventId::new(i as i64), Arc::new(Payload::None)))
         .collect();
 
-    Fixture { world, lh, sh, troupe_a, troupes, actors, events, actor_ids }
+    Fixture {
+        world,
+        lh,
+        sh,
+        troupe_a,
+        troupes,
+        actors,
+        events,
+        actor_ids,
+    }
 }
 
 fn ctx<'a>(f: &'a Fixture) -> EvalCtx<'a> {
     EvalCtx {
-        world:       &f.world,
-        level_h:     f.lh,
-        stage_h:     f.sh,
-        scene_id:    SceneId::new(1),
-        elapsed:     1.5,
-        tick_count:  10,
+        world: &f.world,
+        level_h: f.lh,
+        stage_h: f.sh,
+        scene_id: SceneId::new(1),
+        elapsed: 1.5,
+        tick_count: 10,
         events_seen: &f.events,
-        actors:      &f.actors,
-        troupes:     &f.troupes,
+        actors: &f.actors,
+        troupes: &f.troupes,
     }
 }
 
@@ -166,7 +194,10 @@ fn troupe_all(b: Bencher, n: usize) {
         actor: f.actor_ids[0], // ignored — TroupeAll re-targets per member
         component_type: ComponentType::Physics,
     });
-    let c = Condition::TroupeAll { troupe: f.troupe_a, predicate: inner };
+    let c = Condition::TroupeAll {
+        troupe: f.troupe_a,
+        predicate: inner,
+    };
     b.bench_local(|| black_box(c.eval(&ctx(&f))));
 }
 
@@ -177,7 +208,10 @@ fn troupe_any(b: Bencher, n: usize) {
         actor: f.actor_ids[0],
         component_type: ComponentType::Physics,
     });
-    let c = Condition::TroupeAny { troupe: f.troupe_a, predicate: inner };
+    let c = Condition::TroupeAny {
+        troupe: f.troupe_a,
+        predicate: inner,
+    };
     b.bench_local(|| black_box(c.eval(&ctx(&f))));
 }
 
@@ -207,7 +241,9 @@ fn all_n_short_circuit(b: Bencher, n: usize) {
     // First condition false → short-circuit immediately.
     let mut v: ThinVec<Condition> = ThinVec::new();
     v.push(Condition::Never);
-    for _ in 1..n { v.push(Condition::Always); }
+    for _ in 1..n {
+        v.push(Condition::Always);
+    }
     let c = Condition::All(v);
     b.bench_local(|| black_box(c.eval(&ctx(&f))));
 }
@@ -216,7 +252,9 @@ fn all_n_short_circuit(b: Bencher, n: usize) {
 fn all_n_full_walk(b: Bencher, n: usize) {
     let f = build_fixture(8, 4);
     let mut v: ThinVec<Condition> = ThinVec::new();
-    for _ in 0..n { v.push(Condition::Always); }
+    for _ in 0..n {
+        v.push(Condition::Always);
+    }
     let c = Condition::All(v);
     b.bench_local(|| black_box(c.eval(&ctx(&f))));
 }
@@ -225,7 +263,9 @@ fn all_n_full_walk(b: Bencher, n: usize) {
 fn any_n_full_walk(b: Bencher, n: usize) {
     let f = build_fixture(8, 4);
     let mut v: ThinVec<Condition> = ThinVec::new();
-    for _ in 0..n { v.push(Condition::Never); }
+    for _ in 0..n {
+        v.push(Condition::Never);
+    }
     let c = Condition::Any(v);
     b.bench_local(|| black_box(c.eval(&ctx(&f))));
 }
@@ -239,7 +279,9 @@ fn not_inv(b: Bencher) {
 
 #[divan::bench]
 fn custom_fnptr(b: Bencher) {
-    fn always_true(_: &EvalCtx<'_>) -> bool { true }
+    fn always_true(_: &EvalCtx<'_>) -> bool {
+        true
+    }
     let f = build_fixture(8, 4);
     let c = Condition::Custom(always_true);
     b.bench_local(|| black_box(c.eval(&ctx(&f))));

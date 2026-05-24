@@ -3,11 +3,13 @@
 //
 //   cargo bench --bench arena_micro
 
-use divan::{black_box, Bencher};
-use thin_vec::ThinVec;
+use divan::{Bencher, black_box};
 use dumpster_fire_engine::resource_manager::*;
+use thin_vec::ThinVec;
 
-fn main() { divan::main(); }
+fn main() {
+    divan::main();
+}
 
 const N: usize = 10_000;
 
@@ -20,7 +22,9 @@ fn build_full() -> (Arena<ActorTag, u64>, ThinVec<Handle<ActorTag>>) {
 fn build_with_freelist() -> (Arena<ActorTag, u64>, ThinVec<Handle<ActorTag>>) {
     let (mut a, handles) = build_full();
     for (i, h) in handles.iter().enumerate() {
-        if i % 2 == 0 { a.remove(*h); }
+        if i % 2 == 0 {
+            a.remove(*h);
+        }
     }
     (a, handles)
 }
@@ -29,23 +33,30 @@ fn build_with_freelist() -> (Arena<ActorTag, u64>, ThinVec<Handle<ActorTag>>) {
 fn insert_fresh(b: Bencher) {
     b.bench_local(|| {
         let mut a: Arena<ActorTag, u64> = Arena::with_capacity(N);
-        for i in 0..N { black_box(a.insert(i as u64)); }
+        for i in 0..N {
+            black_box(a.insert(i as u64));
+        }
         a
     });
 }
 
 #[divan::bench]
 fn insert_freelist(b: Bencher) {
-    b.with_inputs(build_with_freelist).bench_local_values(|(mut a, _)| {
-        for i in 0..(N / 2) { black_box(a.insert(i as u64)); }
-        a
-    });
+    b.with_inputs(build_with_freelist)
+        .bench_local_values(|(mut a, _)| {
+            for i in 0..(N / 2) {
+                black_box(a.insert(i as u64));
+            }
+            a
+        });
 }
 
 #[divan::bench]
 fn remove_live(b: Bencher) {
     b.with_inputs(build_full).bench_local_values(|(mut a, h)| {
-        for handle in h { black_box(a.remove(handle)); }
+        for handle in h {
+            black_box(a.remove(handle));
+        }
         a
     });
 }
@@ -54,10 +65,15 @@ fn remove_live(b: Bencher) {
 fn remove_stale(b: Bencher) {
     b.with_inputs(|| {
         let (mut a, h) = build_full();
-        for &handle in &h { a.remove(handle); }
+        for &handle in &h {
+            a.remove(handle);
+        }
         (a, h)
-    }).bench_local_values(|(mut a, h)| {
-        for handle in h { black_box(a.remove(handle)); }
+    })
+    .bench_local_values(|(mut a, h)| {
+        for handle in h {
+            black_box(a.remove(handle));
+        }
         a
     });
 }
@@ -67,7 +83,9 @@ fn get_hit(b: Bencher) {
     let (a, handles) = build_full();
     b.bench_local(|| {
         let mut sum = 0u64;
-        for h in &handles { sum = sum.wrapping_add(*a.get(*h).unwrap()); }
+        for h in &handles {
+            sum = sum.wrapping_add(*a.get(*h).unwrap());
+        }
         sum
     });
 }
@@ -75,11 +93,15 @@ fn get_hit(b: Bencher) {
 #[divan::bench]
 fn get_miss(b: Bencher) {
     let (mut a, handles) = build_full();
-    for &h in &handles { a.remove(h); }
+    for &h in &handles {
+        a.remove(h);
+    }
     b.bench_local(|| {
         let mut hits = 0u64;
         for h in &handles {
-            if a.get(*h).is_some() { hits += 1; }
+            if a.get(*h).is_some() {
+                hits += 1;
+            }
         }
         hits
     });
@@ -90,7 +112,9 @@ fn values_iter_full(b: Bencher) {
     let (a, _) = build_full();
     b.bench_local(|| {
         let mut sum = 0u64;
-        for &v in a.values() { sum = sum.wrapping_add(v); }
+        for &v in a.values() {
+            sum = sum.wrapping_add(v);
+        }
         sum
     });
 }
@@ -100,7 +124,9 @@ fn values_iter_sparse_50pct(b: Bencher) {
     let (a, _) = build_with_freelist();
     b.bench_local(|| {
         let mut sum = 0u64;
-        for &v in a.values() { sum = sum.wrapping_add(v); }
+        for &v in a.values() {
+            sum = sum.wrapping_add(v);
+        }
         sum
     });
 }

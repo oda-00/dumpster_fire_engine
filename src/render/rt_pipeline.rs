@@ -16,34 +16,36 @@
 use ash::vk;
 use thin_vec::ThinVec;
 
-use crate::forge_master::ore::ForgeBuffer;
 use crate::forge_master::master::{ForgeError, ForgeResult};
+use crate::forge_master::ore::ForgeBuffer;
 use crate::render::vulkan::VulkanContext;
 
 pub struct RtPipeline {
-    pub pipeline:        vk::Pipeline,
+    pub pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
-    pub set_layout:      vk::DescriptorSetLayout,
+    pub set_layout: vk::DescriptorSetLayout,
 
     /// SBT backing buffer — single buffer holding raygen, miss, and hit
     /// regions back-to-back with `base_alignment`-aligned region starts.
-    pub sbt_buffer:      ForgeBuffer,
-    pub raygen_region:   vk::StridedDeviceAddressRegionKHR,
-    pub miss_region:     vk::StridedDeviceAddressRegionKHR,
-    pub hit_region:      vk::StridedDeviceAddressRegionKHR,
+    pub sbt_buffer: ForgeBuffer,
+    pub raygen_region: vk::StridedDeviceAddressRegionKHR,
+    pub miss_region: vk::StridedDeviceAddressRegionKHR,
+    pub hit_region: vk::StridedDeviceAddressRegionKHR,
     pub callable_region: vk::StridedDeviceAddressRegionKHR,
 
     /// Storage for the most recently rebuilt TLAS instance buffer.
-    pub instance_buf:    Option<ForgeBuffer>,
-    pub tlas:            vk::AccelerationStructureKHR,
-    pub tlas_buf:        Option<ForgeBuffer>,
-    pub tlas_scratch:    Option<ForgeBuffer>,
+    pub instance_buf: Option<ForgeBuffer>,
+    pub tlas: vk::AccelerationStructureKHR,
+    pub tlas_buf: Option<ForgeBuffer>,
+    pub tlas_scratch: Option<ForgeBuffer>,
 }
 
 impl RtPipeline {
     pub fn new(vulkan: &VulkanContext) -> ForgeResult<Self> {
         let device = &vulkan.device;
-        let rt_loader = vulkan.rt_pipeline.as_ref()
+        let rt_loader = vulkan
+            .rt_pipeline
+            .as_ref()
             .ok_or(ForgeError::NoPhysicalDevice)?;
 
         // ── Descriptor set layout (bindings per Plan §9) ───────────────────
@@ -53,7 +55,9 @@ impl RtPipeline {
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR),
+                .stage_flags(
+                    vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
+                ),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
@@ -63,13 +67,19 @@ impl RtPipeline {
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::MISS_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR),
+                .stage_flags(
+                    vk::ShaderStageFlags::RAYGEN_KHR
+                        | vk::ShaderStageFlags::MISS_KHR
+                        | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
+                ),
         ];
         let set_layout = unsafe {
-            device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                None,
-            ).map_err(ForgeError::Vk)?
+            device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                    None,
+                )
+                .map_err(ForgeError::Vk)?
         };
 
         // RayCameraPush — 128 bytes per plan §2.
@@ -80,12 +90,14 @@ impl RtPipeline {
         let set_layouts = [set_layout];
         let push_ranges = [push_range];
         let pipeline_layout = unsafe {
-            device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&set_layouts)
-                    .push_constant_ranges(&push_ranges),
-                None,
-            ).map_err(ForgeError::Vk)?
+            device
+                .create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default()
+                        .set_layouts(&set_layouts)
+                        .push_constant_ranges(&push_ranges),
+                    None,
+                )
+                .map_err(ForgeError::Vk)?
         };
 
         // ── Shader modules ────────────────────────────────────────────────
@@ -94,25 +106,29 @@ impl RtPipeline {
         let smiss_spv = include_bytes!("../../assets/shaders/shadow_miss.rmiss.spv");
         let chit_spv = include_bytes!("../../assets/shaders/primary_chit.rchit.spv");
 
-        let rgen_mod  = create_shader_module(device, rgen_spv)?;
+        let rgen_mod = create_shader_module(device, rgen_spv)?;
         let pmiss_mod = create_shader_module(device, pmiss_spv)?;
         let smiss_mod = create_shader_module(device, smiss_spv)?;
-        let chit_mod  = create_shader_module(device, chit_spv)?;
+        let chit_mod = create_shader_module(device, chit_spv)?;
         let entry_name = std::ffi::CString::new("main").unwrap();
 
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::RAYGEN_KHR)
-                .module(rgen_mod).name(&entry_name),
+                .module(rgen_mod)
+                .name(&entry_name),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::MISS_KHR)
-                .module(pmiss_mod).name(&entry_name),
+                .module(pmiss_mod)
+                .name(&entry_name),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::MISS_KHR)
-                .module(smiss_mod).name(&entry_name),
+                .module(smiss_mod)
+                .name(&entry_name),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::CLOSEST_HIT_KHR)
-                .module(chit_mod).name(&entry_name),
+                .module(chit_mod)
+                .name(&entry_name),
         ];
 
         // 4 groups: raygen / miss / miss / hit
@@ -150,12 +166,14 @@ impl RtPipeline {
             .layout(pipeline_layout);
 
         let pipelines = unsafe {
-            rt_loader.create_ray_tracing_pipelines(
-                vk::DeferredOperationKHR::null(),
-                vk::PipelineCache::null(),
-                &[create_info],
-                None,
-            ).map_err(|(_, e)| ForgeError::Vk(e))?
+            rt_loader
+                .create_ray_tracing_pipelines(
+                    vk::DeferredOperationKHR::null(),
+                    vk::PipelineCache::null(),
+                    &[create_info],
+                    None,
+                )
+                .map_err(|(_, e)| ForgeError::Vk(e))?
         };
         let pipeline = pipelines[0];
         unsafe {
@@ -166,20 +184,21 @@ impl RtPipeline {
         }
 
         // ── Shader Binding Table ──────────────────────────────────────────
-        let handle_size      = vulkan.rt_props.shader_group_handle_size as u64;
-        let base_alignment   = vulkan.rt_props.shader_group_base_alignment as u64;
+        let handle_size = vulkan.rt_props.shader_group_handle_size as u64;
+        let base_alignment = vulkan.rt_props.shader_group_base_alignment as u64;
         let handle_alignment = vulkan.rt_props.shader_group_handle_alignment as u64;
 
         // 4 groups → 4 handles. Region strides: raygen has 1 entry, miss has 2,
         // hit has 1; all regions base-aligned.
         let aligned_handle_size = align_up(handle_size, handle_alignment);
-        let raygen_size  = align_up(aligned_handle_size, base_alignment);
-        let miss_size    = align_up(aligned_handle_size * 2, base_alignment);
-        let hit_size     = align_up(aligned_handle_size, base_alignment);
-        let sbt_size     = raygen_size + miss_size + hit_size;
+        let raygen_size = align_up(aligned_handle_size, base_alignment);
+        let miss_size = align_up(aligned_handle_size * 2, base_alignment);
+        let hit_size = align_up(aligned_handle_size, base_alignment);
+        let sbt_size = raygen_size + miss_size + hit_size;
 
         let handle_data = unsafe {
-            rt_loader.get_ray_tracing_shader_group_handles(pipeline, 0, 4, (handle_size * 4) as usize)
+            rt_loader
+                .get_ray_tracing_shader_group_handles(pipeline, 0, 4, (handle_size * 4) as usize)
                 .map_err(ForgeError::Vk)?
         };
 
@@ -189,16 +208,18 @@ impl RtPipeline {
         sbt_staging[0..hsz].copy_from_slice(&handle_data[0..hsz]);
         // miss[0] (primary)
         let miss_offset = raygen_size as usize;
-        sbt_staging[miss_offset..miss_offset+hsz].copy_from_slice(&handle_data[hsz..2*hsz]);
+        sbt_staging[miss_offset..miss_offset + hsz].copy_from_slice(&handle_data[hsz..2 * hsz]);
         // miss[1] (shadow) at miss_offset + aligned_handle_size
         let miss1_off = miss_offset + aligned_handle_size as usize;
-        sbt_staging[miss1_off..miss1_off+hsz].copy_from_slice(&handle_data[2*hsz..3*hsz]);
+        sbt_staging[miss1_off..miss1_off + hsz].copy_from_slice(&handle_data[2 * hsz..3 * hsz]);
         // hit
         let hit_offset = (raygen_size + miss_size) as usize;
-        sbt_staging[hit_offset..hit_offset+hsz].copy_from_slice(&handle_data[3*hsz..4*hsz]);
+        sbt_staging[hit_offset..hit_offset + hsz].copy_from_slice(&handle_data[3 * hsz..4 * hsz]);
 
         let mut sbt_buffer = ForgeBuffer::create(
-            device, &vulkan.memory_properties, sbt_size,
+            device,
+            &vulkan.memory_properties,
+            sbt_size,
             vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -225,11 +246,18 @@ impl RtPipeline {
         let callable_region = vk::StridedDeviceAddressRegionKHR::default();
 
         Ok(Self {
-            pipeline, pipeline_layout, set_layout,
-            sbt_buffer, raygen_region, miss_region, hit_region, callable_region,
+            pipeline,
+            pipeline_layout,
+            set_layout,
+            sbt_buffer,
+            raygen_region,
+            miss_region,
+            hit_region,
+            callable_region,
             instance_buf: None,
             tlas: vk::AccelerationStructureKHR::null(),
-            tlas_buf: None, tlas_scratch: None,
+            tlas_buf: None,
+            tlas_scratch: None,
         })
     }
 
@@ -237,42 +265,53 @@ impl RtPipeline {
     /// editor budget is ≪ 1 ms for < 200 instances.
     pub fn rebuild_tlas(
         &mut self,
-        vulkan:    &VulkanContext,
+        vulkan: &VulkanContext,
         instances: &[vk::AccelerationStructureInstanceKHR],
     ) -> ForgeResult<()> {
         let device = &vulkan.device;
-        let accel  = vulkan.rt_accel.as_ref()
+        let accel = vulkan
+            .rt_accel
+            .as_ref()
             .ok_or(ForgeError::NoPhysicalDevice)?;
 
         // Free previous instance / TLAS buffers.
         if let Some(mut b) = self.instance_buf.take() {
-            unsafe { b.destroy(device); }
+            unsafe {
+                b.destroy(device);
+            }
         }
         if self.tlas != vk::AccelerationStructureKHR::null() {
-            unsafe { accel.destroy_acceleration_structure(self.tlas, None); }
+            unsafe {
+                accel.destroy_acceleration_structure(self.tlas, None);
+            }
             self.tlas = vk::AccelerationStructureKHR::null();
         }
         if let Some(mut b) = self.tlas_buf.take() {
-            unsafe { b.destroy(device); }
+            unsafe {
+                b.destroy(device);
+            }
         }
         if let Some(mut b) = self.tlas_scratch.take() {
-            unsafe { b.destroy(device); }
+            unsafe {
+                b.destroy(device);
+            }
         }
 
         if instances.is_empty() {
             return Ok(());
         }
 
-        let inst_bytes_len = instances.len() * std::mem::size_of::<vk::AccelerationStructureInstanceKHR>();
+        let inst_bytes_len = std::mem::size_of_val(instances);
         let mut inst_buf = ForgeBuffer::create(
-            device, &vulkan.memory_properties, inst_bytes_len as u64,
+            device,
+            &vulkan.memory_properties,
+            inst_bytes_len as u64,
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
-        let bytes = unsafe {
-            std::slice::from_raw_parts(instances.as_ptr() as *const u8, inst_bytes_len)
-        };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(instances.as_ptr() as *const u8, inst_bytes_len) };
         inst_buf.write_bytes(device, bytes)?;
         let inst_addr = unsafe {
             device.get_buffer_device_address(
@@ -285,13 +324,17 @@ impl RtPipeline {
             .geometry(vk::AccelerationStructureGeometryDataKHR {
                 instances: vk::AccelerationStructureGeometryInstancesDataKHR::default()
                     .array_of_pointers(false)
-                    .data(vk::DeviceOrHostAddressConstKHR { device_address: inst_addr }),
+                    .data(vk::DeviceOrHostAddressConstKHR {
+                        device_address: inst_addr,
+                    }),
             });
         let geometries = [geometry];
         let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
             .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE
-                | vk::BuildAccelerationStructureFlagsKHR::ALLOW_UPDATE)
+            .flags(
+                vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE
+                    | vk::BuildAccelerationStructureFlagsKHR::ALLOW_UPDATE,
+            )
             .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
             .geometries(&geometries);
         let prim_counts = [instances.len() as u32];
@@ -299,18 +342,24 @@ impl RtPipeline {
         unsafe {
             accel.get_acceleration_structure_build_sizes(
                 vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                &build_info, &prim_counts, &mut sizes,
+                &build_info,
+                &prim_counts,
+                &mut sizes,
             );
         }
 
         let tlas_buf = ForgeBuffer::create(
-            device, &vulkan.memory_properties, sizes.acceleration_structure_size,
+            device,
+            &vulkan.memory_properties,
+            sizes.acceleration_structure_size,
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
         let scratch_buf = ForgeBuffer::create(
-            device, &vulkan.memory_properties, sizes.build_scratch_size,
+            device,
+            &vulkan.memory_properties,
+            sizes.build_scratch_size,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
@@ -325,21 +374,34 @@ impl RtPipeline {
             .size(sizes.acceleration_structure_size)
             .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
         let tlas = unsafe {
-            accel.create_acceleration_structure(&create_info, None).map_err(ForgeError::Vk)?
+            accel
+                .create_acceleration_structure(&create_info, None)
+                .map_err(ForgeError::Vk)?
         };
 
-        build_info = build_info
-            .dst_acceleration_structure(tlas)
-            .scratch_data(vk::DeviceOrHostAddressKHR { device_address: scratch_addr });
+        build_info =
+            build_info
+                .dst_acceleration_structure(tlas)
+                .scratch_data(vk::DeviceOrHostAddressKHR {
+                    device_address: scratch_addr,
+                });
 
         let alloc = vk::CommandBufferAllocateInfo::default()
             .command_pool(vulkan.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
-        let cb = unsafe { device.allocate_command_buffers(&alloc).map_err(ForgeError::Vk)?[0] };
+        let cb = unsafe {
+            device
+                .allocate_command_buffers(&alloc)
+                .map_err(ForgeError::Vk)?[0]
+        };
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe { device.begin_command_buffer(cb, &begin).map_err(ForgeError::Vk)?; }
+        unsafe {
+            device
+                .begin_command_buffer(cb, &begin)
+                .map_err(ForgeError::Vk)?;
+        }
 
         let range = vk::AccelerationStructureBuildRangeInfoKHR::default()
             .primitive_count(instances.len() as u32);
@@ -347,29 +409,40 @@ impl RtPipeline {
         let ranges_outer: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&ranges];
         unsafe {
             accel.cmd_build_acceleration_structures(
-                cb, std::slice::from_ref(&build_info), &ranges_outer,
+                cb,
+                std::slice::from_ref(&build_info),
+                &ranges_outer,
             );
             device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
         }
         let cbs = [cb];
         let submit = vk::SubmitInfo::default().command_buffers(&cbs);
         let fence = unsafe {
-            device.create_fence(&vk::FenceCreateInfo::default(), None).map_err(ForgeError::Vk)?
+            device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(ForgeError::Vk)?
         };
         unsafe {
-            device.queue_submit(vulkan.queue, &[submit], fence).map_err(ForgeError::Vk)?;
-            device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+            device
+                .queue_submit(vulkan.queue, &[submit], fence)
+                .map_err(ForgeError::Vk)?;
+            device
+                .wait_for_fences(&[fence], true, u64::MAX)
+                .map_err(ForgeError::Vk)?;
             device.destroy_fence(fence, None);
             device.free_command_buffers(vulkan.command_pool, &cbs);
         }
 
-        self.tlas         = tlas;
-        self.tlas_buf     = Some(tlas_buf);
+        self.tlas = tlas;
+        self.tlas_buf = Some(tlas_buf);
         self.tlas_scratch = Some(scratch_buf);
         self.instance_buf = Some(inst_buf);
         Ok(())
     }
 
+    /// # Safety
+    /// All GPU work using this RT pipeline must have completed and `vulkan`
+    /// must be the context used to create it.
     pub unsafe fn destroy(&mut self, vulkan: &VulkanContext) {
         let device = &vulkan.device;
         unsafe {
@@ -383,13 +456,19 @@ impl RtPipeline {
                 device.destroy_descriptor_set_layout(self.set_layout, None);
             }
             self.sbt_buffer.destroy(device);
-            if let Some(mut b) = self.instance_buf.take() { b.destroy(device); }
-            if let Some(mut b) = self.tlas_buf.take()    { b.destroy(device); }
-            if let Some(mut b) = self.tlas_scratch.take() { b.destroy(device); }
-            if let (Some(accel), as_h) = (vulkan.rt_accel.as_ref(), self.tlas) {
-                if as_h != vk::AccelerationStructureKHR::null() {
-                    accel.destroy_acceleration_structure(as_h, None);
-                }
+            if let Some(mut b) = self.instance_buf.take() {
+                b.destroy(device);
+            }
+            if let Some(mut b) = self.tlas_buf.take() {
+                b.destroy(device);
+            }
+            if let Some(mut b) = self.tlas_scratch.take() {
+                b.destroy(device);
+            }
+            if let (Some(accel), as_h) = (vulkan.rt_accel.as_ref(), self.tlas)
+                && as_h != vk::AccelerationStructureKHR::null()
+            {
+                accel.destroy_acceleration_structure(as_h, None);
             }
         }
     }
@@ -400,10 +479,15 @@ fn align_up(x: u64, a: u64) -> u64 {
 }
 
 fn create_shader_module(device: &ash::Device, bytes: &[u8]) -> ForgeResult<vk::ShaderModule> {
-    let words: ThinVec<u32> = bytes.chunks_exact(4)
+    let words: ThinVec<u32> = bytes
+        .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let words_slice: &[u32] = &words;
     let info = vk::ShaderModuleCreateInfo::default().code(words_slice);
-    unsafe { device.create_shader_module(&info, None).map_err(ForgeError::Vk) }
+    unsafe {
+        device
+            .create_shader_module(&info, None)
+            .map_err(ForgeError::Vk)
+    }
 }

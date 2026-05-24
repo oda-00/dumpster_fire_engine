@@ -11,9 +11,9 @@ pub mod render_world;
 pub mod rt_pipeline;
 pub mod sky_hw;
 pub mod vulkan;
-pub mod window;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgpu_surface;
+pub mod window;
 
 pub use app::*;
 pub use blas::*;

@@ -1,4 +1,3 @@
-
 use super::asset::{Asset, AssetArena, AssetHandle, AssetId, AssetKind, AssetType};
 pub struct Fetcher {
     asset_arena: AssetArena,
@@ -7,11 +6,14 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub fn new(asset_arena: AssetArena) -> Self {
-        Self { asset_arena, fetcher_cache: Default::default() }
+        Self {
+            asset_arena,
+            fetcher_cache: Default::default(),
+        }
     }
     pub fn get(&self, handle: AssetHandle) -> Option<&Asset> {
-    self.asset_arena.get(handle)
-}
+        self.asset_arena.get(handle)
+    }
 
     /// Register an asset in the arena and update the type cache.
     /// Returns a stable handle. The caller is responsible for deduplication.
@@ -47,11 +49,11 @@ impl Fetcher {
     }
     pub fn of_type(&self, ty: AssetType) -> &[AssetHandle] {
         &self.fetcher_cache[ty.index()]
-}
+    }
 
     pub fn type_len(&self, ty: AssetType) -> usize {
         self.fetcher_cache[ty.index()].len()
-}
+    }
     pub(super) fn cache_remove(
         cache_slot: &mut thin_vec::ThinVec<AssetHandle>,
         handle: AssetHandle,
@@ -60,12 +62,11 @@ impl Fetcher {
             cache_slot.swap_remove(pos);
         }
     }
-     pub fn contains(&self, handle: AssetHandle) -> bool {
+    pub fn contains(&self, handle: AssetHandle) -> bool {
         self.asset_arena.contains(handle)
     }
 
     pub fn id(&self, handle: AssetHandle) -> Option<AssetId> {
         self.asset_arena.id(handle)
     }
-
 }

@@ -11,23 +11,22 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::WindowId;
 
-use dumpster_fire_engine::forge_master::{
-    ForgeMaster, GraphicsForgeId, GraphicsOreKind,
-};
-use dumpster_fire_engine::render::{
-    GraphicsTag, Proto, ProtoId, Renderer, VulkanContext,
-    Window, WindowId as RenderWindowId,
-};
 use dumpster_fire_engine::forge_master::FrameId;
 use dumpster_fire_engine::forge_master::GraphicsFramePlan;
+use dumpster_fire_engine::forge_master::{ForgeMaster, GraphicsForgeId, GraphicsOreKind};
+use dumpster_fire_engine::render::{
+    GraphicsTag, Proto, ProtoId, Renderer, VulkanContext, Window, WindowId as RenderWindowId,
+};
 
 // SPIR-V embedded at compile time (compiled by build.rs via glslc).
-const TRIANGLE_VERT: &[u8] = include_bytes!(
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/triangle.vert.spv")
-);
-const TRIANGLE_FRAG: &[u8] = include_bytes!(
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/triangle.frag.spv")
-);
+const TRIANGLE_VERT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/shaders/triangle.vert.spv"
+));
+const TRIANGLE_FRAG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/shaders/triangle.frag.spv"
+));
 
 fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
@@ -60,9 +59,7 @@ impl ApplicationHandler for App {
         let attrs = winit::window::Window::default_attributes()
             .with_title("hello_triangle")
             .with_inner_size(winit::dpi::LogicalSize::new(800u32, 600u32));
-        let winit_window = Arc::new(
-            event_loop.create_window(attrs).expect("create window"),
-        );
+        let winit_window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let winit_id = winit_window.id();
 
         // Bootstrap Vulkan with surface extensions for this platform.
@@ -70,8 +67,7 @@ impl ApplicationHandler for App {
             .display_handle()
             .expect("display handle")
             .as_raw();
-        let ctx = VulkanContext::with_surface(display_handle)
-            .expect("Vulkan init with surface");
+        let ctx = VulkanContext::with_surface(display_handle).expect("Vulkan init with surface");
 
         // Register a GraphicsForge for the Ui kind (no descriptors — triangle
         // shader hardcodes its own vertices).
@@ -137,13 +133,10 @@ impl ApplicationHandler for App {
         });
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        id: WindowId,
-        event: WindowEvent,
-    ) {
-        let Some(live) = self.live.as_mut() else { return };
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
         if id != live.winit_id {
             return;
         }
@@ -178,12 +171,11 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(live) = self.live.as_ref() {
-            if let Some(window) = live.renderer.window(live.window_handle) {
-                if let Some(gfx) = &window.graphics {
-                    gfx.winit_window.request_redraw();
-                }
-            }
+        if let Some(live) = self.live.as_ref()
+            && let Some(window) = live.renderer.window(live.window_handle)
+            && let Some(gfx) = &window.graphics
+        {
+            gfx.winit_window.request_redraw();
         }
     }
 }

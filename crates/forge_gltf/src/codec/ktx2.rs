@@ -36,28 +36,28 @@ impl SupercompressionScheme {
 /// A single mip level entry from the level index.
 #[derive(Debug, Clone, Copy)]
 pub struct LevelEntry {
-    pub byte_offset:              u64,
-    pub byte_length:              u64,
+    pub byte_offset: u64,
+    pub byte_length: u64,
     pub uncompressed_byte_length: u64,
 }
 
 /// Top-level KTX2 parsed document.
 #[derive(Debug)]
 pub struct Ktx2 {
-    pub vk_format:           u32,
-    pub type_size:            u32,
-    pub pixel_width:          u32,
-    pub pixel_height:         u32,
-    pub pixel_depth:          u32,
-    pub layer_count:          u32,
-    pub face_count:           u32,
-    pub level_count:          u32,
-    pub supercompression:     SupercompressionScheme,
-    pub levels:               Vec<LevelEntry>,
+    pub vk_format: u32,
+    pub type_size: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub pixel_depth: u32,
+    pub layer_count: u32,
+    pub face_count: u32,
+    pub level_count: u32,
+    pub supercompression: SupercompressionScheme,
+    pub levels: Vec<LevelEntry>,
     /// Supercompression Global Data bytes, if any.
-    pub sgd:                  Vec<u8>,
+    pub sgd: Vec<u8>,
     /// Key/value metadata pairs.
-    pub metadata:             Vec<(String, Vec<u8>)>,
+    pub metadata: Vec<(String, Vec<u8>)>,
 }
 
 impl Ktx2 {
@@ -67,37 +67,43 @@ impl Ktx2 {
         if data.len() < 80 {
             return Err(GltfError::InvalidAccessor("KTX2 file too small"));
         }
-        if &data[0..12] != KTX2_MAGIC {
+        if data[0..12] != KTX2_MAGIC {
             return Err(GltfError::InvalidAccessor("not a KTX2 file (bad magic)"));
         }
 
         let r = |off: usize| -> u32 {
-            u32::from_le_bytes([data[off], data[off+1], data[off+2], data[off+3]])
+            u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
         };
         let r64 = |off: usize| -> u64 {
             u64::from_le_bytes([
-                data[off], data[off+1], data[off+2], data[off+3],
-                data[off+4], data[off+5], data[off+6], data[off+7],
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+                data[off + 4],
+                data[off + 5],
+                data[off + 6],
+                data[off + 7],
             ])
         };
 
-        let vk_format    = r(12);
-        let type_size    = r(16);
-        let pixel_width  = r(20).max(1);
+        let vk_format = r(12);
+        let type_size = r(16);
+        let pixel_width = r(20).max(1);
         let pixel_height = r(24);
-        let pixel_depth  = r(28);
-        let layer_count  = r(32);
-        let face_count   = r(36).max(1);
-        let level_count  = r(40).max(1);
-        let supercomp    = SupercompressionScheme::from_u32(r(44));
+        let pixel_depth = r(28);
+        let layer_count = r(32);
+        let face_count = r(36).max(1);
+        let level_count = r(40).max(1);
+        let supercomp = SupercompressionScheme::from_u32(r(44));
 
         // Byte offsets table (indices 48..79)
-        let dfd_byte_offset   = r(48) as usize;
-        let dfd_byte_length   = r(52) as usize;
-        let kvd_byte_offset   = r(56) as usize;
-        let kvd_byte_length   = r(60) as usize;
-        let sgd_byte_offset   = r64(64) as usize;
-        let sgd_byte_length   = r64(72) as usize;
+        let dfd_byte_offset = r(48) as usize;
+        let dfd_byte_length = r(52) as usize;
+        let kvd_byte_offset = r(56) as usize;
+        let kvd_byte_length = r(60) as usize;
+        let sgd_byte_offset = r64(64) as usize;
+        let sgd_byte_length = r64(72) as usize;
 
         // Level index: starts at byte 80, 24 bytes per level
         let level_index_start = 80usize;
@@ -108,8 +114,8 @@ impl Ktx2 {
                 return Err(GltfError::InvalidAccessor("KTX2 level index truncated"));
             }
             levels.push(LevelEntry {
-                byte_offset:              r64(base),
-                byte_length:              r64(base + 8),
+                byte_offset: r64(base),
+                byte_length: r64(base + 8),
                 uncompressed_byte_length: r64(base + 16),
             });
         }
@@ -122,11 +128,16 @@ impl Ktx2 {
             while pos + 4 <= end {
                 let kv_len = r(pos) as usize;
                 pos += 4;
-                if pos + kv_len > end { break; }
+                if pos + kv_len > end {
+                    break;
+                }
                 let kv_data = &data[pos..pos + kv_len];
                 // key = NUL-terminated string
-                let nul = kv_data.iter().position(|&b| b == 0).unwrap_or(kv_data.len());
-                let key   = String::from_utf8_lossy(&kv_data[..nul]).into_owned();
+                let nul = kv_data
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(kv_data.len());
+                let key = String::from_utf8_lossy(&kv_data[..nul]).into_owned();
                 let value = kv_data[nul + 1..].to_vec();
                 metadata.push((key, value));
                 pos += kv_len;
@@ -169,7 +180,7 @@ impl Ktx2 {
     pub fn level_data<'a>(&self, data: &'a [u8], level: usize) -> Option<&'a [u8]> {
         let entry = self.levels.get(level)?;
         let start = entry.byte_offset as usize;
-        let end   = start + entry.byte_length as usize;
+        let end = start + entry.byte_length as usize;
         data.get(start..end)
     }
 }
@@ -206,9 +217,9 @@ mod tests {
         data[40..44].copy_from_slice(&1u32.to_le_bytes());
         // level 0: offset = 80+24=104, length = 4, uncompressed_length = 4
         let level_start = 80usize;
-        data[level_start..level_start+8].copy_from_slice(&(104u64).to_le_bytes());
-        data[level_start+8..level_start+16].copy_from_slice(&(4u64).to_le_bytes());
-        data[level_start+16..level_start+24].copy_from_slice(&(4u64).to_le_bytes());
+        data[level_start..level_start + 8].copy_from_slice(&(104u64).to_le_bytes());
+        data[level_start + 8..level_start + 16].copy_from_slice(&(4u64).to_le_bytes());
+        data[level_start + 16..level_start + 24].copy_from_slice(&(4u64).to_le_bytes());
         // pixel at offset 104: RGBA = [255, 0, 128, 255]
         data[104..108].copy_from_slice(&[255, 0, 128, 255]);
 

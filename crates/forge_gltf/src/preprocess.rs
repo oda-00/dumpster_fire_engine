@@ -20,7 +20,7 @@ use crate::animation::AnimPointerChannel;
 const GLB_MAGIC: u32 = 0x46546C67;
 const GLB_VERSION: u32 = 2;
 const CHUNK_JSON: u32 = 0x4E4F534A;
-const CHUNK_BIN:  u32 = 0x004E4942;
+const CHUNK_BIN: u32 = 0x004E4942;
 
 /// Per-animation rewrite output. `pointers` lists the channels that got
 /// patched as `KHR_animation_pointer` ones; `patched_channel_indices` lists
@@ -28,16 +28,16 @@ const CHUNK_BIN:  u32 = 0x004E4942;
 /// building the regular `AnimChannel` list).
 #[derive(Debug, Clone, Default)]
 pub struct PointerPatch {
-    pub pointers:                ThinVec<AnimPointerChannel>,
+    pub pointers: ThinVec<AnimPointerChannel>,
     pub patched_channel_indices: ThinVec<u32>,
 }
 
 /// Returns `Some(new_glb_bytes, per_animation_patch)` if any channel was
 /// patched, otherwise `None`.
-pub fn rewrite_animation_pointer(
-    bytes: &[u8],
-) -> Option<(Vec<u8>, Vec<PointerPatch>)> {
-    if bytes.len() < 28 { return None; }
+pub fn rewrite_animation_pointer(bytes: &[u8]) -> Option<(Vec<u8>, Vec<PointerPatch>)> {
+    if bytes.len() < 28 {
+        return None;
+    }
     if u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) != GLB_MAGIC {
         return rewrite_plain_json(bytes);
     }
@@ -50,8 +50,10 @@ pub fn rewrite_animation_pointer(
         return None;
     }
     let json_start = 20;
-    let json_end   = json_start + json_len;
-    if json_end > bytes.len() { return None; }
+    let json_end = json_start + json_len;
+    if json_end > bytes.len() {
+        return None;
+    }
     let json_str = std::str::from_utf8(&bytes[json_start..json_end]).ok()?;
 
     let (patched_json, pointers) = patch_json(json_str)?;
@@ -59,28 +61,55 @@ pub fn rewrite_animation_pointer(
     // BIN chunk (optional) starts right after the JSON chunk header.
     let bin_payload: Option<&[u8]> = if json_end + 8 <= bytes.len() {
         let bin_len = u32::from_le_bytes([
-            bytes[json_end], bytes[json_end + 1], bytes[json_end + 2], bytes[json_end + 3],
+            bytes[json_end],
+            bytes[json_end + 1],
+            bytes[json_end + 2],
+            bytes[json_end + 3],
         ]) as usize;
         let bin_kind = u32::from_le_bytes([
-            bytes[json_end + 4], bytes[json_end + 5], bytes[json_end + 6], bytes[json_end + 7],
+            bytes[json_end + 4],
+            bytes[json_end + 5],
+            bytes[json_end + 6],
+            bytes[json_end + 7],
         ]);
         if bin_kind == CHUNK_BIN {
             let start = json_end + 8;
-            let end   = start + bin_len;
-            if end <= bytes.len() { Some(&bytes[start..end]) } else { None }
-        } else { None }
-    } else { None };
+            let end = start + bin_len;
+            if end <= bytes.len() {
+                Some(&bytes[start..end])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let mut json_bytes = patched_json.into_bytes();
-    while json_bytes.len() % 4 != 0 { json_bytes.push(b' '); }
+    while json_bytes.len() % 4 != 0 {
+        json_bytes.push(b' ');
+    }
 
-    let bin_total = bin_payload.map(|p| {
-        let mut n = p.len();
-        while n % 4 != 0 { n += 1; }
-        n
-    }).unwrap_or(0);
+    let bin_total = bin_payload
+        .map(|p| {
+            let mut n = p.len();
+            while n % 4 != 0 {
+                n += 1;
+            }
+            n
+        })
+        .unwrap_or(0);
 
-    let total = 12 + 8 + json_bytes.len() + if bin_payload.is_some() { 8 + bin_total } else { 0 };
+    let total = 12
+        + 8
+        + json_bytes.len()
+        + if bin_payload.is_some() {
+            8 + bin_total
+        } else {
+            0
+        };
 
     let mut out = Vec::with_capacity(total);
     let push = |o: &mut Vec<u8>, v: u32| o.extend_from_slice(&v.to_le_bytes());
@@ -94,7 +123,9 @@ pub fn rewrite_animation_pointer(
         push(&mut out, bin_total as u32);
         push(&mut out, CHUNK_BIN);
         out.extend_from_slice(bin);
-        while out.len() < total { out.push(0); }
+        while out.len() < total {
+            out.push(0);
+        }
     }
 
     Some((out, pointers))
@@ -113,9 +144,7 @@ fn patch_json(json_str: &str) -> Option<(String, Vec<PointerPatch>)> {
     let mut per_anim: Vec<PointerPatch> = Vec::new();
     let mut any_patched = false;
 
-    let Some(anims) = v.get_mut("animations").and_then(|v| v.as_array_mut()) else {
-        return None;
-    };
+    let anims = v.get_mut("animations").and_then(|v| v.as_array_mut())?;
 
     for anim in anims.iter_mut() {
         let mut patch = PointerPatch::default();
@@ -124,13 +153,21 @@ fn patch_json(json_str: &str) -> Option<(String, Vec<PointerPatch>)> {
             continue;
         };
         for (ch_idx, ch) in channels.iter_mut().enumerate() {
-            let Some(ch_obj) = ch.as_object_mut() else { continue };
+            let Some(ch_obj) = ch.as_object_mut() else {
+                continue;
+            };
             let sampler = ch_obj.get("sampler").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
-            let Some(target) = ch_obj.get_mut("target") else { continue };
-            let Some(t_obj) = target.as_object_mut() else { continue };
+            let Some(target) = ch_obj.get_mut("target") else {
+                continue;
+            };
+            let Some(t_obj) = target.as_object_mut() else {
+                continue;
+            };
 
-            if t_obj.contains_key("node") { continue; }
+            if t_obj.contains_key("node") {
+                continue;
+            }
 
             let ptr = t_obj
                 .get("extensions")
@@ -150,13 +187,18 @@ fn patch_json(json_str: &str) -> Option<(String, Vec<PointerPatch>)> {
             // strips it from the regular channel list.
             t_obj.insert("path".to_owned(), Value::from("translation"));
             any_patched = true;
-            patch.pointers.push(AnimPointerChannel { pointer: ptr, sampler });
+            patch.pointers.push(AnimPointerChannel {
+                pointer: ptr,
+                sampler,
+            });
             patch.patched_channel_indices.push(ch_idx as u32);
         }
         per_anim.push(patch);
     }
 
-    if !any_patched { return None; }
+    if !any_patched {
+        return None;
+    }
     Some((serde_json::to_string(&v).ok()?, per_anim))
 }
 

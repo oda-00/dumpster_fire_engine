@@ -24,27 +24,34 @@ pub enum GltfError {
 impl fmt::Display for GltfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GltfError::Io(e)                    => write!(f, "gltf I/O error: {e}"),
-            GltfError::NoPrimitives             => write!(f, "glTF file has no mesh primitives"),
-            GltfError::NoPositions              => write!(f, "glTF primitive has no POSITION accessor"),
-            GltfError::InvalidAccessor(s)       => write!(f, "glTF invalid accessor: {s}"),
-            GltfError::UnsupportedComponent(s)  => write!(f, "glTF unsupported component type: {s}"),
-            GltfError::UnsupportedVersion(s)    => write!(f, "glTF unsupported version: {s}"),
-            GltfError::UnsupportedExtension(s)  => write!(f, "glTF required extension not supported: {s}"),
-            GltfError::SpecViolation(s)         => write!(f, "glTF spec violation: {s}"),
-            GltfError::UnsupportedFeature(s)    => write!(f, "glTF feature not yet implemented: {s}"),
+            GltfError::Io(e) => write!(f, "gltf I/O error: {e}"),
+            GltfError::NoPrimitives => write!(f, "glTF file has no mesh primitives"),
+            GltfError::NoPositions => write!(f, "glTF primitive has no POSITION accessor"),
+            GltfError::InvalidAccessor(s) => write!(f, "glTF invalid accessor: {s}"),
+            GltfError::UnsupportedComponent(s) => write!(f, "glTF unsupported component type: {s}"),
+            GltfError::UnsupportedVersion(s) => write!(f, "glTF unsupported version: {s}"),
+            GltfError::UnsupportedExtension(s) => {
+                write!(f, "glTF required extension not supported: {s}")
+            }
+            GltfError::SpecViolation(s) => write!(f, "glTF spec violation: {s}"),
+            GltfError::UnsupportedFeature(s) => write!(f, "glTF feature not yet implemented: {s}"),
         }
     }
 }
 
 impl std::error::Error for GltfError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { GltfError::Io(e) => Some(e), _ => None }
+        match self {
+            GltfError::Io(e) => Some(e),
+            _ => None,
+        }
     }
 }
 
 impl From<gltf::Error> for GltfError {
-    fn from(e: gltf::Error) -> Self { GltfError::Io(e) }
+    fn from(e: gltf::Error) -> Self {
+        GltfError::Io(e)
+    }
 }
 
 pub type GltfResult<T> = Result<T, GltfError>;

@@ -17,6 +17,9 @@ pub struct UiActionId(pub u32);
 /// effect index for diagnostics.
 pub fn dispatch_ui_action(arena: &mut EffectArena, action: UiActionId, payload: f32) -> usize {
     let idx = arena.len();
-    arena.push(Effect::UiAction { action: action.0, payload });
+    arena.push(Effect::UiAction {
+        action: action.0,
+        payload,
+    });
     idx
 }

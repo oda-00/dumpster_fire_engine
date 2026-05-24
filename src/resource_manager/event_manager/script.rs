@@ -1,10 +1,10 @@
+use super::object_loader::LoadedObject;
+use super::scene::{Handler, SceneDef, SceneId};
+use super::script_abi::{ENGINE_ABI_VERSION, EngineAPI, SceneDefArray, SceneEntry};
+use crate::resource_manager::manager::{Arena, Handle, Id};
+use rayon::prelude::*;
 use std::sync::Arc;
 use thin_vec::ThinVec;
-use rayon::prelude::*;
-use crate::resource_manager::manager::{Arena, Handle, Id};
-use super::scene::{Handler, SceneDef, SceneId};
-use super::script_abi::{EngineAPI, SceneDefArray, SceneEntry, ENGINE_ABI_VERSION};
-use super::object_loader::LoadedObject;
 
 /// Batch sizes at or above this fan out across rayon's pool; below it the
 /// sequential 4-way unrolled path wins because rayon's fork/join overhead
@@ -28,7 +28,8 @@ pub const PARALLEL_LOAD_THRESHOLD: usize = 4;
 
 // ── Tags / markers / Ids owned by script.rs ─────────────────────────────────
 
-#[derive(Copy, Clone, PartialEq, Eq)] pub struct ScriptTag;
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct ScriptTag;
 pub type ScriptHandle = Handle<ScriptTag>;
 
 pub struct ScriptMarker;
@@ -41,10 +42,10 @@ pub type ScriptId = Id<ScriptMarker>;
 // produce a runtime Play with materialized Scenes.
 
 pub struct Script {
-    pub id:       ScriptId,
-    pub name:     Arc<str>,
-    pub scenes:   ThinVec<SceneDef>,
-    pub entry:    SceneId,
+    pub id: ScriptId,
+    pub name: Arc<str>,
+    pub scenes: ThinVec<SceneDef>,
+    pub entry: SceneId,
     pub handlers: ThinVec<Handler>,
 }
 
@@ -77,10 +78,10 @@ impl Script {
 /// The five symbols every compiled `.lang` `.so` must export, plus the table
 /// of per-scene function pointers it produces at load time.
 pub struct ScriptEntryPoints {
-    pub state_size:        unsafe extern "C" fn() -> u32,
-    pub state_version:     unsafe extern "C" fn() -> u32,
-    pub init_state:        unsafe extern "C" fn(*mut u8),
-    pub migrate_state:     unsafe extern "C" fn(u32, *const u8, *mut u8),
+    pub state_size: unsafe extern "C" fn() -> u32,
+    pub state_version: unsafe extern "C" fn() -> u32,
+    pub init_state: unsafe extern "C" fn(*mut u8),
+    pub migrate_state: unsafe extern "C" fn(u32, *const u8, *mut u8),
     pub create_scene_defs: unsafe extern "C" fn(*const EngineAPI, *mut SceneDefArray),
     /// Materialised by calling `create_scene_defs` at load time.  Lifetime
     /// tied to the loaded library — owned by `LoadedScript`.
@@ -88,8 +89,12 @@ pub struct ScriptEntryPoints {
 }
 
 impl ScriptEntryPoints {
-    pub fn state_size(&self)    -> u32 { unsafe { (self.state_size)() } }
-    pub fn state_version(&self) -> u32 { unsafe { (self.state_version)() } }
+    pub fn state_size(&self) -> u32 {
+        unsafe { (self.state_size)() }
+    }
+    pub fn state_version(&self) -> u32 {
+        unsafe { (self.state_version)() }
+    }
 
     pub fn scene(&self, raw_id: i64) -> Option<&SceneEntry> {
         self.scenes.iter().find(|s| s.raw_id == raw_id)
@@ -104,10 +109,10 @@ impl ScriptEntryPoints {
 /// this by holding both together and dropping the object only via
 /// `ScriptManager::unload`.
 pub struct LoadedScript {
-    pub id:          ScriptId,
+    pub id: ScriptId,
     pub source_path: Arc<str>,
-    pub obj:         Arc<LoadedObject>,
-    pub entry:       ScriptEntryPoints,
+    pub obj: Arc<LoadedObject>,
+    pub entry: ScriptEntryPoints,
 }
 
 #[derive(Debug)]
@@ -120,10 +125,11 @@ pub enum ScriptLoadError {
 impl core::fmt::Display for ScriptLoadError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ScriptLoadError::Io(s)            => write!(f, "io: {s}"),
+            ScriptLoadError::Io(s) => write!(f, "io: {s}"),
             ScriptLoadError::MissingSymbol(s) => write!(f, "missing symbol `{s}`"),
-            ScriptLoadError::AbiMismatch { expected, got } =>
-                write!(f, "ABI version mismatch: engine={expected}, script={got}"),
+            ScriptLoadError::AbiMismatch { expected, got } => {
+                write!(f, "ABI version mismatch: engine={expected}, script={got}")
+            }
         }
     }
 }
@@ -132,34 +138,45 @@ pub struct ScriptManager {
     arena: Arena<ScriptTag, LoadedScript>,
     /// Sorted ascending by `ScriptId.raw()`; binary-search lookups.
     id_to_handle: ThinVec<(ScriptId, ScriptHandle)>,
-    next_raw_id:  i64,
+    next_raw_id: i64,
 }
 
 impl ScriptManager {
     pub fn new() -> Self {
         ScriptManager {
-            arena:        Arena::new(),
+            arena: Arena::new(),
             id_to_handle: ThinVec::new(),
-            next_raw_id:  1,
+            next_raw_id: 1,
         }
     }
 
-    pub fn len(&self) -> usize { self.id_to_handle.len() }
-    pub fn is_empty(&self) -> bool { self.id_to_handle.is_empty() }
+    pub fn len(&self) -> usize {
+        self.id_to_handle.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.id_to_handle.is_empty()
+    }
 
     /// Load a compiled `.lang` object file from `path`.  Assigns a fresh
     /// `ScriptId` and registers the object in the arena.
     pub fn load_from_file(&mut self, path: Arc<str>) -> Result<ScriptId, ScriptLoadError> {
         let obj = Arc::new(
             LoadedObject::from_file(std::path::Path::new(path.as_ref()))
-                .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(format!("{e}").as_str())))?
+                .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(format!("{e}").as_str())))?,
         );
         let entry = read_entry_points(&obj)?;
         let id = ScriptId::new(self.next_raw_id);
         self.next_raw_id += 1;
-        let loaded = LoadedScript { id, source_path: path, obj, entry };
+        let loaded = LoadedScript {
+            id,
+            source_path: path,
+            obj,
+            entry,
+        };
         let h = self.arena.insert(loaded);
-        let pos = self.id_to_handle.partition_point(|(sid, _)| sid.raw() < id.raw());
+        let pos = self
+            .id_to_handle
+            .partition_point(|(sid, _)| sid.raw() < id.raw());
         self.id_to_handle.insert(pos, (id, h));
         Ok(id)
     }
@@ -173,10 +190,7 @@ impl ScriptManager {
     ///
     /// Returns one `Result` per input path, in input order.  A failure on
     /// path *i* does not abort the others — partial loads are preserved.
-    pub fn load_many(
-        &mut self,
-        paths: &[Arc<str>],
-    ) -> ThinVec<Result<ScriptId, ScriptLoadError>> {
+    pub fn load_many(&mut self, paths: &[Arc<str>]) -> ThinVec<Result<ScriptId, ScriptLoadError>> {
         if paths.is_empty() {
             return ThinVec::new();
         }
@@ -200,9 +214,13 @@ impl ScriptManager {
             // intermediate then move element-by-element.  The Vec is dropped
             // immediately so this allocation never escapes the function.
             let v: Vec<Loaded> = paths.par_iter().map(load_one).collect();
-            for r in v { loaded.push(r); }
+            for r in v {
+                loaded.push(r);
+            }
         } else {
-            for p in paths { loaded.push(load_one(p)); }
+            for p in paths {
+                loaded.push(load_one(p));
+            }
         }
 
         // Phase 2: single-threaded arena registration so IDs stay in order.
@@ -214,10 +232,14 @@ impl ScriptManager {
                     let id = ScriptId::new(self.next_raw_id);
                     self.next_raw_id += 1;
                     let loaded = LoadedScript {
-                        id, source_path: Arc::clone(path), obj, entry,
+                        id,
+                        source_path: Arc::clone(path),
+                        obj,
+                        entry,
                     };
                     let h = self.arena.insert(loaded);
-                    let pos = self.id_to_handle
+                    let pos = self
+                        .id_to_handle
                         .partition_point(|(sid, _)| sid.raw() < id.raw());
                     self.id_to_handle.insert(pos, (id, h));
                     out.push(Ok(id));
@@ -231,24 +253,22 @@ impl ScriptManager {
     /// Hot-reload: replace the object for an existing `ScriptId` with a
     /// fresh compilation from `new_path`.  All function pointers in `entry`
     /// are rewritten in place; the previous object is dropped after the swap.
-    pub fn hot_reload(
-        &mut self,
-        id: ScriptId,
-        new_path: Arc<str>,
-    ) -> Result<(), ScriptLoadError> {
-        let h = self.handle_for(id).ok_or_else(|| ScriptLoadError::Io(
-            Arc::<str>::from(format!("no script with id {}", id.raw()).as_str())
-        ))?;
+    pub fn hot_reload(&mut self, id: ScriptId, new_path: Arc<str>) -> Result<(), ScriptLoadError> {
+        let h = self.handle_for(id).ok_or_else(|| {
+            ScriptLoadError::Io(Arc::<str>::from(
+                format!("no script with id {}", id.raw()).as_str(),
+            ))
+        })?;
         let obj = Arc::new(
             LoadedObject::from_file(std::path::Path::new(new_path.as_ref()))
-                .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(format!("{e}").as_str())))?
+                .map_err(|e| ScriptLoadError::Io(Arc::<str>::from(format!("{e}").as_str())))?,
         );
         let entry = read_entry_points(&obj)?;
         if let Some(loaded) = self.arena.get_mut(h) {
             // Drop the old object AFTER replacing the pointers, so no live
             // function pointer references freed memory.
-            loaded.obj         = obj;
-            loaded.entry       = entry;
+            loaded.obj = obj;
+            loaded.entry = entry;
             loaded.source_path = new_path;
         }
         Ok(())
@@ -257,8 +277,14 @@ impl ScriptManager {
     pub fn unload(&mut self, id: ScriptId) {
         let Some(h) = self.handle_for(id) else { return };
         self.arena.remove(h);
-        let pos = self.id_to_handle.partition_point(|(sid, _)| sid.raw() < id.raw());
-        if self.id_to_handle.get(pos).is_some_and(|(sid, _)| sid.raw() == id.raw()) {
+        let pos = self
+            .id_to_handle
+            .partition_point(|(sid, _)| sid.raw() < id.raw());
+        if self
+            .id_to_handle
+            .get(pos)
+            .is_some_and(|(sid, _)| sid.raw() == id.raw())
+        {
             self.id_to_handle.remove(pos);
         }
     }
@@ -273,8 +299,11 @@ impl ScriptManager {
     }
 
     fn handle_for(&self, id: ScriptId) -> Option<ScriptHandle> {
-        let pos = self.id_to_handle.partition_point(|(sid, _)| sid.raw() < id.raw());
-        self.id_to_handle.get(pos)
+        let pos = self
+            .id_to_handle
+            .partition_point(|(sid, _)| sid.raw() < id.raw());
+        self.id_to_handle
+            .get(pos)
             .filter(|(sid, _)| sid.raw() == id.raw())
             .map(|(_, h)| *h)
     }
@@ -286,14 +315,14 @@ impl ScriptManager {
 // ticks (and across hot-reloads when layout matches via `state_version`).
 
 pub struct ActiveScript {
-    pub script_id:     ScriptId,
-    pub state_buffer:  ThinVec<u8>,
+    pub script_id: ScriptId,
+    pub state_buffer: ThinVec<u8>,
     pub state_version: u32,
     /// Raw_id of the currently-active scene.  Zero means "uninitialised";
     /// `from_entry` defaults this to the first scene in the table.
-    pub active_scene:  i64,
-    pub tick_count:    u64,
-    pub elapsed:       f32,
+    pub active_scene: i64,
+    pub tick_count: u64,
+    pub elapsed: f32,
 }
 
 impl ActiveScript {
@@ -301,15 +330,21 @@ impl ActiveScript {
     /// buffer, calls `init_state` for defaults, and sets `active_scene` to
     /// the first scene in the table.
     pub fn from_entry(script_id: ScriptId, entry: &ScriptEntryPoints) -> Self {
-        let state_size    = entry.state_size() as usize;
+        let state_size = entry.state_size() as usize;
         let state_version = entry.state_version();
         let mut buf: ThinVec<u8> = ThinVec::with_capacity(state_size);
         buf.resize(state_size, 0);
-        unsafe { (entry.init_state)(buf.as_mut_ptr()); }
+        unsafe {
+            (entry.init_state)(buf.as_mut_ptr());
+        }
         let active_scene = entry.scenes.first().map(|s| s.raw_id).unwrap_or(0);
         ActiveScript {
-            script_id, state_buffer: buf, state_version,
-            active_scene, tick_count: 0, elapsed: 0.0,
+            script_id,
+            state_buffer: buf,
+            state_version,
+            active_scene,
+            tick_count: 0,
+            elapsed: 0.0,
         }
     }
 
@@ -319,7 +354,7 @@ impl ActiveScript {
     /// from the new library is invoked.  `active_scene` falls back to the
     /// first scene when its raw_id is no longer present in the new table.
     pub fn migrate_into(&mut self, new_entry: &ScriptEntryPoints) {
-        let new_size    = new_entry.state_size() as usize;
+        let new_size = new_entry.state_size() as usize;
         let new_version = new_entry.state_version();
         if new_version == self.state_version && new_size == self.state_buffer.len() {
             return;
@@ -333,10 +368,14 @@ impl ActiveScript {
                 new_buf.as_mut_ptr(),
             );
         }
-        self.state_buffer  = new_buf;
+        self.state_buffer = new_buf;
         self.state_version = new_version;
 
-        if !new_entry.scenes.iter().any(|s| s.raw_id == self.active_scene) {
+        if !new_entry
+            .scenes
+            .iter()
+            .any(|s| s.raw_id == self.active_scene)
+        {
             self.active_scene = new_entry.scenes.first().map(|s| s.raw_id).unwrap_or(0);
         }
     }
@@ -355,19 +394,25 @@ impl ActiveScript {
         api: &mut super::script_abi::EngineAPI,
         dt: f32,
     ) -> i64 {
-        self.elapsed     += dt;
-        self.tick_count  += 1;
-        api.elapsed       = self.elapsed;
-        api.tick_count    = self.tick_count;
+        self.elapsed += dt;
+        self.tick_count += 1;
+        api.elapsed = self.elapsed;
+        api.tick_count = self.tick_count;
 
-        let Some(scene) = entry.scene(self.active_scene) else { return 0; };
+        let Some(scene) = entry.scene(self.active_scene) else {
+            return 0;
+        };
         let next = unsafe { (scene.tick)(api, self.state_buffer.as_mut_ptr()) };
         if next != 0 && next != self.active_scene {
-            unsafe { (scene.on_exit)(api, self.state_buffer.as_mut_ptr()); }
+            unsafe {
+                (scene.on_exit)(api, self.state_buffer.as_mut_ptr());
+            }
             if let Some(target) = entry.scene(next) {
-                unsafe { (target.on_enter)(api, self.state_buffer.as_mut_ptr()); }
+                unsafe {
+                    (target.on_enter)(api, self.state_buffer.as_mut_ptr());
+                }
                 self.active_scene = next;
-                self.elapsed = 0.0;  // reset per-scene elapsed
+                self.elapsed = 0.0; // reset per-scene elapsed
             }
         }
         next
@@ -381,8 +426,12 @@ impl ActiveScript {
         entry: &ScriptEntryPoints,
         api: &mut super::script_abi::EngineAPI,
     ) {
-        let Some(scene) = entry.scene(self.active_scene) else { return; };
-        unsafe { (scene.on_enter)(api, self.state_buffer.as_mut_ptr()); }
+        let Some(scene) = entry.scene(self.active_scene) else {
+            return;
+        };
+        unsafe {
+            (scene.on_enter)(api, self.state_buffer.as_mut_ptr());
+        }
     }
 }
 
@@ -407,25 +456,36 @@ impl ActiveScript {
 pub fn tick_batch(
     scripts: &mut [ActiveScript],
     entries: &[&ScriptEntryPoints],
-    apis:    &mut [EngineAPI],
-    dt:      f32,
+    apis: &mut [EngineAPI],
+    dt: f32,
 ) {
-    assert_eq!(scripts.len(), entries.len(), "tick_batch: scripts/entries length mismatch");
-    assert_eq!(scripts.len(), apis.len(),    "tick_batch: scripts/apis length mismatch");
+    assert_eq!(
+        scripts.len(),
+        entries.len(),
+        "tick_batch: scripts/entries length mismatch"
+    );
+    assert_eq!(
+        scripts.len(),
+        apis.len(),
+        "tick_batch: scripts/apis length mismatch"
+    );
     let n = scripts.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
 
     if n >= PARALLEL_TICK_THRESHOLD {
         // Parallel chunked: each rayon worker takes a contiguous block of
         // ≥ PARALLEL_TICK_MIN_LEN scripts and ticks them sequentially.
         // `par_iter_mut + with_min_len` prevents rayon from splitting work
         // into per-script tasks (fork/join would dominate at ~40 ns/tick).
-        scripts.par_iter_mut()
+        scripts
+            .par_iter_mut()
             .zip(apis.par_iter_mut())
             .zip(entries.par_iter())
             .with_min_len(PARALLEL_TICK_MIN_LEN)
             .for_each(|((s, api), entry)| {
-                let _ = s.tick(*entry, api, dt);
+                let _ = s.tick(entry, api, dt);
             });
         return;
     }
@@ -441,14 +501,26 @@ pub fn tick_batch(
         // hoist out of the hot loop.
         let (s0, s1, s2, s3) = unsafe {
             let p = scripts.as_mut_ptr();
-            (&mut *p.add(i), &mut *p.add(i + 1), &mut *p.add(i + 2), &mut *p.add(i + 3))
+            (
+                &mut *p.add(i),
+                &mut *p.add(i + 1),
+                &mut *p.add(i + 2),
+                &mut *p.add(i + 3),
+            )
         };
         let (a0, a1, a2, a3) = unsafe {
             let p = apis.as_mut_ptr();
-            (&mut *p.add(i), &mut *p.add(i + 1), &mut *p.add(i + 2), &mut *p.add(i + 3))
+            (
+                &mut *p.add(i),
+                &mut *p.add(i + 1),
+                &mut *p.add(i + 2),
+                &mut *p.add(i + 3),
+            )
         };
-        let e0 = entries[i];     let e1 = entries[i + 1];
-        let e2 = entries[i + 2]; let e3 = entries[i + 3];
+        let e0 = entries[i];
+        let e1 = entries[i + 1];
+        let e2 = entries[i + 2];
+        let e3 = entries[i + 3];
         let _ = s0.tick(e0, a0, dt);
         let _ = s1.tick(e1, a1, dt);
         let _ = s2.tick(e2, a2, dt);
@@ -461,17 +533,102 @@ pub fn tick_batch(
     }
 }
 
+impl Default for ScriptManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn read_entry_points(obj: &LoadedObject) -> Result<ScriptEntryPoints, ScriptLoadError> {
+    // Check ABI version before touching any other entry point.
+    let abi_version_fn: unsafe extern "C" fn() -> u32 = unsafe {
+        obj.fn_ptr("df_abi_version")
+            .ok_or(ScriptLoadError::MissingSymbol("df_abi_version"))?
+    };
+    let got = unsafe { abi_version_fn() };
+    if got != ENGINE_ABI_VERSION {
+        return Err(ScriptLoadError::AbiMismatch {
+            expected: ENGINE_ABI_VERSION,
+            got,
+        });
+    }
+
+    let state_size: unsafe extern "C" fn() -> u32 = unsafe {
+        obj.fn_ptr("df_state_size")
+            .ok_or(ScriptLoadError::MissingSymbol("df_state_size"))?
+    };
+    let state_version: unsafe extern "C" fn() -> u32 = unsafe {
+        obj.fn_ptr("df_state_version")
+            .ok_or(ScriptLoadError::MissingSymbol("df_state_version"))?
+    };
+    let init_state: unsafe extern "C" fn(*mut u8) = unsafe {
+        obj.fn_ptr("df_init_state")
+            .ok_or(ScriptLoadError::MissingSymbol("df_init_state"))?
+    };
+    let migrate_state: unsafe extern "C" fn(u32, *const u8, *mut u8) = unsafe {
+        obj.fn_ptr("df_migrate_state")
+            .ok_or(ScriptLoadError::MissingSymbol("df_migrate_state"))?
+    };
+    let create_scene_defs: unsafe extern "C" fn(*const EngineAPI, *mut SceneDefArray) = unsafe {
+        obj.fn_ptr("df_create_scene_defs")
+            .ok_or(ScriptLoadError::MissingSymbol("df_create_scene_defs"))?
+    };
+
+    // Materialise the scene table.  Null `api` is safe — codegen only reads
+    // the API pointer inside tick/on_enter/on_exit, not in create_scene_defs.
+    let mut arr = SceneDefArray {
+        scene_count: 0,
+        _pad: 0,
+        scenes: core::ptr::null(),
+    };
+    unsafe { create_scene_defs(core::ptr::null(), &mut arr) };
+
+    let mut scenes = ThinVec::with_capacity(arr.scene_count as usize);
+    if !arr.scenes.is_null() && arr.scene_count > 0 {
+        let raw = unsafe { core::slice::from_raw_parts(arr.scenes, arr.scene_count as usize) };
+        for e in raw {
+            scenes.push(SceneEntry {
+                raw_id: e.raw_id,
+                on_enter: e.on_enter,
+                on_exit: e.on_exit,
+                tick: e.tick,
+            });
+        }
+    }
+
+    Ok(ScriptEntryPoints {
+        state_size,
+        state_version,
+        init_state,
+        migrate_state,
+        create_scene_defs,
+        scenes,
+    })
+}
+
 #[cfg(test)]
 mod active_script_tests {
-    use super::*;
     use super::super::script_abi::EngineAPI;
+    use super::*;
 
-    extern "C" fn ss_v1()           -> u32 { 4 }
-    extern "C" fn ss_v2()           -> u32 { 8 }
-    extern "C" fn ver_v1()          -> u32 { 0x1111_1111 }
-    extern "C" fn ver_v2()          -> u32 { 0x2222_2222 }
+    extern "C" fn ss_v1() -> u32 {
+        4
+    }
+    extern "C" fn ss_v2() -> u32 {
+        8
+    }
+    extern "C" fn ver_v1() -> u32 {
+        0x1111_1111
+    }
+    extern "C" fn ver_v2() -> u32 {
+        0x2222_2222
+    }
     extern "C" fn init_v1(p: *mut u8) {
-        unsafe { *(p as *mut i32) = 7; }
+        unsafe {
+            *(p as *mut i32) = 7;
+        }
     }
     extern "C" fn init_v2(p: *mut u8) {
         unsafe {
@@ -487,10 +644,13 @@ mod active_script_tests {
             *(new.add(4) as *mut i32) = old_ver as i32;
         }
     }
-    extern "C" fn create_defs_noop(_api: *const EngineAPI, out: *mut super::super::script_abi::SceneDefArray) {
+    extern "C" fn create_defs_noop(
+        _api: *const EngineAPI,
+        out: *mut super::super::script_abi::SceneDefArray,
+    ) {
         unsafe {
             (*out).scene_count = 0;
-            (*out).scenes      = core::ptr::null();
+            (*out).scenes = core::ptr::null();
         }
     }
 
@@ -500,23 +660,23 @@ mod active_script_tests {
 
     fn v1_entry() -> ScriptEntryPoints {
         ScriptEntryPoints {
-            state_size:        ss_v1,
-            state_version:     ver_v1,
-            init_state:        init_v1,
-            migrate_state:     migrate_v1_unused,
+            state_size: ss_v1,
+            state_version: ver_v1,
+            init_state: init_v1,
+            migrate_state: migrate_v1_unused,
             create_scene_defs: create_defs_noop,
-            scenes:            ThinVec::new(),
+            scenes: ThinVec::new(),
         }
     }
 
     fn v2_entry() -> ScriptEntryPoints {
         ScriptEntryPoints {
-            state_size:        ss_v2,
-            state_version:     ver_v2,
-            init_state:        init_v2,
-            migrate_state:     migrate_v2,
+            state_size: ss_v2,
+            state_version: ver_v2,
+            init_state: init_v2,
+            migrate_state: migrate_v2,
             create_scene_defs: create_defs_noop,
-            scenes:            ThinVec::new(),
+            scenes: ThinVec::new(),
         }
     }
 
@@ -526,7 +686,10 @@ mod active_script_tests {
         let s = ActiveScript::from_entry(ScriptId::new(1), &v1);
         assert_eq!(s.state_buffer.len(), 4);
         assert_eq!(s.state_version, 0x1111_1111);
-        assert_eq!(i32::from_ne_bytes(s.state_buffer[..].try_into().unwrap()), 7);
+        assert_eq!(
+            i32::from_ne_bytes(s.state_buffer[..].try_into().unwrap()),
+            7
+        );
     }
 
     #[test]
@@ -557,65 +720,4 @@ mod active_script_tests {
         assert_eq!(s.state_buffer.as_ptr(), original_ptr);
         assert_eq!(s.state_version, 0x1111_1111);
     }
-}
-
-impl Default for ScriptManager {
-    fn default() -> Self { Self::new() }
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-fn read_entry_points(obj: &LoadedObject) -> Result<ScriptEntryPoints, ScriptLoadError> {
-    // Check ABI version before touching any other entry point.
-    let abi_version_fn: unsafe extern "C" fn() -> u32 = unsafe {
-        obj.fn_ptr("df_abi_version")
-            .ok_or(ScriptLoadError::MissingSymbol("df_abi_version"))?
-    };
-    let got = unsafe { abi_version_fn() };
-    if got != ENGINE_ABI_VERSION {
-        return Err(ScriptLoadError::AbiMismatch { expected: ENGINE_ABI_VERSION, got });
-    }
-
-    let state_size: unsafe extern "C" fn() -> u32 = unsafe {
-        obj.fn_ptr("df_state_size").ok_or(ScriptLoadError::MissingSymbol("df_state_size"))?
-    };
-    let state_version: unsafe extern "C" fn() -> u32 = unsafe {
-        obj.fn_ptr("df_state_version").ok_or(ScriptLoadError::MissingSymbol("df_state_version"))?
-    };
-    let init_state: unsafe extern "C" fn(*mut u8) = unsafe {
-        obj.fn_ptr("df_init_state").ok_or(ScriptLoadError::MissingSymbol("df_init_state"))?
-    };
-    let migrate_state: unsafe extern "C" fn(u32, *const u8, *mut u8) = unsafe {
-        obj.fn_ptr("df_migrate_state").ok_or(ScriptLoadError::MissingSymbol("df_migrate_state"))?
-    };
-    let create_scene_defs: unsafe extern "C" fn(*const EngineAPI, *mut SceneDefArray) = unsafe {
-        obj.fn_ptr("df_create_scene_defs").ok_or(ScriptLoadError::MissingSymbol("df_create_scene_defs"))?
-    };
-
-    // Materialise the scene table.  Null `api` is safe — codegen only reads
-    // the API pointer inside tick/on_enter/on_exit, not in create_scene_defs.
-    let mut arr = SceneDefArray { scene_count: 0, _pad: 0, scenes: core::ptr::null() };
-    unsafe { create_scene_defs(core::ptr::null(), &mut arr) };
-
-    let mut scenes = ThinVec::with_capacity(arr.scene_count as usize);
-    if !arr.scenes.is_null() && arr.scene_count > 0 {
-        let raw = unsafe { core::slice::from_raw_parts(arr.scenes, arr.scene_count as usize) };
-        for e in raw {
-            scenes.push(SceneEntry {
-                raw_id:   e.raw_id,
-                on_enter: e.on_enter,
-                on_exit:  e.on_exit,
-                tick:     e.tick,
-            });
-        }
-    }
-
-    Ok(ScriptEntryPoints {
-        state_size,
-        state_version,
-        init_state,
-        migrate_state,
-        create_scene_defs,
-        scenes,
-    })
 }

@@ -5,12 +5,14 @@
 //
 //   cargo bench --bench transform_kernels
 
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
+use dumpster_fire_engine::resource_manager::*;
 use glam::{Affine3A, Vec3};
 use thin_vec::thin_vec;
-use dumpster_fire_engine::resource_manager::*;
 
-fn main() { divan::main(); }
+fn main() {
+    divan::main();
+}
 
 const SIZES: &[usize] = &[1, 4, 16, 64, 256, 1024, 10_000];
 
@@ -18,19 +20,36 @@ fn build_world_with_actors(n: usize) -> (World, LevelHandle, StageHandle, Vec<Ac
     let mut world = World::new(WorldId::new(1));
     let lh = world.spawn_level(LevelId::new(1), "L");
     let sh = world.spawn_stage(lh, StageId::new(1), "S").unwrap();
-    let actors: Vec<_> = (0..n).map(|i| {
-        world.spawn_actor(
-            lh, sh, ActorId::new(i as i64 + 1),
-            Affine3A::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
-        ).unwrap()
-    }).collect();
+    let actors: Vec<_> = (0..n)
+        .map(|i| {
+            world
+                .spawn_actor(
+                    lh,
+                    sh,
+                    ActorId::new(i as i64 + 1),
+                    Affine3A::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
+                )
+                .unwrap()
+        })
+        .collect();
     world.propagate_transforms();
     (world, lh, sh, actors)
 }
 
-fn dirty_first_n(world: &mut World, lh: LevelHandle, sh: StageHandle, actors: &[ActorHandle], n: usize) {
+fn dirty_first_n(
+    world: &mut World,
+    lh: LevelHandle,
+    sh: StageHandle,
+    actors: &[ActorHandle],
+    n: usize,
+) {
     for &h in actors.iter().take(n) {
-        world.set_actor_local(lh, sh, h, Affine3A::from_translation(Vec3::new(1.0, 0.0, 0.0)));
+        world.set_actor_local(
+            lh,
+            sh,
+            h,
+            Affine3A::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+        );
     }
 }
 
@@ -40,7 +59,8 @@ fn propagate_dirty_dense(b: Bencher, n: usize) {
         let (mut w, lh, sh, actors) = build_world_with_actors(n);
         dirty_first_n(&mut w, lh, sh, &actors, n);
         w
-    }).bench_local_values(|mut w| {
+    })
+    .bench_local_values(|mut w| {
         w.propagate_transforms();
         w
     });
@@ -53,7 +73,8 @@ fn propagate_dirty_sparse_10pct(b: Bencher, n: usize) {
         let (mut w, lh, sh, actors) = build_world_with_actors(total);
         dirty_first_n(&mut w, lh, sh, &actors, n);
         w
-    }).bench_local_values(|mut w| {
+    })
+    .bench_local_values(|mut w| {
         w.propagate_transforms();
         w
     });
@@ -90,11 +111,16 @@ fn set_sub_entity_local_first_dirty(b: Bencher) {
     let (mut w, lh, sh, actors) = build_world_with_actors(1024);
     for (i, &ah) in actors.iter().enumerate() {
         w.spawn_sub_entity(
-            lh, sh, ah,
+            lh,
+            sh,
+            ah,
             ActorType::Character(Character {
                 id: CharacterId::new(i as i64 + 1),
                 name: "n".into(),
-                visible: true, physical: true, playable: false, mesh: None,
+                visible: true,
+                physical: true,
+                playable: false,
+                mesh: None,
             }),
             Affine3A::IDENTITY,
         );
@@ -113,26 +139,37 @@ fn set_sub_entity_local_first_dirty(b: Bencher) {
 
 // ── cue_troupe_direct: three branches ──────────────────────────────────────
 
-fn build_play_with_troupe(n: usize, identity_only: bool)
-    -> (World, LevelHandle, StageHandle, TroupeId)
-{
+fn build_play_with_troupe(
+    n: usize,
+    identity_only: bool,
+) -> (World, LevelHandle, StageHandle, TroupeId) {
     let (mut w, lh, sh, actors) = build_world_with_actors(n);
     let troupe = TroupeId::new(1);
 
-    let actives: Vec<ActiveActor> = actors.iter().enumerate().map(|(i, h)|
-        ActiveActor::new(lh, sh, *h, ActorId::new(i as i64 + 1))).collect();
+    let actives: Vec<ActiveActor> = actors
+        .iter()
+        .enumerate()
+        .map(|(i, h)| ActiveActor::new(lh, sh, *h, ActorId::new(i as i64 + 1)))
+        .collect();
 
     let bt = if identity_only {
         BtNode::leaf(
             Condition::Always,
-            Effect::CueTroupe { level_h: lh, stage_h: sh, troupe, delta: Affine3A::IDENTITY },
+            Effect::CueTroupe {
+                level_h: lh,
+                stage_h: sh,
+                troupe,
+                delta: Affine3A::IDENTITY,
+            },
             false,
         )
     } else {
         BtNode::leaf(
             Condition::Always,
             Effect::CueTroupe {
-                level_h: lh, stage_h: sh, troupe,
+                level_h: lh,
+                stage_h: sh,
+                troupe,
                 delta: Affine3A::from_translation(Vec3::new(0.001, 0.0, 0.0)),
             },
             false,
@@ -140,13 +177,17 @@ fn build_play_with_troupe(n: usize, identity_only: bool)
     };
 
     let scene = SceneDef {
-        id: SceneId::new(1), stage: StageId::new(1), parent: None,
+        id: SceneId::new(1),
+        stage: StageId::new(1),
+        parent: None,
         kind: SceneKind::Atomic,
         troupes: thin_vec![troupe],
         initial_actors: thin_vec![actives.iter().cloned().collect()],
         root: bt,
-        on_enter: thin_vec![], on_exit: thin_vec![],
-        handlers: thin_vec![], transitions: thin_vec![],
+        on_enter: thin_vec![],
+        on_exit: thin_vec![],
+        handlers: thin_vec![],
+        transitions: thin_vec![],
     };
     let mut script = Script::new(ScriptId::new(1), "s", SceneId::new(1));
     script.add_scene(scene);

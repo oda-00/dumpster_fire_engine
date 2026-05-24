@@ -16,7 +16,7 @@ pub type ActorHandlePacked = u64;
 #[repr(C)]
 pub struct ComponentCacheSlice {
     pub data: *const ActorHandlePacked,
-    pub len:  u32,
+    pub len: u32,
     pub _pad: u32,
 }
 
@@ -34,26 +34,26 @@ unsafe impl Sync for EngineAPI {}
 #[repr(C)]
 pub struct EngineAPI {
     /// Stage SoA: actor-local transforms (`Affine3A` = `[f32;12]`).
-    pub locals:      *mut [f32; 12],
+    pub locals: *mut [f32; 12],
     /// Stage SoA: actor world transforms (read-only for scripts).
-    pub worlds:      *const [f32; 12],
+    pub worlds: *const [f32; 12],
     /// Dirty flag parallel to `locals` / `worlds`.
     pub dirty_flags: *mut bool,
     /// Number of valid slots in the above arrays.
     pub actor_count: u32,
-    pub _pad0:       u32,
+    pub _pad0: u32,
     /// One slice per `ComponentType` (`ComponentType::COUNT == 5`).
-    pub caches:      [ComponentCacheSlice; 5],
+    pub caches: [ComponentCacheSlice; 5],
     /// `push_effect(api, effect)` — pushes a dynamic effect to the buffer.
     pub push_effect: unsafe extern "C" fn(*const EngineAPI, *const EffectAbi),
     /// `cue_troupe(api, troupe_id)` — fires an identity cue on the named troupe.
-    pub cue_troupe:  unsafe extern "C" fn(*const EngineAPI, i64),
+    pub cue_troupe: unsafe extern "C" fn(*const EngineAPI, i64),
     /// Scene elapsed time in seconds (f32 for cache fit; codegen widens to f64).
-    pub elapsed:     f32,
-    pub _pad1:       u32,
+    pub elapsed: f32,
+    pub _pad1: u32,
     /// Engine tick counter (monotonic per-Play).
-    pub tick_count:  u64,
-    pub _pad2:       u64,
+    pub tick_count: u64,
+    pub _pad2: u64,
 }
 
 #[repr(C)]
@@ -66,17 +66,17 @@ pub struct EffectAbi {
 
 #[repr(C)]
 pub struct SceneEntry {
-    pub raw_id:   i64,
+    pub raw_id: i64,
     pub on_enter: unsafe extern "C" fn(*const EngineAPI, *mut u8),
-    pub on_exit:  unsafe extern "C" fn(*const EngineAPI, *mut u8),
-    pub tick:     unsafe extern "C" fn(*const EngineAPI, *mut u8) -> i64,
+    pub on_exit: unsafe extern "C" fn(*const EngineAPI, *mut u8),
+    pub tick: unsafe extern "C" fn(*const EngineAPI, *mut u8) -> i64,
 }
 
 #[repr(C)]
 pub struct SceneDefArray {
     pub scene_count: u32,
-    pub _pad:        u32,
-    pub scenes:      *const SceneEntry,
+    pub _pad: u32,
+    pub scenes: *const SceneEntry,
 }
 
 // ── ABI byte-offset assertions ────────────────────────────────────────────────
@@ -87,21 +87,21 @@ pub struct SceneDefArray {
 
 const _: () = {
     assert!(core::mem::size_of::<ComponentCacheSlice>() == 16);
-    assert!(core::mem::size_of::<EngineAPI>()           == 152);
-    assert!(core::mem::size_of::<EffectAbi>()           == 24);
-    assert!(core::mem::size_of::<SceneEntry>()          == 32);
-    assert!(core::mem::size_of::<SceneDefArray>()       == 16);
+    assert!(core::mem::size_of::<EngineAPI>() == 152);
+    assert!(core::mem::size_of::<EffectAbi>() == 24);
+    assert!(core::mem::size_of::<SceneEntry>() == 32);
+    assert!(core::mem::size_of::<SceneDefArray>() == 16);
 
     // EngineAPI field offsets (must match engine_api.rs in tools/langc).
-    assert!(core::mem::offset_of!(EngineAPI, locals)      ==   0);
-    assert!(core::mem::offset_of!(EngineAPI, worlds)      ==   8);
-    assert!(core::mem::offset_of!(EngineAPI, dirty_flags) ==  16);
-    assert!(core::mem::offset_of!(EngineAPI, actor_count) ==  24);
-    assert!(core::mem::offset_of!(EngineAPI, caches)      ==  32);
+    assert!(core::mem::offset_of!(EngineAPI, locals) == 0);
+    assert!(core::mem::offset_of!(EngineAPI, worlds) == 8);
+    assert!(core::mem::offset_of!(EngineAPI, dirty_flags) == 16);
+    assert!(core::mem::offset_of!(EngineAPI, actor_count) == 24);
+    assert!(core::mem::offset_of!(EngineAPI, caches) == 32);
     assert!(core::mem::offset_of!(EngineAPI, push_effect) == 112);
-    assert!(core::mem::offset_of!(EngineAPI, cue_troupe)  == 120);
-    assert!(core::mem::offset_of!(EngineAPI, elapsed)     == 128);
-    assert!(core::mem::offset_of!(EngineAPI, tick_count)  == 136);
+    assert!(core::mem::offset_of!(EngineAPI, cue_troupe) == 120);
+    assert!(core::mem::offset_of!(EngineAPI, elapsed) == 128);
+    assert!(core::mem::offset_of!(EngineAPI, tick_count) == 136);
 };
 
 // ── Engine-side callbacks invoked by compiled scripts ─────────────────────────
@@ -112,10 +112,10 @@ const _: () = {
 
 /// Discriminants for `EffectAbi.kind`, stable across the ABI surface.
 pub mod effect_kind {
-    pub const NOP:           u8 = 0;
-    pub const EMIT_EVENT:    u8 = 1;
-    pub const ATTACK:        u8 = 2;
-    pub const PATROL_PATH:   u8 = 3;
+    pub const NOP: u8 = 0;
+    pub const EMIT_EVENT: u8 = 1;
+    pub const ATTACK: u8 = 2;
+    pub const PATROL_PATH: u8 = 3;
 }
 
 // ── Effect sink: where the engine routes pushed effects ──────────────────────
@@ -130,17 +130,17 @@ pub struct EffectSink {
     /// Per-effect entries in arrival order.  Reused across ticks via `clear`.
     pub entries: thin_vec::ThinVec<EffectAbi>,
     /// Cue-troupe entries collected via `cue_troupe(api, troupe_id)`.
-    pub cues:    thin_vec::ThinVec<i64>,
+    pub cues: thin_vec::ThinVec<i64>,
     /// Last-observed tick counter (bumped by the engine before each tick).
-    pub tick:    AtomicU64,
+    pub tick: AtomicU64,
 }
 
 impl EffectSink {
     pub fn new() -> Self {
         EffectSink {
             entries: thin_vec::ThinVec::new(),
-            cues:    thin_vec::ThinVec::new(),
-            tick:    AtomicU64::new(0),
+            cues: thin_vec::ThinVec::new(),
+            tick: AtomicU64::new(0),
         }
     }
 
@@ -151,7 +151,9 @@ impl EffectSink {
 }
 
 impl Default for EffectSink {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // The C-ABI callbacks that scripts invoke through `EngineAPI`.  The opaque
@@ -161,7 +163,9 @@ impl Default for EffectSink {
 pub unsafe extern "C" fn cb_push_effect(api: *const EngineAPI, e: *const EffectAbi) {
     unsafe {
         let sink_ptr = (*api).caches[0].data as *mut EffectSink;
-        if sink_ptr.is_null() { return; }
+        if sink_ptr.is_null() {
+            return;
+        }
         (*sink_ptr).entries.push(EffectAbi {
             kind: (*e).kind,
             _pad: (*e)._pad,
@@ -174,7 +178,9 @@ pub unsafe extern "C" fn cb_push_effect(api: *const EngineAPI, e: *const EffectA
 pub unsafe extern "C" fn cb_cue_troupe(api: *const EngineAPI, troupe_id: i64) {
     unsafe {
         let sink_ptr = (*api).caches[0].data as *mut EffectSink;
-        if sink_ptr.is_null() { return; }
+        if sink_ptr.is_null() {
+            return;
+        }
         (*sink_ptr).cues.push(troupe_id);
     }
 }
@@ -188,26 +194,46 @@ pub unsafe extern "C" fn cb_cue_troupe(api: *const EngineAPI, troupe_id: i64) {
 /// field on the wire-level `EngineAPI` struct.
 pub fn engine_api_for_sink(sink: &mut EffectSink) -> EngineAPI {
     let mut caches = [
-        ComponentCacheSlice { data: core::ptr::null(), len: 0, _pad: 0 },
-        ComponentCacheSlice { data: core::ptr::null(), len: 0, _pad: 0 },
-        ComponentCacheSlice { data: core::ptr::null(), len: 0, _pad: 0 },
-        ComponentCacheSlice { data: core::ptr::null(), len: 0, _pad: 0 },
-        ComponentCacheSlice { data: core::ptr::null(), len: 0, _pad: 0 },
+        ComponentCacheSlice {
+            data: core::ptr::null(),
+            len: 0,
+            _pad: 0,
+        },
+        ComponentCacheSlice {
+            data: core::ptr::null(),
+            len: 0,
+            _pad: 0,
+        },
+        ComponentCacheSlice {
+            data: core::ptr::null(),
+            len: 0,
+            _pad: 0,
+        },
+        ComponentCacheSlice {
+            data: core::ptr::null(),
+            len: 0,
+            _pad: 0,
+        },
+        ComponentCacheSlice {
+            data: core::ptr::null(),
+            len: 0,
+            _pad: 0,
+        },
     ];
     caches[0].data = (sink as *mut EffectSink) as *const ActorHandlePacked;
 
     EngineAPI {
-        locals:      core::ptr::null_mut(),
-        worlds:      core::ptr::null(),
+        locals: core::ptr::null_mut(),
+        worlds: core::ptr::null(),
         dirty_flags: core::ptr::null_mut(),
         actor_count: 0,
-        _pad0:       0,
+        _pad0: 0,
         caches,
         push_effect: cb_push_effect,
-        cue_troupe:  cb_cue_troupe,
-        elapsed:     0.0,
-        _pad1:       0,
-        tick_count:  sink.tick.load(Ordering::Relaxed),
-        _pad2:       0,
+        cue_troupe: cb_cue_troupe,
+        elapsed: 0.0,
+        _pad1: 0,
+        tick_count: sink.tick.load(Ordering::Relaxed),
+        _pad2: 0,
     }
 }

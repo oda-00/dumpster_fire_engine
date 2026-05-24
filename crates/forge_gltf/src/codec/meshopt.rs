@@ -38,16 +38,16 @@ pub enum MeshoptFilter {
 /// * `stride` – byte stride of one element
 /// * `src`    – raw compressed bytes from the buffer view
 pub fn decompress_buffer_view(
-    mode:   MeshoptMode,
+    mode: MeshoptMode,
     filter: MeshoptFilter,
-    count:  usize,
+    count: usize,
     stride: usize,
-    src:    &[u8],
+    src: &[u8],
 ) -> GltfResult<ThinVec<u8>> {
     let mut out = match mode {
         MeshoptMode::Attributes => decode_vertex_buffer(src, count, stride)?,
-        MeshoptMode::Triangles  => decode_index_buffer_triangles(src, count, stride)?,
-        MeshoptMode::Indices    => decode_index_buffer_indices(src, count, stride)?,
+        MeshoptMode::Triangles => decode_index_buffer_triangles(src, count, stride)?,
+        MeshoptMode::Indices => decode_index_buffer_indices(src, count, stride)?,
     };
 
     apply_filter(filter, count, stride, &mut out)?;
@@ -133,12 +133,18 @@ pub fn decompress_buffer_view(
 const VERTEX_BLOCK_SIZE: usize = 16; // vertices per group
 const VERTEX_MAGIC: u8 = 0xa0;
 
-fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> GltfResult<ThinVec<u8>> {
+fn decode_vertex_buffer(
+    src: &[u8],
+    vertex_count: usize,
+    vertex_size: usize,
+) -> GltfResult<ThinVec<u8>> {
     if src.is_empty() {
         return Err(GltfError::InvalidAccessor("meshopt: empty vertex buffer"));
     }
     if src[0] != VERTEX_MAGIC {
-        return Err(GltfError::InvalidAccessor("meshopt: bad vertex codec magic"));
+        return Err(GltfError::InvalidAccessor(
+            "meshopt: bad vertex codec magic",
+        ));
     }
     if vertex_size == 0 {
         return Ok(ThinVec::new());
@@ -169,7 +175,9 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
 
         // Header: ceil(vertex_size/4) bytes packing 4 × 2-bit modes per byte.
         if pos + header_bytes_per_group > src.len() {
-            return Err(GltfError::InvalidAccessor("meshopt: vertex header truncated"));
+            return Err(GltfError::InvalidAccessor(
+                "meshopt: vertex header truncated",
+            ));
         }
         // Decode + dispatch per byte-position in this block. Mode is extracted
         // inline (no per-group scratch allocation).
@@ -178,7 +186,7 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
 
         for b in 0..vertex_size {
             let hbyte = unsafe { *src.get_unchecked(header_start + (b >> 2)) };
-            let mode  = (hbyte >> ((b & 3) * 2)) & 0x3;
+            let mode = (hbyte >> ((b & 3) * 2)) & 0x3;
             // Stripe destination: stripes[b * vertex_count + block_start ..].
             let dst_base = b * vertex_count + block_start;
             match mode {
@@ -187,22 +195,28 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
                 }
                 1 => {
                     if pos >= src.len() {
-                        return Err(GltfError::InvalidAccessor("meshopt: vertex data truncated (mode 1)"));
+                        return Err(GltfError::InvalidAccessor(
+                            "meshopt: vertex data truncated (mode 1)",
+                        ));
                     }
                     let k = unsafe { *src.get_unchecked(pos) };
                     pos += 1;
                     let z = decode_zigzag8(k);
                     // Sequential write of `block_verts` bytes.
-                    let dst = &mut stripes[dst_base .. dst_base + block_verts];
-                    for slot in dst.iter_mut() { *slot = z; }
+                    let dst = &mut stripes[dst_base..dst_base + block_verts];
+                    for slot in dst.iter_mut() {
+                        *slot = z;
+                    }
                 }
                 2 => {
                     if pos + VERTEX_BLOCK_SIZE > src.len() {
-                        return Err(GltfError::InvalidAccessor("meshopt: vertex data truncated (mode 2)"));
+                        return Err(GltfError::InvalidAccessor(
+                            "meshopt: vertex data truncated (mode 2)",
+                        ));
                     }
-                    let src_block = unsafe { src.get_unchecked(pos .. pos + VERTEX_BLOCK_SIZE) };
+                    let src_block = unsafe { src.get_unchecked(pos..pos + VERTEX_BLOCK_SIZE) };
                     pos += VERTEX_BLOCK_SIZE;
-                    let dst = &mut stripes[dst_base .. dst_base + block_verts];
+                    let dst = &mut stripes[dst_base..dst_base + block_verts];
                     // Zigzag-decode the literal block into the stripe.
                     for (i, slot) in dst.iter_mut().enumerate() {
                         *slot = decode_zigzag8(src_block[i]);
@@ -219,7 +233,9 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
                     //   using SIMD.  For a scalar decoder we just read them
                     //   sequentially.
                     if pos + VERTEX_BLOCK_SIZE > src.len() {
-                        return Err(GltfError::InvalidAccessor("meshopt: vertex data truncated (mode 3)"));
+                        return Err(GltfError::InvalidAccessor(
+                            "meshopt: vertex data truncated (mode 3)",
+                        ));
                     }
                     // The reference decoder reads 16 bytes and then un-shuffles
                     // with a byte-deinterleave.  The shuffle pattern groups
@@ -289,11 +305,13 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
                     // Rather than guess, implement mode 3 as: read 16 zigzag
                     // bytes with nibble-deinterleave:
                     if pos + VERTEX_BLOCK_SIZE > src.len() {
-                        return Err(GltfError::InvalidAccessor("meshopt: vertex data truncated (mode 3)"));
+                        return Err(GltfError::InvalidAccessor(
+                            "meshopt: vertex data truncated (mode 3)",
+                        ));
                     }
-                    let raw = unsafe { src.get_unchecked(pos .. pos + VERTEX_BLOCK_SIZE) };
+                    let raw = unsafe { src.get_unchecked(pos..pos + VERTEX_BLOCK_SIZE) };
                     pos += VERTEX_BLOCK_SIZE;
-                    let dst = &mut stripes[dst_base .. dst_base + block_verts];
+                    let dst = &mut stripes[dst_base..dst_base + block_verts];
                     for (v, slot) in dst.iter_mut().enumerate() {
                         let lo_idx = v >> 1;
                         let hi_idx = 8 + (v >> 1);
@@ -315,7 +333,7 @@ fn decode_vertex_buffer(src: &[u8], vertex_count: usize, vertex_size: usize) -> 
     // stripe stays hot in L1. SIMD-vectorised on x86_64 (SSE2) and aarch64
     // (NEON) with a scalar fallback for everything else.
     for b in 0..vertex_size {
-        let stripe = &mut stripes[b * vertex_count .. (b + 1) * vertex_count];
+        let stripe = &mut stripes[b * vertex_count..(b + 1) * vertex_count];
         prefix_sum_u8(stripe);
     }
 
@@ -362,7 +380,6 @@ fn prefix_sum_u8(data: &mut [u8]) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         prefix_sum_u8_sse2(data);
-        return;
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -501,18 +518,26 @@ const INDEX_MAGIC_TRIANGLES: u8 = 0xe0;
 const EDGE_FIFO_SIZE: usize = 16;
 const VERTEX_FIFO_SIZE: usize = 16;
 
-fn decode_index_buffer_triangles(src: &[u8], index_count: usize, index_stride: usize) -> GltfResult<ThinVec<u8>> {
+fn decode_index_buffer_triangles(
+    src: &[u8],
+    index_count: usize,
+    index_stride: usize,
+) -> GltfResult<ThinVec<u8>> {
     if src.is_empty() {
         return Err(GltfError::InvalidAccessor("meshopt: empty index buffer"));
     }
     if src[0] != INDEX_MAGIC_TRIANGLES {
         return Err(GltfError::InvalidAccessor("meshopt: bad index codec magic"));
     }
-    if index_count % 3 != 0 {
-        return Err(GltfError::InvalidAccessor("meshopt: triangle count not divisible by 3"));
+    if !index_count.is_multiple_of(3) {
+        return Err(GltfError::InvalidAccessor(
+            "meshopt: triangle count not divisible by 3",
+        ));
     }
     if index_stride != 2 && index_stride != 4 {
-        return Err(GltfError::InvalidAccessor("meshopt: index stride must be 2 or 4"));
+        return Err(GltfError::InvalidAccessor(
+            "meshopt: index stride must be 2 or 4",
+        ));
     }
 
     let triangle_count = index_count / 3;
@@ -551,7 +576,9 @@ fn decode_index_buffer_triangles(src: &[u8], index_count: usize, index_stride: u
     // Locate the boundary between code stream and codeaux stream.
     // Code stream is exactly triangle_count bytes (after the magic byte).
     if 1 + triangle_count > src.len() {
-        return Err(GltfError::InvalidAccessor("meshopt: index buffer too short for code stream"));
+        return Err(GltfError::InvalidAccessor(
+            "meshopt: index buffer too short for code stream",
+        ));
     }
     let code_start = 1usize;
     let codeaux_start = code_start + triangle_count;
@@ -592,7 +619,9 @@ fn decode_index_buffer_triangles(src: &[u8], index_count: usize, index_stride: u
     macro_rules! read_new_vertex {
         ($last_ref:expr) => {{
             if codeaux_pos >= codeaux.len() {
-                return Err(GltfError::InvalidAccessor("meshopt: codeaux stream truncated"));
+                return Err(GltfError::InvalidAccessor(
+                    "meshopt: codeaux stream truncated",
+                ));
             }
             let ca = codeaux[codeaux_pos];
             codeaux_pos += 1;
@@ -617,8 +646,7 @@ fn decode_index_buffer_triangles(src: &[u8], index_count: usize, index_stride: u
         }};
     }
 
-    for t in 0..triangle_count {
-        let code = codes[t];
+    for (t, &code) in codes[..triangle_count].iter().enumerate() {
         let fe = (code >> 4) as usize;
         let fb = (code & 0xf) as usize;
 
@@ -642,7 +670,7 @@ fn decode_index_buffer_triangles(src: &[u8], index_count: usize, index_stride: u
         let c = read_new_vertex!(next_vertex);
 
         // Emit triangle (a, b, c)
-        write_index(&mut out, t * 3 + 0, a, index_stride);
+        write_index(&mut out, t * 3, a, index_stride);
         write_index(&mut out, t * 3 + 1, b, index_stride);
         write_index(&mut out, t * 3 + 2, c, index_stride);
 
@@ -669,12 +697,12 @@ fn write_index(out: &mut ThinVec<u8>, idx: usize, value: u32, stride: usize) {
     match stride {
         2 => {
             let bytes = (value as u16).to_le_bytes();
-            out[byte_offset]     = bytes[0];
+            out[byte_offset] = bytes[0];
             out[byte_offset + 1] = bytes[1];
         }
         4 => {
             let bytes = value.to_le_bytes();
-            out[byte_offset]     = bytes[0];
+            out[byte_offset] = bytes[0];
             out[byte_offset + 1] = bytes[1];
             out[byte_offset + 2] = bytes[2];
             out[byte_offset + 3] = bytes[3];
@@ -690,7 +718,11 @@ fn write_index(out: &mut ThinVec<u8>, idx: usize, value: u32, stride: usize) {
 
 const INDEX_MAGIC_INDICES: u8 = 0xe1;
 
-fn decode_index_buffer_indices(src: &[u8], index_count: usize, index_stride: usize) -> GltfResult<ThinVec<u8>> {
+fn decode_index_buffer_indices(
+    src: &[u8],
+    index_count: usize,
+    index_stride: usize,
+) -> GltfResult<ThinVec<u8>> {
     if src.is_empty() {
         return Err(GltfError::InvalidAccessor("meshopt: empty index buffer"));
     }
@@ -709,7 +741,9 @@ fn decode_index_buffer_indices(src: &[u8], index_count: usize, index_stride: usi
     //   else:           new vertex via codeaux byte
 
     if index_stride != 2 && index_stride != 4 {
-        return Err(GltfError::InvalidAccessor("meshopt: index stride must be 2 or 4"));
+        return Err(GltfError::InvalidAccessor(
+            "meshopt: index stride must be 2 or 4",
+        ));
     }
 
     let total_bytes = index_count * index_stride;
@@ -721,7 +755,9 @@ fn decode_index_buffer_indices(src: &[u8], index_count: usize, index_stride: usi
     }
 
     if 1 + index_count > src.len() {
-        return Err(GltfError::InvalidAccessor("meshopt: index buffer too short"));
+        return Err(GltfError::InvalidAccessor(
+            "meshopt: index buffer too short",
+        ));
     }
 
     let codes = &src[1..1 + index_count];
@@ -732,8 +768,7 @@ fn decode_index_buffer_indices(src: &[u8], index_count: usize, index_stride: usi
     let mut next_vertex: u32 = 0;
     let mut codeaux_pos = 0usize;
 
-    for i in 0..index_count {
-        let code = codes[i];
+    for (i, &code) in codes[..index_count].iter().enumerate() {
         let fifo_idx = (code >> 4) as usize;
 
         let v = if fifo_idx < VERTEX_FIFO_SIZE {
@@ -741,7 +776,9 @@ fn decode_index_buffer_indices(src: &[u8], index_count: usize, index_stride: usi
         } else {
             // Read from codeaux
             if codeaux_pos >= codeaux.len() {
-                return Err(GltfError::InvalidAccessor("meshopt: codeaux stream truncated"));
+                return Err(GltfError::InvalidAccessor(
+                    "meshopt: codeaux stream truncated",
+                ));
             }
             let ca = codeaux[codeaux_pos];
             codeaux_pos += 1;
@@ -769,11 +806,16 @@ fn decode_index_buffer_indices(src: &[u8], index_count: usize, index_stride: usi
 
 // ─── Post-decode filters ──────────────────────────────────────────────────────
 
-fn apply_filter(filter: MeshoptFilter, count: usize, stride: usize, data: &mut ThinVec<u8>) -> GltfResult<()> {
+fn apply_filter(
+    filter: MeshoptFilter,
+    count: usize,
+    stride: usize,
+    data: &mut ThinVec<u8>,
+) -> GltfResult<()> {
     match filter {
         MeshoptFilter::None => Ok(()),
-        MeshoptFilter::Octahedral  => apply_filter_oct(count, stride, data),
-        MeshoptFilter::Quaternion  => apply_filter_quat(count, stride, data),
+        MeshoptFilter::Octahedral => apply_filter_oct(count, stride, data),
+        MeshoptFilter::Quaternion => apply_filter_quat(count, stride, data),
         MeshoptFilter::Exponential => apply_filter_exp(count, stride, data),
     }
 }
@@ -789,7 +831,9 @@ fn apply_filter(filter: MeshoptFilter, count: usize, stride: usize, data: &mut T
 
 fn apply_filter_oct(count: usize, stride: usize, data: &mut ThinVec<u8>) -> GltfResult<()> {
     if stride != 4 && stride != 8 {
-        return Err(GltfError::InvalidAccessor("meshopt oct filter: stride must be 4 or 8"));
+        return Err(GltfError::InvalidAccessor(
+            "meshopt oct filter: stride must be 4 or 8",
+        ));
     }
 
     let out_stride = if stride == 4 { 12usize } else { 16usize };
@@ -798,12 +842,12 @@ fn apply_filter_oct(count: usize, stride: usize, data: &mut ThinVec<u8>) -> Gltf
     for i in 0..count {
         let base = i * stride;
         let (nx, ny) = if stride == 4 {
-            let x = data[base]     as i8;
+            let x = data[base] as i8;
             let y = data[base + 1] as i8;
             (x as f32, y as f32)
         } else {
             // i16, little-endian
-            let x = i16::from_le_bytes([data[base],     data[base + 1]]) as f32;
+            let x = i16::from_le_bytes([data[base], data[base + 1]]) as f32;
             let y = i16::from_le_bytes([data[base + 2], data[base + 3]]) as f32;
             (x, y)
         };
@@ -831,11 +875,19 @@ fn apply_filter_oct(count: usize, stride: usize, data: &mut ThinVec<u8>) -> Gltf
         let fz = fz / len;
 
         let _ = max_val; // used for scale selection only
-        for b in fx.to_le_bytes() { result.push(b); }
-        for b in fy.to_le_bytes() { result.push(b); }
-        for b in fz.to_le_bytes() { result.push(b); }
+        for b in fx.to_le_bytes() {
+            result.push(b);
+        }
+        for b in fy.to_le_bytes() {
+            result.push(b);
+        }
+        for b in fz.to_le_bytes() {
+            result.push(b);
+        }
         if out_stride == 16 {
-            for b in 0.0f32.to_le_bytes() { result.push(b); }
+            for b in 0.0f32.to_le_bytes() {
+                result.push(b);
+            }
         }
     }
 
@@ -857,7 +909,9 @@ fn sign_f32(v: f32) -> f32 {
 
 fn apply_filter_quat(count: usize, stride: usize, data: &mut ThinVec<u8>) -> GltfResult<()> {
     if stride != 8 {
-        return Err(GltfError::InvalidAccessor("meshopt quat filter: stride must be 8"));
+        return Err(GltfError::InvalidAccessor(
+            "meshopt quat filter: stride must be 8",
+        ));
     }
 
     let out_stride = 16usize;
@@ -924,15 +978,37 @@ fn apply_filter_quat(count: usize, stride: usize, data: &mut ThinVec<u8>) -> Glt
 
         let mut q = [0.0f32; 4];
         match max_comp_from_s3 {
-            0 => { q[0] = d; q[1] = a; q[2] = b; q[3] = c; }
-            1 => { q[0] = a; q[1] = d; q[2] = b; q[3] = c; }
-            2 => { q[0] = a; q[1] = b; q[2] = d; q[3] = c; }
-            _ => { q[0] = a; q[1] = b; q[2] = c; q[3] = d; }
+            0 => {
+                q[0] = d;
+                q[1] = a;
+                q[2] = b;
+                q[3] = c;
+            }
+            1 => {
+                q[0] = a;
+                q[1] = d;
+                q[2] = b;
+                q[3] = c;
+            }
+            2 => {
+                q[0] = a;
+                q[1] = b;
+                q[2] = d;
+                q[3] = c;
+            }
+            _ => {
+                q[0] = a;
+                q[1] = b;
+                q[2] = c;
+                q[3] = d;
+            }
         }
 
         let _ = max_comp;
         for comp in q {
-            for byte in comp.to_le_bytes() { result.push(byte); }
+            for byte in comp.to_le_bytes() {
+                result.push(byte);
+            }
         }
     }
 
@@ -951,8 +1027,10 @@ fn apply_filter_quat(count: usize, stride: usize, data: &mut ThinVec<u8>) -> Glt
 // shared across all components of a vertex (stored once per vertex).
 
 fn apply_filter_exp(count: usize, stride: usize, data: &mut ThinVec<u8>) -> GltfResult<()> {
-    if stride % 4 != 0 {
-        return Err(GltfError::InvalidAccessor("meshopt exp filter: stride must be a multiple of 4"));
+    if !stride.is_multiple_of(4) {
+        return Err(GltfError::InvalidAccessor(
+            "meshopt exp filter: stride must be a multiple of 4",
+        ));
     }
 
     let components = stride / 4;
@@ -963,7 +1041,9 @@ fn apply_filter_exp(count: usize, stride: usize, data: &mut ThinVec<u8>) -> Gltf
         for c in 0..components {
             let off = base + c * 4;
             if off + 4 > data.len() {
-                return Err(GltfError::InvalidAccessor("meshopt exp filter: data too short"));
+                return Err(GltfError::InvalidAccessor(
+                    "meshopt exp filter: data too short",
+                ));
             }
             // Each 4-byte group: interpret as a packed (exponent, mantissa) value.
             // The stored bytes after delta decoding are signed 32-bit integers.
@@ -977,9 +1057,11 @@ fn apply_filter_exp(count: usize, stride: usize, data: &mut ThinVec<u8>) -> Gltf
             // encoding used during compression, not the output format.
             //
             // After delta decoding the stored integers are f32 bit patterns.
-            let word = u32::from_le_bytes([data[off], data[off+1], data[off+2], data[off+3]]);
+            let word = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
             let f = f32::from_bits(word);
-            for byte in f.to_le_bytes() { result.push(byte); }
+            for byte in f.to_le_bytes() {
+                result.push(byte);
+            }
         }
     }
 
@@ -1071,8 +1153,9 @@ mod tests {
     fn decompress_buffer_view_attributes_empty_count() {
         // zero vertex count → empty output regardless of filter
         let src = vec![VERTEX_MAGIC];
-        let result = decompress_buffer_view(MeshoptMode::Attributes, MeshoptFilter::None, 0, 4, &src)
-            .expect("decode zero vertices");
+        let result =
+            decompress_buffer_view(MeshoptMode::Attributes, MeshoptFilter::None, 0, 4, &src)
+                .expect("decode zero vertices");
         assert_eq!(result.len(), 0);
     }
 }

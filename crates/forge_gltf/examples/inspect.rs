@@ -17,8 +17,12 @@ fn main() {
             Ok(a) => {
                 println!(
                     "  nodes={} meshes={} skins={} anims={} materials={} lights={}",
-                    a.nodes.len(), a.meshes.len(), a.skins.len(),
-                    a.animations.len(), a.materials.len(), a.lights.len()
+                    a.nodes.len(),
+                    a.meshes.len(),
+                    a.skins.len(),
+                    a.animations.len(),
+                    a.materials.len(),
+                    a.lights.len()
                 );
                 for (i, anim) in a.animations.iter().enumerate() {
                     println!(
@@ -34,14 +38,18 @@ fn main() {
                 }
                 for (i, m) in a.materials.iter().enumerate().take(4) {
                     let exts: Vec<&str> = [
-                        ("clearcoat",   m.clearcoat.is_some()),
-                        ("sheen",       m.sheen.is_some()),
-                        ("specular",    m.specular.is_some()),
+                        ("clearcoat", m.clearcoat.is_some()),
+                        ("sheen", m.sheen.is_some()),
+                        ("specular", m.specular.is_some()),
                         ("iridescence", m.iridescence.is_some()),
-                        ("anisotropy",  m.anisotropy.is_some()),
-                        ("diff_trans",  m.diffuse_transmission.is_some()),
-                        ("dispersion",  m.dispersion > 0.0),
-                    ].iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect();
+                        ("anisotropy", m.anisotropy.is_some()),
+                        ("diff_trans", m.diffuse_transmission.is_some()),
+                        ("dispersion", m.dispersion > 0.0),
+                    ]
+                    .iter()
+                    .filter(|(_, on)| *on)
+                    .map(|(n, _)| *n)
+                    .collect();
                     println!(
                         "  mat{i} '{}': trans={:.2} thick={:.2} ior={} exts={exts:?}",
                         m.name.as_deref().unwrap_or(""),

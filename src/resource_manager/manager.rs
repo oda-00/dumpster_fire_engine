@@ -1,12 +1,12 @@
+use super::component::{Component, ComponentType};
+use glam::Affine3A;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
-use glam::Affine3A;
 use thin_vec::ThinVec;
-use super::component::{Component, ComponentType};
 
 // ── Generational handle ─────────────────────────────────────────────────────
 //
@@ -21,9 +21,12 @@ pub struct Handle<Tag> {
 }
 
 // Arena tag types — plain ZSTs, no data, no circular imports.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)] pub struct LevelTag;
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)] pub struct StageTag;
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)] pub struct ActorTag;
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct LevelTag;
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct StageTag;
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct ActorTag;
 
 pub type LevelHandle = Handle<LevelTag>;
 pub type StageHandle = Handle<StageTag>;
@@ -38,61 +41,97 @@ struct Slot<T> {
 
 pub struct Arena<Tag, T> {
     slots: Vec<Slot<T>>,
-    free:  ThinVec<u32>,
-    _tag:  PhantomData<fn() -> Tag>,
+    free: ThinVec<u32>,
+    _tag: PhantomData<fn() -> Tag>,
 }
 
 impl<Tag, T> Arena<Tag, T> {
     pub fn new() -> Self {
-        Self { slots: Vec::new(), free: ThinVec::new(), _tag: PhantomData }
+        Self {
+            slots: Vec::new(),
+            free: ThinVec::new(),
+            _tag: PhantomData,
+        }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self { slots: Vec::with_capacity(cap), free: ThinVec::new(), _tag: PhantomData }
+        Self {
+            slots: Vec::with_capacity(cap),
+            free: ThinVec::new(),
+            _tag: PhantomData,
+        }
     }
 
     pub fn insert(&mut self, val: T) -> Handle<Tag> {
         if let Some(idx) = self.free.pop() {
             // Reuse a freed slot; generation was already incremented on removal.
             self.slots[idx as usize].val = Some(val);
-            Handle { idx, generation: self.slots[idx as usize].generation, _tag: PhantomData }
+            Handle {
+                idx,
+                generation: self.slots[idx as usize].generation,
+                _tag: PhantomData,
+            }
         } else {
             let idx = self.slots.len() as u32;
             let generation = NonZeroU32::new(1).unwrap();
-            self.slots.push(Slot { generation, val: Some(val) });
-            Handle { idx, generation, _tag: PhantomData }
+            self.slots.push(Slot {
+                generation,
+                val: Some(val),
+            });
+            Handle {
+                idx,
+                generation,
+                _tag: PhantomData,
+            }
         }
     }
     pub fn len(&self) -> usize {
         self.slots.len() - self.free.len()
     }
-    
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn remove(&mut self, h: Handle<Tag>) -> Option<T> {
         let slot = self.slots.get_mut(h.idx as usize)?;
-        if slot.generation != h.generation { return None; }
+        if slot.generation != h.generation {
+            return None;
+        }
         let val = slot.val.take()?;
         // Increment generation so any surviving copies of h are now stale.
         // On overflow we wrap to NonZeroU32::MIN+1 (=2) so we never collide with
         // the initial generation of fresh slots (=1) — preserves the invariant
         // that stale handles never validate, even after 2^32 remove cycles.
-        slot.generation = slot.generation.checked_add(1).unwrap_or_else(|| {
-            NonZeroU32::new(2).expect("2 is non-zero")
-        });
+        slot.generation = slot
+            .generation
+            .checked_add(1)
+            .unwrap_or_else(|| NonZeroU32::new(2).expect("2 is non-zero"));
         self.free.push(h.idx);
         Some(val)
     }
 
     pub fn get(&self, h: Handle<Tag>) -> Option<&T> {
         let slot = self.slots.get(h.idx as usize)?;
-        if slot.generation == h.generation { slot.val.as_ref() } else { None }
+        if slot.generation == h.generation {
+            slot.val.as_ref()
+        } else {
+            None
+        }
     }
 
     pub fn get_mut(&mut self, h: Handle<Tag>) -> Option<&mut T> {
         let slot = self.slots.get_mut(h.idx as usize)?;
-        if slot.generation == h.generation { slot.val.as_mut() } else { None }
+        if slot.generation == h.generation {
+            slot.val.as_mut()
+        } else {
+            None
+        }
     }
 
-    pub fn contains(&self, h: Handle<Tag>) -> bool { self.get(h).is_some() }
+    pub fn contains(&self, h: Handle<Tag>) -> bool {
+        self.get(h).is_some()
+    }
 
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.slots.iter().filter_map(|s| s.val.as_ref())
@@ -108,10 +147,16 @@ impl<Tag, T> Arena<Tag, T> {
     /// `WindowId` → `AppHandle` without keeping a parallel cache.
     pub fn entries(&self) -> impl Iterator<Item = (Handle<Tag>, &T)> {
         self.slots.iter().enumerate().filter_map(|(idx, s)| {
-            s.val.as_ref().map(|v| (
-                Handle { idx: idx as u32, generation: s.generation, _tag: PhantomData },
-                v,
-            ))
+            s.val.as_ref().map(|v| {
+                (
+                    Handle {
+                        idx: idx as u32,
+                        generation: s.generation,
+                        _tag: PhantomData,
+                    },
+                    v,
+                )
+            })
         })
     }
 }
@@ -130,7 +175,9 @@ impl<Tag, T> IndexMut<Handle<Tag>> for Arena<Tag, T> {
 }
 
 impl<Tag, T> Default for Arena<Tag, T> {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Typed database IDs ──────────────────────────────────────────────────────
@@ -138,19 +185,45 @@ impl<Tag, T> Default for Arena<Tag, T> {
 pub struct Id<T>(pub i64, PhantomData<fn() -> T>);
 
 impl<T> Id<T> {
-    pub const fn new(raw: i64) -> Self { Self(raw, PhantomData) }
-    pub const fn raw(&self) -> i64 { self.0 }
+    pub const fn new(raw: i64) -> Self {
+        Self(raw, PhantomData)
+    }
+    pub const fn raw(&self) -> i64 {
+        self.0
+    }
 }
 
 impl<T> Copy for Id<T> {}
-impl<T> Clone for Id<T> { fn clone(&self) -> Self { *self } }
-impl<T> PartialEq for Id<T> { fn eq(&self, o: &Self) -> bool { self.0 == o.0 } }
+impl<T> Clone for Id<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> PartialEq for Id<T> {
+    fn eq(&self, o: &Self) -> bool {
+        self.0 == o.0
+    }
+}
 impl<T> Eq for Id<T> {}
-impl<T> PartialOrd for Id<T> { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) } }
-impl<T> Ord for Id<T> { fn cmp(&self, o: &Self) -> std::cmp::Ordering { self.0.cmp(&o.0) } }
-impl<T> Hash for Id<T> { fn hash<H: Hasher>(&self, h: &mut H) { self.0.hash(h) } }
+impl<T> PartialOrd for Id<T> {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl<T> Ord for Id<T> {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&o.0)
+    }
+}
+impl<T> Hash for Id<T> {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.0.hash(h)
+    }
+}
 impl<T> fmt::Debug for Id<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "Id({})", self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Id({})", self.0)
+    }
 }
 
 pub struct ActorMarker;
@@ -159,11 +232,11 @@ pub struct EnvironmentMarker;
 pub struct ItemMarker;
 pub struct UtilityMarker;
 
-pub type ActorId       = Id<ActorMarker>;
-pub type CharacterId   = Id<CharacterMarker>;
+pub type ActorId = Id<ActorMarker>;
+pub type CharacterId = Id<CharacterMarker>;
 pub type EnvironmentId = Id<EnvironmentMarker>;
-pub type ItemId        = Id<ItemMarker>;
-pub type UtilityId     = Id<UtilityMarker>;
+pub type ItemId = Id<ItemMarker>;
+pub type UtilityId = Id<UtilityMarker>;
 
 // ── SubtypeId ───────────────────────────────────────────────────────────────
 
@@ -179,10 +252,10 @@ impl SubtypeId {
     /// Maps variant to a slot index in Actor::sub_entities (matches ActorType::index).
     pub fn variant_idx(&self) -> usize {
         match self {
-            SubtypeId::Character(_)   => 0,
+            SubtypeId::Character(_) => 0,
             SubtypeId::Environment(_) => 1,
-            SubtypeId::Item(_)        => 2,
-            SubtypeId::Utility(_)     => 3,
+            SubtypeId::Item(_) => 2,
+            SubtypeId::Utility(_) => 3,
         }
     }
 }
@@ -191,17 +264,17 @@ impl SubtypeId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActorAddress {
-    pub actor:   ActorId,
+    pub actor: ActorId,
     pub subtype: SubtypeId,
 }
 
 impl fmt::Display for ActorAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let subtype_raw = match self.subtype {
-            SubtypeId::Character(id)   => id.raw(),
+            SubtypeId::Character(id) => id.raw(),
             SubtypeId::Environment(id) => id.raw(),
-            SubtypeId::Item(id)        => id.raw(),
-            SubtypeId::Utility(id)     => id.raw(),
+            SubtypeId::Item(id) => id.raw(),
+            SubtypeId::Utility(id) => id.raw(),
         };
         write!(f, "{}.{}", self.actor.raw(), subtype_raw)
     }
@@ -210,39 +283,39 @@ impl fmt::Display for ActorAddress {
 // ── Actor sub-type data ─────────────────────────────────────────────────────
 
 pub struct Character {
-    pub id:       CharacterId,
-    pub name:     Arc<str>,
-    pub visible:  bool,
+    pub id: CharacterId,
+    pub name: Arc<str>,
+    pub visible: bool,
     pub physical: bool,
     pub playable: bool,
-    pub mesh:     Option<crate::resource_manager::component::MeshRef>,
+    pub mesh: Option<crate::resource_manager::component::MeshRef>,
 }
 
 pub struct Environment {
-    pub id:       EnvironmentId,
-    pub name:     Arc<str>,
-    pub visible:  bool,
+    pub id: EnvironmentId,
+    pub name: Arc<str>,
+    pub visible: bool,
     pub physical: bool,
-    pub mesh:     Option<crate::resource_manager::component::MeshRef>,
+    pub mesh: Option<crate::resource_manager::component::MeshRef>,
 }
 
 pub struct Item {
-    pub id:          ItemId,
-    pub name:        Arc<str>,
-    pub quantity:    (u32, u32, u32), // (current, max, stack_size)
+    pub id: ItemId,
+    pub name: Arc<str>,
+    pub quantity: (u32, u32, u32), // (current, max, stack_size)
     pub description: Arc<str>,
-    pub stackable:   bool,
-    pub visible:     bool,
-    pub physical:    bool,
-    pub mesh:        Option<crate::resource_manager::component::MeshRef>,
+    pub stackable: bool,
+    pub visible: bool,
+    pub physical: bool,
+    pub mesh: Option<crate::resource_manager::component::MeshRef>,
 }
 
 pub struct Utility {
-    pub id:      UtilityId,
-    pub name:    Arc<str>,
+    pub id: UtilityId,
+    pub name: Arc<str>,
     pub visible: bool,
-    pub toggle:  bool,
-    pub mesh:    Option<crate::resource_manager::component::MeshRef>,
+    pub toggle: bool,
+    pub mesh: Option<crate::resource_manager::component::MeshRef>,
 }
 
 pub enum ActorType {
@@ -258,28 +331,28 @@ impl ActorType {
     /// Index into Actor::sub_entities for this variant (0–3).
     pub fn index(&self) -> usize {
         match self {
-            ActorType::Character(_)   => 0,
+            ActorType::Character(_) => 0,
             ActorType::Environment(_) => 1,
-            ActorType::Item(_)        => 2,
-            ActorType::Utility(_)     => 3,
+            ActorType::Item(_) => 2,
+            ActorType::Utility(_) => 3,
         }
     }
 
     pub fn subtype_id(&self) -> SubtypeId {
         match self {
-            ActorType::Character(c)   => SubtypeId::Character(c.id),
+            ActorType::Character(c) => SubtypeId::Character(c.id),
             ActorType::Environment(e) => SubtypeId::Environment(e.id),
-            ActorType::Item(i)        => SubtypeId::Item(i.id),
-            ActorType::Utility(u)     => SubtypeId::Utility(u.id),
+            ActorType::Item(i) => SubtypeId::Item(i.id),
+            ActorType::Utility(u) => SubtypeId::Utility(u.id),
         }
     }
 
     pub fn name(&self) -> &str {
         match self {
-            ActorType::Character(c)   => &c.name,
+            ActorType::Character(c) => &c.name,
             ActorType::Environment(e) => &e.name,
-            ActorType::Item(i)        => &i.name,
-            ActorType::Utility(u)     => &u.name,
+            ActorType::Item(i) => &i.name,
+            ActorType::Utility(u) => &u.name,
         }
     }
 
@@ -290,10 +363,10 @@ impl ActorType {
         &self,
     ) -> (bool, Option<crate::resource_manager::component::MeshRef>) {
         match self {
-            ActorType::Character(c)   => (c.visible, c.mesh),
+            ActorType::Character(c) => (c.visible, c.mesh),
             ActorType::Environment(e) => (e.visible, e.mesh),
-            ActorType::Item(i)        => (i.visible, i.mesh),
-            ActorType::Utility(u)     => (u.visible, u.mesh),
+            ActorType::Item(i) => (i.visible, i.mesh),
+            ActorType::Utility(u) => (u.visible, u.mesh),
         }
     }
 }
@@ -305,15 +378,19 @@ impl ActorType {
 
 pub struct SubEntity {
     pub actor_type: ActorType,
-    pub local:      Affine3A,
-    pub world:      Affine3A,
-    pub dirty:      bool,
+    pub local: Affine3A,
+    pub world: Affine3A,
+    pub dirty: bool,
     pub components: [Option<Component>; ComponentType::COUNT],
 }
 
 impl SubEntity {
-    pub fn sub_entity_id(&self) -> SubtypeId { self.actor_type.subtype_id() }
-    pub fn name(&self) -> &str { self.actor_type.name() }
+    pub fn sub_entity_id(&self) -> SubtypeId {
+        self.actor_type.subtype_id()
+    }
+    pub fn name(&self) -> &str {
+        self.actor_type.name()
+    }
 
     pub fn add_component(&mut self, comp: Component) {
         let idx = comp.component_type().index();
@@ -350,6 +427,6 @@ impl SubEntity {
 // Actor cache lines (which include the heavy `sub_entities` array).
 
 pub struct Actor {
-    pub id:           ActorId,
+    pub id: ActorId,
     pub sub_entities: [Option<SubEntity>; ActorType::COUNT],
 }

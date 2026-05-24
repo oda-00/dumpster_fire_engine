@@ -53,7 +53,7 @@
 //! ```
 
 #![allow(dead_code)] // a handful of layout constants documented for the ABI but
-                     // not consumed by the codegen yet (caches[], padding offsets).
+// not consumed by the codegen yet (caches[], padding offsets).
 
 /// ABI contract version.  Bump whenever the `EngineAPI` layout changes.
 /// The engine validates this at load time before calling any entry point.
@@ -62,27 +62,27 @@ pub const ENGINE_ABI_VERSION: u32 = 1;
 pub const N_COMPONENT_TYPES: usize = 5;
 
 pub const COMPONENT_CACHE_SLICE_SIZE: u32 = 16;
-pub const ENGINE_API_SIZE:            u32 = 152;
-pub const EFFECT_ABI_SIZE:            u32 = 24;
-pub const SCENE_ENTRY_SIZE:           u32 = 32;
-pub const SCENE_DEF_ARRAY_SIZE:       u32 = 16;
+pub const ENGINE_API_SIZE: u32 = 152;
+pub const EFFECT_ABI_SIZE: u32 = 24;
+pub const SCENE_ENTRY_SIZE: u32 = 32;
+pub const SCENE_DEF_ARRAY_SIZE: u32 = 16;
 
 // Engine-API field byte offsets (used by codegen for pointer arithmetic).
-pub const API_OFF_LOCALS:      u32 = 0;
-pub const API_OFF_WORLDS:      u32 = 8;
-pub const API_OFF_DIRTY:       u32 = 16;
+pub const API_OFF_LOCALS: u32 = 0;
+pub const API_OFF_WORLDS: u32 = 8;
+pub const API_OFF_DIRTY: u32 = 16;
 pub const API_OFF_ACTOR_COUNT: u32 = 24;
-pub const API_OFF_CACHES:      u32 = 32;
+pub const API_OFF_CACHES: u32 = 32;
 pub const API_OFF_PUSH_EFFECT: u32 = 112;
-pub const API_OFF_CUE_TROUPE:  u32 = 120;
-pub const API_OFF_ELAPSED:     u32 = 128;
-pub const API_OFF_TICK_COUNT:  u32 = 136;
+pub const API_OFF_CUE_TROUPE: u32 = 120;
+pub const API_OFF_ELAPSED: u32 = 128;
+pub const API_OFF_TICK_COUNT: u32 = 136;
 
 // EffectAbi kinds.  Stable, plan-aligned.
-pub const EFFECT_KIND_NOP:          u8 = 0;
-pub const EFFECT_KIND_EMIT_EVENT:   u8 = 1;
-pub const EFFECT_KIND_ATTACK:       u8 = 2;
-pub const EFFECT_KIND_PATROL_PATH:  u8 = 3;
+pub const EFFECT_KIND_NOP: u8 = 0;
+pub const EFFECT_KIND_EMIT_EVENT: u8 = 1;
+pub const EFFECT_KIND_ATTACK: u8 = 2;
+pub const EFFECT_KIND_PATROL_PATH: u8 = 3;
 
 // BtStatus return values (matches engine BtStatus enum order:
 //   0 = Running, 1 = Success, 2 = Failure).

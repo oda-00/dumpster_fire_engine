@@ -43,7 +43,11 @@ impl Ingot {
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
     ) -> ForgeResult<Self> {
         match spec {
-            IngotSpec::Buffer { size, save_path, extra_usage } => {
+            IngotSpec::Buffer {
+                size,
+                save_path,
+                extra_usage,
+            } => {
                 let size = non_zero_size(*size);
                 let usage = vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_SRC
@@ -131,6 +135,9 @@ impl Ingot {
         }
     }
 
+    /// # Safety
+    /// `command_buffer` must be in the recording state and compatible with the
+    /// image barrier recorded here.
     pub unsafe fn record_prepare_for_compute(
         &self,
         device: &ash::Device,
@@ -148,21 +155,26 @@ impl Ingot {
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .image(result.handle)
                 .subresource_range(color_subresource_range())];
-            let dep_info = vk::DependencyInfo::default()
-                .image_memory_barriers(&barriers);
-            unsafe { device.cmd_pipeline_barrier2(command_buffer, &dep_info); }
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+            unsafe {
+                device.cmd_pipeline_barrier2(command_buffer, &dep_info);
+            }
         }
     }
 
+    /// # Safety
+    /// `command_buffer` must be in the recording state. Any previous compute
+    /// writes to the artifact must be visible before this barrier is submitted.
     pub unsafe fn record_readback(&self, device: &ash::Device, command_buffer: vk::CommandBuffer) {
         match &self.artifact {
             IngotArtifact::Buffer {
                 result, readback, ..
             } => {
                 let barriers = [storage_buffer_readback_barrier(result.handle, result.size)];
-                let dep_info = vk::DependencyInfo::default()
-                    .buffer_memory_barriers(&barriers);
-                unsafe { device.cmd_pipeline_barrier2(command_buffer, &dep_info); }
+                let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&barriers);
+                unsafe {
+                    device.cmd_pipeline_barrier2(command_buffer, &dep_info);
+                }
                 let region = [vk::BufferCopy::default()
                     .src_offset(0)
                     .dst_offset(0)
@@ -185,9 +197,10 @@ impl Ingot {
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(result.handle)
                     .subresource_range(color_subresource_range())];
-                let dep_info = vk::DependencyInfo::default()
-                    .image_memory_barriers(&barriers);
-                unsafe { device.cmd_pipeline_barrier2(command_buffer, &dep_info); }
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+                unsafe {
+                    device.cmd_pipeline_barrier2(command_buffer, &dep_info);
+                }
 
                 let region = [vk::BufferImageCopy::default()
                     .buffer_offset(0)
@@ -274,6 +287,9 @@ impl Ingot {
         Ok(())
     }
 
+    /// # Safety
+    /// `device` must be the device used to create this ingot and all GPU work
+    /// referencing it must have completed.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         match &mut self.artifact {
             IngotArtifact::Buffer {

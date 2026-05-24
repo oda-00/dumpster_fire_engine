@@ -68,7 +68,7 @@ impl FactoryMaster {
 
     pub fn build_graphics_proto(
         &mut self,
-        proto:  Proto<GraphicsTag>,
+        proto: Proto<GraphicsTag>,
         device: &ash::Device,
     ) -> FactoryHandle {
         let id = FactoryId::new(proto.id.raw());
@@ -116,7 +116,10 @@ impl FactoryMaster {
     }
 
     pub fn handle_of(&self, id: FactoryId) -> Option<FactoryHandle> {
-        self.cache.iter().find(|entry| entry.id == id).map(|entry| entry.handle)
+        self.cache
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.handle)
     }
 
     pub fn by_id(&self, id: FactoryId) -> Option<&Factory> {
@@ -139,6 +142,9 @@ impl FactoryMaster {
         self.factories.values_mut()
     }
 
+    /// # Safety
+    /// `device` must be the device used to create all factories and all GPU
+    /// work must have completed before calling this.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         for factory in self.factories.values_mut() {
             unsafe { factory.destroy(device) };

@@ -79,7 +79,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let by_id = renderer
         .handle_of(WindowId::new(1))
         .expect("WindowId(1) should be cached");
-    assert_eq!(by_id, main_h, "handle_of should match the add_window result");
+    assert_eq!(
+        by_id, main_h,
+        "handle_of should match the add_window result"
+    );
     println!(
         "  handle_of(WindowId(1)) -> {:?}  (matches main_h)\n",
         by_id
@@ -138,7 +141,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let output_bytes = frame.ingots[0].as_bytes();
     let output = bytes_to_u32_vec(output_bytes);
-    println!("  readback: {} bytes -> {} u32s\n", output_bytes.len(), output.len());
+    println!(
+        "  readback: {} bytes -> {} u32s\n",
+        output_bytes.len(),
+        output.len()
+    );
 
     // 8. Verify output[i] == input[i] * 2.
     let expected: ThinVec<u32> = input.iter().map(|n| n * 2).collect();

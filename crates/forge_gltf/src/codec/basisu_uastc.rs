@@ -119,18 +119,18 @@ fn bits128(data: u128, offset: u32, count: u32) -> u32 {
 /// Expand an N-bit endpoint value to 8 bits by replicating the top bits.
 #[inline(always)]
 fn expand_endpoint(raw: u32, bits: u32) -> u8 {
-    debug_assert!(bits >= 3 && bits <= 11);
+    debug_assert!((3..=11).contains(&bits));
     let shifted = match bits {
-        3  => (raw << 5) | (raw << 2) | (raw >> 1),
-        4  => (raw << 4) | raw,
-        5  => (raw << 3) | (raw >> 2),
-        6  => (raw << 2) | (raw >> 4),
-        7  => (raw << 1) | (raw >> 6),
-        8  => raw,
-        9  => raw >> 1,               // top 8 of 9
-        10 => raw >> 2,               // top 8 of 10
-        11 => raw >> 3,               // top 8 of 11
-        _  => raw,
+        3 => (raw << 5) | (raw << 2) | (raw >> 1),
+        4 => (raw << 4) | raw,
+        5 => (raw << 3) | (raw >> 2),
+        6 => (raw << 2) | (raw >> 4),
+        7 => (raw << 1) | (raw >> 6),
+        8 => raw,
+        9 => raw >> 1,  // top 8 of 9
+        10 => raw >> 2, // top 8 of 10
+        11 => raw >> 3, // top 8 of 11
+        _ => raw,
     };
     (shifted & 0xFF) as u8
 }
@@ -145,7 +145,7 @@ fn expand_endpoint(raw: u32, bits: u32) -> u8 {
 fn interpolate(e0: u8, e1: u8, w: u8) -> u8 {
     let e0 = e0 as u32;
     let e1 = e1 as u32;
-    let w  = w  as u32;
+    let w = w as u32;
     (((64 - w) * e0 + w * e1 + 32) >> 6) as u8
 }
 
@@ -160,7 +160,9 @@ fn interpolate(e0: u8, e1: u8, w: u8) -> u8 {
 #[inline]
 fn interpolate_rgba(lo: [u8; 4], hi: [u8; 4], w: u8) -> [u8; 4] {
     #[cfg(target_arch = "x86_64")]
-    unsafe { return interpolate_rgba_sse2(lo, hi, w); }
+    unsafe {
+        interpolate_rgba_sse2(lo, hi, w)
+    }
     #[cfg(not(target_arch = "x86_64"))]
     [
         interpolate(lo[0], hi[0], w),
@@ -188,7 +190,16 @@ unsafe fn interpolate_rgba_sse2(lo: [u8; 4], hi: [u8; 4], w: u8) -> [u8; 4] {
         let hi16 = _mm_unpacklo_epi8(hi_packed, zero);
         // weights16 = [64-w, w, 64-w, w, 64-w, w, 64-w, w]
         let wval = w as i16;
-        let weights16 = _mm_set_epi16(wval, 64 - wval, wval, 64 - wval, wval, 64 - wval, wval, 64 - wval);
+        let weights16 = _mm_set_epi16(
+            wval,
+            64 - wval,
+            wval,
+            64 - wval,
+            wval,
+            64 - wval,
+            wval,
+            64 - wval,
+        );
         // Build [lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], lo[3], hi[3]] in u16
         // so _mm_madd_epi16 computes (lo*(64-w) + hi*w) per channel.
         let interleaved = _mm_unpacklo_epi16(lo16, hi16);
@@ -227,7 +238,7 @@ fn fill_solid(out: &mut [u8; 64], r: u8, g: u8, b: u8, a: u8) {
     let pixel = [r, g, b, a];
     let mut i = 0;
     while i < 64 {
-        out[i]     = pixel[0];
+        out[i] = pixel[0];
         out[i + 1] = pixel[1];
         out[i + 2] = pixel[2];
         out[i + 3] = pixel[3];
@@ -241,7 +252,7 @@ fn write_pixel(out: &mut [u8; 64], t: usize, r: u8, g: u8, b: u8, a: u8) {
     let base = t << 2; // t * 4
     // SAFETY: t < 16, so base+3 < 64
     unsafe {
-        *out.get_unchecked_mut(base)     = r;
+        *out.get_unchecked_mut(base) = r;
         *out.get_unchecked_mut(base + 1) = g;
         *out.get_unchecked_mut(base + 2) = b;
         *out.get_unchecked_mut(base + 3) = a;
@@ -255,12 +266,7 @@ fn write_pixel(out: &mut [u8; 64], t: usize, r: u8, g: u8, b: u8, a: u8) {
 /// Decode a single-subset, single-plane RGB block.
 /// `ep_bits` = bits per endpoint channel, `wt_bits` = bits per weight index.
 /// Alpha is fixed to 255.
-fn decode_ss_sp_rgb(
-    br: &mut BitReader,
-    ep_bits: u32,
-    wt_bits: u32,
-    out: &mut [u8; 64],
-) {
+fn decode_ss_sp_rgb(br: &mut BitReader, ep_bits: u32, wt_bits: u32, out: &mut [u8; 64]) {
     // 2 endpoints × 3 channels
     let r0 = br.read(ep_bits);
     let g0 = br.read(ep_bits);
@@ -365,11 +371,11 @@ fn decode_ss_dp_rgba(
     // Plane 1 weights: 16 × wt_bits, appended after plane 0
     let mut w0 = [0u8; 16];
     let mut w1 = [0u8; 16];
-    for i in 0..16 {
-        w0[i] = wtab[br.read(wt_bits) as usize];
+    for slot in w0.iter_mut() {
+        *slot = wtab[br.read(wt_bits) as usize];
     }
-    for i in 0..16 {
-        w1[i] = wtab[br.read(wt_bits) as usize];
+    for slot in w1.iter_mut() {
+        *slot = wtab[br.read(wt_bits) as usize];
     }
     let lo = [r0, g0, b0, a0];
     let hi = [r1, g1, b1, a1];
@@ -378,7 +384,7 @@ fn decode_ss_dp_rgba(
         // the same endpoint pair, so we only need an extra scalar interpolate
         // for A — RGB benefits from the SIMD path.
         let rgba_p0 = interpolate_rgba(lo, hi, w0[t]);
-        let a       = interpolate(a0, a1, w1[t]);
+        let a = interpolate(a0, a1, w1[t]);
         write_pixel(out, t, rgba_p0[0], rgba_p0[1], rgba_p0[2], a);
     }
 }
@@ -522,10 +528,10 @@ fn decode_mode6(br: &mut BitReader, out: &mut [u8; 64]) {
 fn decode_mode9(br: &mut BitReader, out: &mut [u8; 64]) {
     let r0 = expand_endpoint(br.read(11), 11);
     let g0 = expand_endpoint(br.read(11), 11);
-    let b0 = expand_endpoint(br.read(9),  9);
+    let b0 = expand_endpoint(br.read(9), 9);
     let r1 = expand_endpoint(br.read(11), 11);
     let g1 = expand_endpoint(br.read(11), 11);
-    let b1 = expand_endpoint(br.read(9),  9);
+    let b1 = expand_endpoint(br.read(9), 9);
 
     let wtab = &WEIGHTS2;
     let lo = [r0, g0, b0, 255];
@@ -697,8 +703,8 @@ fn mode_bit_count(mode: u8) -> u32 {
 /// The output is `width × height × 4` bytes, written in row-major order with
 /// texels de-tiled from the 4×4 block grid.
 pub fn transcode_to_rgba8(blocks: &[u8], width: u32, height: u32) -> thin_vec::ThinVec<u8> {
-    let bw = ((width  + 3) / 4) as usize; // blocks per row
-    let bh = ((height + 3) / 4) as usize; // blocks per column
+    let bw = width.div_ceil(4) as usize; // blocks per row
+    let bh = height.div_ceil(4) as usize; // blocks per column
     let total_blocks = bw * bh;
 
     let w_us = width as usize;
@@ -708,7 +714,7 @@ pub fn transcode_to_rgba8(blocks: &[u8], width: u32, height: u32) -> thin_vec::T
     let mut out: thin_vec::ThinVec<u8> = thin_vec::ThinVec::with_capacity(out_len);
     // Skip the zero-fill when the image is exactly tiled — the fast-path
     // below writes every byte itself. Saves a full memset of the output.
-    let aligned = (width % 4 == 0) && (height % 4 == 0);
+    let aligned = width.is_multiple_of(4) && height.is_multiple_of(4);
     unsafe {
         out.set_len(out_len);
         if !aligned {
@@ -720,9 +726,7 @@ pub fn transcode_to_rgba8(blocks: &[u8], width: u32, height: u32) -> thin_vec::T
 
     for bi in 0..block_count {
         // SAFETY: bi * 16 + 16 <= blocks.len(), guaranteed by block_count above.
-        let block: &[u8; 16] = unsafe {
-            &*(blocks.as_ptr().add(bi * 16) as *const [u8; 16])
-        };
+        let block: &[u8; 16] = unsafe { &*(blocks.as_ptr().add(bi * 16) as *const [u8; 16]) };
 
         let decoded = decode_block(block);
 
@@ -750,10 +754,14 @@ pub fn transcode_to_rgba8(blocks: &[u8], width: u32, height: u32) -> thin_vec::T
             // Slow path: block straddles the right/bottom edge — clip per texel.
             for row in 0..4usize {
                 let img_y = img_y0 + row;
-                if img_y >= h_us { break; }
+                if img_y >= h_us {
+                    break;
+                }
                 for col in 0..4usize {
                     let img_x = img_x0 + col;
-                    if img_x >= w_us { break; }
+                    if img_x >= w_us {
+                        break;
+                    }
                     let src = (row * 4 + col) * 4;
                     let dst = (img_y * w_us + img_x) * 4;
                     unsafe {
@@ -817,9 +825,9 @@ mod tests {
         // Every texel must be (255, 0, 0, 255).
         for t in 0..16 {
             let base = t * 4;
-            assert_eq!(out[base],     255, "texel {t} R");
-            assert_eq!(out[base + 1],   0, "texel {t} G");
-            assert_eq!(out[base + 2],   0, "texel {t} B");
+            assert_eq!(out[base], 255, "texel {t} R");
+            assert_eq!(out[base + 1], 0, "texel {t} G");
+            assert_eq!(out[base + 2], 0, "texel {t} B");
             assert_eq!(out[base + 3], 255, "texel {t} A");
         }
     }
@@ -842,8 +850,8 @@ mod tests {
         for t in 0..16 {
             let base = t * 4;
             // b1=63 expands to: (63<<2)|(63>>4) = 252|3 = 255
-            assert_eq!(out[base],       0, "texel {t} R");
-            assert_eq!(out[base + 1],   0, "texel {t} G");
+            assert_eq!(out[base], 0, "texel {t} R");
+            assert_eq!(out[base + 1], 0, "texel {t} G");
             assert_eq!(out[base + 2], 255, "texel {t} B");
             assert_eq!(out[base + 3], 255, "texel {t} A");
         }
@@ -869,9 +877,9 @@ mod tests {
 
         for t in 0..16 {
             let base = t * 4;
-            assert_eq!(out[base],     200, "texel {t} R");
+            assert_eq!(out[base], 200, "texel {t} R");
             assert_eq!(out[base + 1], 100, "texel {t} G");
-            assert_eq!(out[base + 2],  50, "texel {t} B");
+            assert_eq!(out[base + 2], 50, "texel {t} B");
             assert_eq!(out[base + 3], 255, "texel {t} A");
         }
     }
@@ -898,7 +906,11 @@ mod tests {
                 interpolate(lo[3], hi[3], w),
             ];
             let simd = interpolate_rgba(lo, hi, w);
-            assert_eq!(scalar, simd, "weight {w}: scalar={:?} simd={:?}", scalar, simd);
+            assert_eq!(
+                scalar, simd,
+                "weight {w}: scalar={:?} simd={:?}",
+                scalar, simd
+            );
         }
     }
 

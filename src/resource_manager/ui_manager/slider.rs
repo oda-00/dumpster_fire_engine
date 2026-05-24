@@ -2,19 +2,26 @@ use super::layout::Rect;
 
 #[derive(Clone, Debug)]
 pub struct SliderData {
-    pub value:     f32,
-    pub min:       f32,
-    pub max:       f32,
-    pub step:      f32,
+    pub value: f32,
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
     pub on_change: Option<u32>,
-    pub dragging:  bool,
+    pub dragging: bool,
     pub last_rect: Rect,
 }
 
 impl SliderData {
     pub fn new(value: f32, min: f32, max: f32) -> Self {
-        Self { value, min, max, step: 0.0, on_change: None, dragging: false,
-               last_rect: Rect::default() }
+        Self {
+            value,
+            min,
+            max,
+            step: 0.0,
+            on_change: None,
+            dragging: false,
+            last_rect: Rect::default(),
+        }
     }
 
     /// Clamp value to [min, max] and quantize to step if step > 0.

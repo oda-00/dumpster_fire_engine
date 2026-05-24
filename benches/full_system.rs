@@ -8,39 +8,41 @@
 //
 //   cargo bench --bench full_system
 
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use glam::{Affine3A, Vec3};
 use std::sync::Arc;
 use thin_vec::{ThinVec, thin_vec};
 
 use dumpster_fire_engine::resource_manager::{
-    ui_manager::{Panel, LabelData, UiInputState, Rect, Widget},
+    ui_manager::{LabelData, Panel, Rect, UiInputState, Widget},
     *,
 };
 
-fn main() { divan::main(); }
+fn main() {
+    divan::main();
+}
 
 const DT: f32 = 1.0 / 60.0;
 
 // ── Shared world-construction helpers ─────────────────────────────────────────
 
 struct FullSetup {
-    world:   World,
-    stages:  Vec<(LevelHandle, StageHandle, Vec<ActorHandle>)>,
+    world: World,
+    stages: Vec<(LevelHandle, StageHandle, Vec<ActorHandle>)>,
 }
 
 fn build_world_with_play(actor_count: usize) -> FullSetup {
     let n_levels = if actor_count >= 200 { 2 } else { 1 };
     let n_stages = if actor_count >= 100 { 2 } else { 1 };
-    let total_slots  = n_levels * n_stages;
-    let per_stage    = (actor_count + total_slots - 1) / total_slots;
+    let total_slots = n_levels * n_stages;
+    let per_stage = actor_count.div_ceil(total_slots);
 
     let mut world = World::new(WorldId::new(1));
     let mut stages: Vec<(LevelHandle, StageHandle, Vec<ActorHandle>)> =
         Vec::with_capacity(total_slots);
-    let mut actor_id_ctr: i64  = 1;
-    let mut char_id_ctr:  i64  = 1;
-    let mut stage_id_ctr: i64  = 1;
+    let mut actor_id_ctr: i64 = 1;
+    let mut char_id_ctr: i64 = 1;
+    let mut stage_id_ctr: i64 = 1;
 
     let primary_lh = world.spawn_level(LevelId::new(1), "level_0");
 
@@ -62,7 +64,9 @@ fn build_world_with_play(actor_count: usize) -> FullSetup {
                 actor_id_ctr += 1;
                 let ah = world
                     .spawn_actor(
-                        lh, sh, aid,
+                        lh,
+                        sh,
+                        aid,
                         Affine3A::from_translation(Vec3::new(ai as f32, 0.0, 0.0)),
                     )
                     .unwrap();
@@ -70,49 +74,77 @@ fn build_world_with_play(actor_count: usize) -> FullSetup {
                 // Character sub-entity: Physics + Transform components
                 let cvi = world
                     .spawn_sub_entity(
-                        lh, sh, ah,
+                        lh,
+                        sh,
+                        ah,
                         ActorType::Character(Character {
-                            id:       CharacterId::new(char_id_ctr),
-                            name:     format!("c{char_id_ctr}").into(),
-                            visible:  true,
+                            id: CharacterId::new(char_id_ctr),
+                            name: format!("c{char_id_ctr}").into(),
+                            visible: true,
                             physical: true,
                             playable: false,
-                            mesh:     None,
+                            mesh: None,
                         }),
                         Affine3A::IDENTITY,
                     )
                     .unwrap();
                 char_id_ctr += 1;
-                world.add_component(lh, sh, ah, cvi, PhysicsComponent {
-                    mass: 70.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, -9.8, 0.0),
-                });
-                world.add_component(lh, sh, ah, cvi, TransformComponent {
-                    position: (ai as f32, 0.0, 0.0), rotation: (0.0, 0.0, 0.0),
-                    scale: (1.0, 1.0, 1.0), _transform: true,
-                });
+                world.add_component(
+                    lh,
+                    sh,
+                    ah,
+                    cvi,
+                    PhysicsComponent {
+                        mass: 70.0,
+                        velocity: (0.0, 0.0, 0.0),
+                        acceleration: (0.0, -9.8, 0.0),
+                    },
+                );
+                world.add_component(
+                    lh,
+                    sh,
+                    ah,
+                    cvi,
+                    TransformComponent {
+                        position: (ai as f32, 0.0, 0.0),
+                        rotation: (0.0, 0.0, 0.0),
+                        scale: (1.0, 1.0, 1.0),
+                        _transform: true,
+                    },
+                );
 
                 // Item sub-entity: Collision component
                 let ivi = world
                     .spawn_sub_entity(
-                        lh, sh, ah,
+                        lh,
+                        sh,
+                        ah,
                         ActorType::Item(Item {
-                            id:          ItemId::new(actor_id_ctr),
-                            name:        "trinket".into(),
-                            quantity:    (1, 1, 1),
+                            id: ItemId::new(actor_id_ctr),
+                            name: "trinket".into(),
+                            quantity: (1, 1, 1),
                             description: Arc::from(""),
-                            stackable:   false,
-                            visible:     true,
-                            physical:    false,
-                            mesh:        None,
+                            stackable: false,
+                            visible: true,
+                            physical: false,
+                            mesh: None,
                         }),
                         Affine3A::from_translation(Vec3::new(0.0, 1.0, 0.0)),
                     )
                     .unwrap();
-                world.add_component(lh, sh, ah, ivi, CollisionComponent {
-                    shape: CollisionShape::Sphere,
-                    position: (0.0, 1.0, 0.0), rotation: (0.0, 0.0, 0.0),
-                    scale: (0.3, 0.3, 0.3), collision: true,
-                });
+                world.add_component(
+                    lh,
+                    sh,
+                    ah,
+                    ivi,
+                    CollisionComponent {
+                        shape: CollisionShape::Sphere,
+                        position: (0.0, 1.0, 0.0),
+                        rotation: (0.0, 0.0, 0.0),
+                        scale: (0.3, 0.3, 0.3),
+                        collision: true,
+                    },
+                );
 
                 handles.push(ah);
             }
@@ -123,7 +155,7 @@ fn build_world_with_play(actor_count: usize) -> FullSetup {
     // Bind a Play with HSM + BT to every Stage.
     for (play_idx, &(lh, sh, ref actors)) in stages.iter().enumerate() {
         let stage_id = world.levels[lh].stages[sh].id;
-        let script   = build_full_script(lh, sh, stage_id, actors);
+        let script = build_full_script(lh, sh, stage_id, actors);
         let play = Play::instantiate(
             PlayId::new(play_idx as i64 + 1),
             format!("play_{play_idx}"),
@@ -146,30 +178,38 @@ fn build_full_script(
     stage_id: StageId,
     actors: &[ActorHandle],
 ) -> Script {
-    let s_root  = SceneId::new(1);
-    let s_a     = SceneId::new(2);
-    let s_b     = SceneId::new(3);
-    let troupe  = TroupeId::new(1);
+    let s_root = SceneId::new(1);
+    let s_a = SceneId::new(2);
+    let s_b = SceneId::new(3);
+    let troupe = TroupeId::new(1);
 
-    let actives: ThinVec<ActiveActor> = actors.iter().enumerate()
+    let actives: ThinVec<ActiveActor> = actors
+        .iter()
+        .enumerate()
         .map(|(i, &h)| ActiveActor::new(lh, sh, h, ActorId::new(i as i64 + 1)))
         .collect();
 
     let bt_actor = actors[0];
-    let bt_nodes: ThinVec<BtNode> = (0..8u32).map(|k| {
-        BtNode::leaf(
-            Condition::Always,
-            Effect::SetActorLocal {
-                level_h: lh, stage_h: sh, actor_h: bt_actor,
-                local: Affine3A::from_translation(Vec3::new(k as f32 * 0.01, 0.0, 0.0)),
-            },
-            false,
-        )
-    }).collect();
+    let bt_nodes: ThinVec<BtNode> = (0..8u32)
+        .map(|k| {
+            BtNode::leaf(
+                Condition::Always,
+                Effect::SetActorLocal {
+                    level_h: lh,
+                    stage_h: sh,
+                    actor_h: bt_actor,
+                    local: Affine3A::from_translation(Vec3::new(k as f32 * 0.01, 0.0, 0.0)),
+                },
+                false,
+            )
+        })
+        .collect();
 
     let make_scene = |id: SceneId, target: SceneId| -> SceneDef {
         SceneDef {
-            id, stage: stage_id, parent: Some(s_root),
+            id,
+            stage: stage_id,
+            parent: Some(s_root),
             kind: SceneKind::Atomic,
             troupes: thin_vec![troupe],
             initial_actors: thin_vec![actives.iter().cloned().collect()],
@@ -179,7 +219,9 @@ fn build_full_script(
                     BtNode::leaf(
                         Condition::Always,
                         Effect::CueTroupe {
-                            level_h: lh, stage_h: sh, troupe,
+                            level_h: lh,
+                            stage_h: sh,
+                            troupe,
                             delta: Affine3A::from_translation(Vec3::new(0.001, 0.0, 0.0)),
                         },
                         false,
@@ -187,7 +229,8 @@ fn build_full_script(
                 ],
                 policy: ParallelPolicy::AllComplete,
             },
-            on_enter: thin_vec![], on_exit: thin_vec![],
+            on_enter: thin_vec![],
+            on_exit: thin_vec![],
             handlers: thin_vec![],
             transitions: thin_vec![Transition {
                 condition: Condition::Always,
@@ -198,16 +241,21 @@ fn build_full_script(
     };
 
     let root = SceneDef {
-        id: s_root, stage: stage_id, parent: None,
+        id: s_root,
+        stage: stage_id,
+        parent: None,
         kind: SceneKind::Compound {
             children: thin_vec![s_a, s_b],
             initial: s_a,
             history: None,
         },
-        troupes: thin_vec![], initial_actors: thin_vec![],
+        troupes: thin_vec![],
+        initial_actors: thin_vec![],
         root: BtNode::empty(),
-        on_enter: thin_vec![], on_exit: thin_vec![],
-        handlers: thin_vec![], transitions: thin_vec![],
+        on_enter: thin_vec![],
+        on_exit: thin_vec![],
+        handlers: thin_vec![],
+        transitions: thin_vec![],
     };
 
     let mut script = Script::new(ScriptId::new(1), "full_script", s_root);
@@ -227,14 +275,16 @@ const TICK_SCALES: &[usize] = &[50, 500, 2_000, 10_000];
 fn world_full_tick(b: Bencher, n: usize) {
     let mut setup = build_world_with_play(n);
     let input = UiInputState::default();
-    for _ in 0..120 { setup.world.tick(DT); }
+    for _ in 0..120 {
+        setup.world.tick(DT);
+    }
 
     let total: u64 = setup.stages.iter().map(|(.., a)| a.len() as u64).sum();
     b.counter(divan::counter::ItemsCount::new(total))
-     .bench_local(|| {
-         setup.world.tick(black_box(DT));
-         setup.world.ui_tick(black_box(&input), DT);
-     });
+        .bench_local(|| {
+            setup.world.tick(black_box(DT));
+            setup.world.ui_tick(black_box(&input), DT);
+        });
 }
 
 // ── Group: ui_pipeline ────────────────────────────────────────────────────
@@ -244,13 +294,17 @@ fn world_full_tick(b: Bencher, n: usize) {
 fn build_ui_world(panels: usize, widgets_per: usize) -> World {
     let mut world = World::new(WorldId::new(99));
     for p in 0..panels {
-        let ph = world.ui.spawn_panel(Panel::new(
-            Rect { x: p as f32 * 210.0, y: 0.0, w: 200.0, h: 400.0 },
-        ));
+        let ph = world.ui.spawn_panel(Panel::new(Rect {
+            x: p as f32 * 210.0,
+            y: 0.0,
+            w: 200.0,
+            h: 400.0,
+        }));
         for w in 0..widgets_per {
-            let wh = world.ui.widgets.insert(
-                Widget::Label(LabelData::new(format!("l{p}_{w}")))
-            );
+            let wh = world
+                .ui
+                .widgets
+                .insert(Widget::Label(LabelData::new(format!("l{p}_{w}"))));
             world.ui.panels.get_mut(ph).unwrap().children.push(wh);
         }
     }
@@ -262,7 +316,9 @@ fn build_ui_world(panels: usize, widgets_per: usize) -> World {
 fn ui_tick_1p_10w(b: Bencher) {
     let mut world = build_ui_world(1, 10);
     let input = UiInputState::default();
-    b.bench_local(|| { world.ui_tick(black_box(&input), DT); });
+    b.bench_local(|| {
+        world.ui_tick(black_box(&input), DT);
+    });
 }
 
 // 5 panels × 20 widgets — small scene inspector
@@ -270,7 +326,9 @@ fn ui_tick_1p_10w(b: Bencher) {
 fn ui_tick_5p_20w(b: Bencher) {
     let mut world = build_ui_world(5, 20);
     let input = UiInputState::default();
-    b.bench_local(|| { world.ui_tick(black_box(&input), DT); });
+    b.bench_local(|| {
+        world.ui_tick(black_box(&input), DT);
+    });
 }
 
 // 10 panels × 50 widgets — medium editor layout
@@ -278,7 +336,9 @@ fn ui_tick_5p_20w(b: Bencher) {
 fn ui_tick_10p_50w(b: Bencher) {
     let mut world = build_ui_world(10, 50);
     let input = UiInputState::default();
-    b.bench_local(|| { world.ui_tick(black_box(&input), DT); });
+    b.bench_local(|| {
+        world.ui_tick(black_box(&input), DT);
+    });
 }
 
 // 20 panels × 100 widgets — heavy dashboard
@@ -286,7 +346,9 @@ fn ui_tick_10p_50w(b: Bencher) {
 fn ui_tick_20p_100w(b: Bencher) {
     let mut world = build_ui_world(20, 100);
     let input = UiInputState::default();
-    b.bench_local(|| { world.ui_tick(black_box(&input), DT); });
+    b.bench_local(|| {
+        world.ui_tick(black_box(&input), DT);
+    });
 }
 
 // ── Group: memory_churn ───────────────────────────────────────────────────
@@ -306,31 +368,65 @@ fn spawn_tick_despawn_cycle(b: Bencher, n: usize) {
             let handles: Vec<ActorHandle> = (0..n)
                 .map(|i| {
                     let aid = ActorId::new(i as i64 + 1);
-                    let ah  = world.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
-                    let cvi = world.spawn_sub_entity(
-                        lh, sh, ah,
-                        ActorType::Character(Character {
-                            id: CharacterId::new(i as i64 + 1),
-                            name: "c".into(), visible: true, physical: true,
-                            playable: false, mesh: None,
-                        }),
-                        Affine3A::IDENTITY,
-                    ).unwrap();
-                    world.add_component(lh, sh, ah, cvi, PhysicsComponent {
-                        mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-                    });
-                    world.add_component(lh, sh, ah, cvi, TransformComponent {
-                        position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0),
-                        scale: (1.0, 1.0, 1.0), _transform: true,
-                    });
-                    world.add_component(lh, sh, ah, cvi, AudioComponent {
-                        volume: 1.0, pitch: 1.0, _loop: false, _playing: false,
-                    });
+                    let ah = world.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
+                    let cvi = world
+                        .spawn_sub_entity(
+                            lh,
+                            sh,
+                            ah,
+                            ActorType::Character(Character {
+                                id: CharacterId::new(i as i64 + 1),
+                                name: "c".into(),
+                                visible: true,
+                                physical: true,
+                                playable: false,
+                                mesh: None,
+                            }),
+                            Affine3A::IDENTITY,
+                        )
+                        .unwrap();
+                    world.add_component(
+                        lh,
+                        sh,
+                        ah,
+                        cvi,
+                        PhysicsComponent {
+                            mass: 1.0,
+                            velocity: (0.0, 0.0, 0.0),
+                            acceleration: (0.0, 0.0, 0.0),
+                        },
+                    );
+                    world.add_component(
+                        lh,
+                        sh,
+                        ah,
+                        cvi,
+                        TransformComponent {
+                            position: (0.0, 0.0, 0.0),
+                            rotation: (0.0, 0.0, 0.0),
+                            scale: (1.0, 1.0, 1.0),
+                            _transform: true,
+                        },
+                    );
+                    world.add_component(
+                        lh,
+                        sh,
+                        ah,
+                        cvi,
+                        AudioComponent {
+                            volume: 1.0,
+                            pitch: 1.0,
+                            _loop: false,
+                            _playing: false,
+                        },
+                    );
                     ah
                 })
                 .collect();
             world.tick(DT);
-            for ah in handles { world.despawn_actor(lh, sh, ah); }
+            for ah in handles {
+                world.despawn_actor(lh, sh, ah);
+            }
         }
         black_box(world.levels[lh].stages[sh].actors.len())
     });
@@ -345,7 +441,11 @@ fn fragmentation_recovery(b: Bencher, n: usize) {
         let lh = world.spawn_level(LevelId::new(1), "L");
         let sh = world.spawn_stage(lh, StageId::new(1), "S").unwrap();
         let handles: Vec<ActorHandle> = (0..n)
-            .map(|i| world.spawn_actor(lh, sh, ActorId::new(i as i64 + 1), Affine3A::IDENTITY).unwrap())
+            .map(|i| {
+                world
+                    .spawn_actor(lh, sh, ActorId::new(i as i64 + 1), Affine3A::IDENTITY)
+                    .unwrap()
+            })
             .collect();
         (world, lh, sh, handles)
     })
@@ -354,7 +454,9 @@ fn fragmentation_recovery(b: Bencher, n: usize) {
             world.despawn_actor(lh, sh, ah);
         }
         for j in 0..(n / 2) as i64 {
-            world.spawn_actor(lh, sh, ActorId::new(100_000 + j), Affine3A::IDENTITY).unwrap();
+            world
+                .spawn_actor(lh, sh, ActorId::new(100_000 + j), Affine3A::IDENTITY)
+                .unwrap();
         }
         black_box(world)
     });
@@ -370,34 +472,78 @@ fn build_stage_all_components(n: usize) -> (World, LevelHandle, StageHandle, Vec
     let mut world = World::new(WorldId::new(5));
     let lh = world.spawn_level(LevelId::new(1), "L");
     let sh = world.spawn_stage(lh, StageId::new(1), "S").unwrap();
-    let handles: Vec<ActorHandle> = (0..n).map(|i| {
-        let ah  = world.spawn_actor(lh, sh, ActorId::new(i as i64 + 1), Affine3A::IDENTITY).unwrap();
-        let cvi = world.spawn_sub_entity(
-            lh, sh, ah,
-            ActorType::Character(Character {
-                id: CharacterId::new(i as i64 + 1),
-                name: "c".into(), visible: true, physical: true,
-                playable: false, mesh: None,
-            }),
-            Affine3A::IDENTITY,
-        ).unwrap();
-        world.add_component(lh, sh, ah, cvi, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
-        world.add_component(lh, sh, ah, cvi, TransformComponent {
-            position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0),
-            scale: (1.0, 1.0, 1.0), _transform: true,
-        });
-        world.add_component(lh, sh, ah, cvi, AudioComponent {
-            volume: 1.0, pitch: 1.0, _loop: false, _playing: false,
-        });
-        world.add_component(lh, sh, ah, cvi, CollisionComponent {
-            shape: CollisionShape::Box,
-            position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0),
-            scale: (1.0, 1.0, 1.0), collision: true,
-        });
-        ah
-    }).collect();
+    let handles: Vec<ActorHandle> = (0..n)
+        .map(|i| {
+            let ah = world
+                .spawn_actor(lh, sh, ActorId::new(i as i64 + 1), Affine3A::IDENTITY)
+                .unwrap();
+            let cvi = world
+                .spawn_sub_entity(
+                    lh,
+                    sh,
+                    ah,
+                    ActorType::Character(Character {
+                        id: CharacterId::new(i as i64 + 1),
+                        name: "c".into(),
+                        visible: true,
+                        physical: true,
+                        playable: false,
+                        mesh: None,
+                    }),
+                    Affine3A::IDENTITY,
+                )
+                .unwrap();
+            world.add_component(
+                lh,
+                sh,
+                ah,
+                cvi,
+                PhysicsComponent {
+                    mass: 1.0,
+                    velocity: (0.0, 0.0, 0.0),
+                    acceleration: (0.0, 0.0, 0.0),
+                },
+            );
+            world.add_component(
+                lh,
+                sh,
+                ah,
+                cvi,
+                TransformComponent {
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0),
+                    scale: (1.0, 1.0, 1.0),
+                    _transform: true,
+                },
+            );
+            world.add_component(
+                lh,
+                sh,
+                ah,
+                cvi,
+                AudioComponent {
+                    volume: 1.0,
+                    pitch: 1.0,
+                    _loop: false,
+                    _playing: false,
+                },
+            );
+            world.add_component(
+                lh,
+                sh,
+                ah,
+                cvi,
+                CollisionComponent {
+                    shape: CollisionShape::Box,
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0),
+                    scale: (1.0, 1.0, 1.0),
+                    collision: true,
+                },
+            );
+            ah
+        })
+        .collect();
     world.propagate_transforms();
     (world, lh, sh, handles)
 }
@@ -406,24 +552,30 @@ fn build_stage_all_components(n: usize) -> (World, LevelHandle, StageHandle, Vec
 #[divan::bench(args = STORM_SIZES)]
 fn despawn_all_with_components(b: Bencher, n: usize) {
     b.with_inputs(|| build_stage_all_components(n))
-     .bench_local_values(|(mut world, lh, sh, handles)| {
-         for ah in handles { world.despawn_actor(lh, sh, ah); }
-         black_box(world)
-     });
+        .bench_local_values(|(mut world, lh, sh, handles)| {
+            for ah in handles {
+                world.despawn_actor(lh, sh, ah);
+            }
+            black_box(world)
+        });
 }
 
 // Despawn half, then respawn the same count — combines eviction + free-list reuse.
 #[divan::bench(args = STORM_SIZES)]
 fn despawn_half_replace(b: Bencher, n: usize) {
     b.with_inputs(|| build_stage_all_components(n))
-     .bench_local_values(|(mut world, lh, sh, handles)| {
-         let half = handles.len() / 2;
-         for &ah in &handles[..half] { world.despawn_actor(lh, sh, ah); }
-         for j in 0..half as i64 {
-             world.spawn_actor(lh, sh, ActorId::new(100_000 + j), Affine3A::IDENTITY).unwrap();
-         }
-         black_box(world)
-     });
+        .bench_local_values(|(mut world, lh, sh, handles)| {
+            let half = handles.len() / 2;
+            for &ah in &handles[..half] {
+                world.despawn_actor(lh, sh, ah);
+            }
+            for j in 0..half as i64 {
+                world
+                    .spawn_actor(lh, sh, ActorId::new(100_000 + j), Affine3A::IDENTITY)
+                    .unwrap();
+            }
+            black_box(world)
+        });
 }
 
 // ── Group: integrated_script_world ───────────────────────────────────────
@@ -437,23 +589,40 @@ fn build_script_world(n_scripts: usize) -> World {
     let mut world = World::new(WorldId::new(7));
     let lh = world.spawn_level(LevelId::new(1), "L");
     for i in 0..n_scripts {
-        let sh  = world.spawn_stage(lh, StageId::new(i as i64 + 1), format!("s{i}")).unwrap();
+        let sh = world
+            .spawn_stage(lh, StageId::new(i as i64 + 1), format!("s{i}"))
+            .unwrap();
         let aid = ActorId::new(i as i64 + 1);
-        let ah  = world.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
-        let cvi = world.spawn_sub_entity(
-            lh, sh, ah,
-            ActorType::Character(Character {
-                id: CharacterId::new(i as i64 + 1),
-                name: "c".into(), visible: true, physical: true,
-                playable: false, mesh: None,
-            }),
-            Affine3A::IDENTITY,
-        ).unwrap();
-        world.add_component(lh, sh, ah, cvi, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
+        let ah = world.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
+        let cvi = world
+            .spawn_sub_entity(
+                lh,
+                sh,
+                ah,
+                ActorType::Character(Character {
+                    id: CharacterId::new(i as i64 + 1),
+                    name: "c".into(),
+                    visible: true,
+                    physical: true,
+                    playable: false,
+                    mesh: None,
+                }),
+                Affine3A::IDENTITY,
+            )
+            .unwrap();
+        world.add_component(
+            lh,
+            sh,
+            ah,
+            cvi,
+            PhysicsComponent {
+                mass: 1.0,
+                velocity: (0.0, 0.0, 0.0),
+                acceleration: (0.0, 0.0, 0.0),
+            },
+        );
         let stage_id = world.levels[lh].stages[sh].id;
-        let script   = build_integrated_script(lh, sh, stage_id, ah, aid);
+        let script = build_integrated_script(lh, sh, stage_id, ah, aid);
         let play = Play::instantiate(
             PlayId::new(i as i64 + 1),
             format!("p{i}"),
@@ -477,10 +646,12 @@ fn build_integrated_script(
     let troupe1 = TroupeId::new(1);
     let troupe2 = TroupeId::new(2);
     let actives: ThinVec<ActiveActor> = thin_vec![ActiveActor::new(lh, sh, ah, aid)];
-    let s_root  = SceneId::new(1);
+    let s_root = SceneId::new(1);
 
     let scene = SceneDef {
-        id: s_root, stage: stage_id, parent: None,
+        id: s_root,
+        stage: stage_id,
+        parent: None,
         kind: SceneKind::Atomic,
         troupes: thin_vec![troupe1, troupe2],
         initial_actors: thin_vec![actives.clone(), actives],
@@ -488,7 +659,9 @@ fn build_integrated_script(
             BtNode::leaf(
                 Condition::Always,
                 Effect::CueTroupe {
-                    level_h: lh, stage_h: sh, troupe: troupe1,
+                    level_h: lh,
+                    stage_h: sh,
+                    troupe: troupe1,
                     delta: Affine3A::from_translation(Vec3::new(0.001, 0.0, 0.0)),
                 },
                 false,
@@ -496,19 +669,28 @@ fn build_integrated_script(
             BtNode::leaf(
                 Condition::Always,
                 Effect::CueTroupe {
-                    level_h: lh, stage_h: sh, troupe: troupe2,
+                    level_h: lh,
+                    stage_h: sh,
+                    troupe: troupe2,
                     delta: Affine3A::from_translation(Vec3::new(0.0, 0.001, 0.0)),
                 },
                 false,
             ),
             BtNode::leaf(
                 Condition::Always,
-                Effect::SetActorLocal { level_h: lh, stage_h: sh, actor_h: ah, local: Affine3A::IDENTITY },
+                Effect::SetActorLocal {
+                    level_h: lh,
+                    stage_h: sh,
+                    actor_h: ah,
+                    local: Affine3A::IDENTITY
+                },
                 false,
             ),
         ]),
-        on_enter: thin_vec![], on_exit: thin_vec![],
-        handlers: thin_vec![], transitions: thin_vec![],
+        on_enter: thin_vec![],
+        on_exit: thin_vec![],
+        handlers: thin_vec![],
+        transitions: thin_vec![],
     };
 
     let mut script = Script::new(ScriptId::new(1), "integrated", s_root);
@@ -519,7 +701,9 @@ fn build_integrated_script(
 #[divan::bench(args = SCRIPT_COUNTS)]
 fn scripts_drive_world(b: Bencher, n: usize) {
     let mut world = build_script_world(n);
-    for _ in 0..60 { world.tick(DT); }
+    for _ in 0..60 {
+        world.tick(DT);
+    }
     b.bench_local(|| {
         world.tick(black_box(DT));
     });

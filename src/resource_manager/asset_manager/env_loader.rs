@@ -9,15 +9,15 @@
 //!
 //! Format reference: Greg Ward, "Real Pixels" (1991).
 
-use thin_vec::ThinVec;
 use glam::Vec3;
+use thin_vec::ThinVec;
 
 /// Decoded equirect environment map in linear RGB float.
 #[derive(Debug, Clone)]
 pub struct EnvironmentMap {
-    pub width:  u32,
+    pub width: u32,
     pub height: u32,
-    pub pixels: ThinVec<f32>,   // length = width * height * 3
+    pub pixels: ThinVec<f32>, // length = width * height * 3
 }
 
 #[derive(Debug)]
@@ -30,8 +30,8 @@ pub enum EnvError {
 impl std::fmt::Display for EnvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EnvError::UnexpectedEof   => write!(f, "unexpected EOF in .hdr file"),
-            EnvError::InvalidHeader   => write!(f, "invalid Radiance .hdr header"),
+            EnvError::UnexpectedEof => write!(f, "unexpected EOF in .hdr file"),
+            EnvError::InvalidHeader => write!(f, "invalid Radiance .hdr header"),
             EnvError::InvalidScanline => write!(f, "invalid RGBE scanline (corrupt RLE)"),
         }
     }
@@ -44,23 +44,35 @@ pub fn parse(bytes: &[u8]) -> Result<EnvironmentMap, EnvError> {
     // ── Header ──────────────────────────────────────────────────────────
     // Line-based; ends with a blank line followed by a resolution string.
     let mut p = 0usize;
-    let mut found_magic   = false;
-    let mut found_format  = false;
+    let mut found_magic = false;
+    let mut found_format = false;
 
     let read_line = |buf: &[u8], pos: &mut usize| -> Option<String> {
-        if *pos >= buf.len() { return None; }
+        if *pos >= buf.len() {
+            return None;
+        }
         let start = *pos;
-        while *pos < buf.len() && buf[*pos] != b'\n' { *pos += 1; }
+        while *pos < buf.len() && buf[*pos] != b'\n' {
+            *pos += 1;
+        }
         let line = &buf[start..*pos];
-        if *pos < buf.len() { *pos += 1; } // consume '\n'
+        if *pos < buf.len() {
+            *pos += 1;
+        } // consume '\n'
         Some(String::from_utf8_lossy(line).into_owned())
     };
 
     while let Some(line) = read_line(bytes, &mut p) {
         let t = line.trim();
-        if t.is_empty() { break; }
-        if t == "#?RADIANCE" || t == "#?RGBE" { found_magic = true; }
-        if t.starts_with("FORMAT=") && t.contains("rgbe") { found_format = true; }
+        if t.is_empty() {
+            break;
+        }
+        if t == "#?RADIANCE" || t == "#?RGBE" {
+            found_magic = true;
+        }
+        if t.starts_with("FORMAT=") && t.contains("rgbe") {
+            found_format = true;
+        }
     }
     if !found_magic || !found_format {
         return Err(EnvError::InvalidHeader);
@@ -70,7 +82,9 @@ pub fn parse(bytes: &[u8]) -> Result<EnvironmentMap, EnvError> {
     let res = read_line(bytes, &mut p).ok_or(EnvError::UnexpectedEof)?;
     // Common: "-Y H +X W"
     let toks: Vec<&str> = res.split_ascii_whitespace().collect();
-    if toks.len() != 4 { return Err(EnvError::InvalidHeader); }
+    if toks.len() != 4 {
+        return Err(EnvError::InvalidHeader);
+    }
     let h: u32 = toks[1].parse().map_err(|_| EnvError::InvalidHeader)?;
     let w: u32 = toks[3].parse().map_err(|_| EnvError::InvalidHeader)?;
 
@@ -81,8 +95,13 @@ pub fn parse(bytes: &[u8]) -> Result<EnvironmentMap, EnvError> {
     let mut scratch: Vec<u8> = vec![0; (w * 4) as usize];
     for row in 0..h {
         // Per-row header: 0x02 0x02 (hi (w>>8)) (lo (w&0xff)) means new RLE.
-        if p + 4 > bytes.len() { return Err(EnvError::UnexpectedEof); }
-        let h0 = bytes[p]; let h1 = bytes[p+1]; let h2 = bytes[p+2]; let h3 = bytes[p+3];
+        if p + 4 > bytes.len() {
+            return Err(EnvError::UnexpectedEof);
+        }
+        let h0 = bytes[p];
+        let h1 = bytes[p + 1];
+        let h2 = bytes[p + 2];
+        let h3 = bytes[p + 3];
 
         let new_rle = h0 == 2 && h1 == 2 && ((h2 as u32) << 8 | h3 as u32) == w;
         if new_rle {
@@ -91,21 +110,31 @@ pub fn parse(bytes: &[u8]) -> Result<EnvironmentMap, EnvError> {
             for ch in 0..4 {
                 let mut x = 0usize;
                 while x < w as usize {
-                    if p >= bytes.len() { return Err(EnvError::UnexpectedEof); }
-                    let code = bytes[p]; p += 1;
+                    if p >= bytes.len() {
+                        return Err(EnvError::UnexpectedEof);
+                    }
+                    let code = bytes[p];
+                    p += 1;
                     if code > 128 {
                         // Run of (code & 0x7F) of next byte.
                         let n = (code & 0x7F) as usize;
-                        if p >= bytes.len() { return Err(EnvError::UnexpectedEof); }
-                        let v = bytes[p]; p += 1;
+                        if p >= bytes.len() {
+                            return Err(EnvError::UnexpectedEof);
+                        }
+                        let v = bytes[p];
+                        p += 1;
                         for _ in 0..n {
-                            if x >= w as usize { return Err(EnvError::InvalidScanline); }
+                            if x >= w as usize {
+                                return Err(EnvError::InvalidScanline);
+                            }
                             scratch[ch * w as usize + x] = v;
                             x += 1;
                         }
                     } else {
                         let n = code as usize;
-                        if p + n > bytes.len() { return Err(EnvError::UnexpectedEof); }
+                        if p + n > bytes.len() {
+                            return Err(EnvError::UnexpectedEof);
+                        }
                         for i in 0..n {
                             scratch[ch * w as usize + x + i] = bytes[p + i];
                         }
@@ -116,11 +145,13 @@ pub fn parse(bytes: &[u8]) -> Result<EnvironmentMap, EnvError> {
             }
         } else {
             // Old RLE / uncompressed — read w pixels of 4 bytes each.
-            if p + (w as usize) * 4 > bytes.len() { return Err(EnvError::UnexpectedEof); }
+            if p + (w as usize) * 4 > bytes.len() {
+                return Err(EnvError::UnexpectedEof);
+            }
             for x in 0..w as usize {
                 let off = p + x * 4;
-                scratch[0 * w as usize + x] = bytes[off + 0];
-                scratch[1 * w as usize + x] = bytes[off + 1];
+                scratch[x] = bytes[off];
+                scratch[(w as usize) + x] = bytes[off + 1];
                 scratch[2 * w as usize + x] = bytes[off + 2];
                 scratch[3 * w as usize + x] = bytes[off + 3];
             }
@@ -130,24 +161,28 @@ pub fn parse(bytes: &[u8]) -> Result<EnvironmentMap, EnvError> {
         // Convert RGBE → RGB float and write into the destination row.
         let row_base = (row * w * 3) as usize;
         for x in 0..w as usize {
-            let r = scratch[0 * w as usize + x] as f32;
-            let g = scratch[1 * w as usize + x] as f32;
+            let r = scratch[x] as f32;
+            let g = scratch[(w as usize) + x] as f32;
             let b = scratch[2 * w as usize + x] as f32;
             let e = scratch[3 * w as usize + x] as i32;
             if e == 0 {
-                pixels[row_base + x * 3 + 0] = 0.0;
+                pixels[row_base + x * 3] = 0.0;
                 pixels[row_base + x * 3 + 1] = 0.0;
                 pixels[row_base + x * 3 + 2] = 0.0;
             } else {
                 let f = 2.0_f32.powi(e - 128) / 256.0;
-                pixels[row_base + x * 3 + 0] = r * f;
+                pixels[row_base + x * 3] = r * f;
                 pixels[row_base + x * 3 + 1] = g * f;
                 pixels[row_base + x * 3 + 2] = b * f;
             }
         }
     }
 
-    Ok(EnvironmentMap { width: w, height: h, pixels })
+    Ok(EnvironmentMap {
+        width: w,
+        height: h,
+        pixels,
+    })
 }
 
 /// Project an equirect environment onto SH9 (diffuse-irradiance ambient).
@@ -164,7 +199,7 @@ pub fn project_sh9(map: &EnvironmentMap, samples_per_axis: u32) -> crate::render
             let u = (i as f32 + 0.5) / n as f32;
             let v = (j as f32 + 0.5) / n as f32;
             let theta = (1.0 - 2.0 * u).acos();
-            let phi   = 2.0 * std::f32::consts::PI * v;
+            let phi = 2.0 * std::f32::consts::PI * v;
             let st = theta.sin();
             let dir = Vec3::new(st * phi.cos(), theta.cos(), st * phi.sin());
 
@@ -172,7 +207,9 @@ pub fn project_sh9(map: &EnvironmentMap, samples_per_axis: u32) -> crate::render
 
             // SH9 basis — duplicated from sky_hw to avoid making that
             // module's `sh9_basis` public; the math is identical.
-            let x = dir.x; let y = dir.y; let z = dir.z;
+            let x = dir.x;
+            let y = dir.y;
+            let z = dir.z;
             let b = [
                 0.282_094_8,
                 0.488_602_5 * y,
@@ -194,10 +231,10 @@ pub fn project_sh9(map: &EnvironmentMap, samples_per_axis: u32) -> crate::render
     }
 
     let solid_angle_norm = 4.0 * std::f32::consts::PI / weight_sum;
-    for k in 0..9 {
-        acc[k][0] *= solid_angle_norm;
-        acc[k][1] *= solid_angle_norm;
-        acc[k][2] *= solid_angle_norm;
+    for coeff in &mut acc {
+        coeff[0] *= solid_angle_norm;
+        coeff[1] *= solid_angle_norm;
+        coeff[2] *= solid_angle_norm;
     }
     acc
 }
@@ -205,12 +242,12 @@ pub fn project_sh9(map: &EnvironmentMap, samples_per_axis: u32) -> crate::render
 #[inline]
 fn sample_equirect(map: &EnvironmentMap, dir: Vec3) -> Vec3 {
     // Convert world direction to equirect uv.
-    let phi   = dir.z.atan2(dir.x);   // -π..π
-    let theta = dir.y.clamp(-1.0, 1.0).acos();  // 0..π
+    let phi = dir.z.atan2(dir.x); // -π..π
+    let theta = dir.y.clamp(-1.0, 1.0).acos(); // 0..π
     let u = (phi / (2.0 * std::f32::consts::PI) + 0.5).fract();
     let v = theta / std::f32::consts::PI;
 
-    let x = (u * map.width  as f32).clamp(0.0, (map.width  - 1) as f32) as usize;
+    let x = (u * map.width as f32).clamp(0.0, (map.width - 1) as f32) as usize;
     let y = (v * map.height as f32).clamp(0.0, (map.height - 1) as f32) as usize;
     let off = (y * map.width as usize + x) * 3;
     Vec3::new(map.pixels[off], map.pixels[off + 1], map.pixels[off + 2])

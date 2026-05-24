@@ -12,8 +12,8 @@ pub mod lexer;
 pub mod parser;
 pub mod sema;
 
-pub use ast::{LangScript, SceneDef, StateBlock, StateField, Migration, Ty};
-pub use hir::{HirScript, HirScene, HirBtNode, HirCondition, HirEffect, HirField, HirMigration};
-pub use lexer::{Lexer, LexError, Token, TokenKind};
-pub use parser::{Parser, ParseError};
-pub use sema::{lower, SemaError, fnv1a};
+pub use ast::{LangScript, Migration, SceneDef, StateBlock, StateField, Ty};
+pub use hir::{HirBtNode, HirCondition, HirEffect, HirField, HirMigration, HirScene, HirScript};
+pub use lexer::{LexError, Lexer, Token, TokenKind};
+pub use parser::{ParseError, Parser};
+pub use sema::{SemaError, fnv1a, lower};
