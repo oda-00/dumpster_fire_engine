@@ -196,6 +196,7 @@ fn troupe_all(b: Bencher, n: usize) {
     });
     let c = Condition::TroupeAll {
         troupe: f.troupe_a,
+        troupe_idx: TroupeGroupHandle::new(0),
         predicate: inner,
     };
     b.bench_local(|| black_box(c.eval(&ctx(&f))));
@@ -210,6 +211,7 @@ fn troupe_any(b: Bencher, n: usize) {
     });
     let c = Condition::TroupeAny {
         troupe: f.troupe_a,
+        troupe_idx: TroupeGroupHandle::new(0),
         predicate: inner,
     };
     b.bench_local(|| black_box(c.eval(&ctx(&f))));

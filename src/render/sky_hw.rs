@@ -285,6 +285,7 @@ fn atmospheric(view: Vec3, sun: Vec3) -> Vec3 {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
+// Pure-math tests; no GPU device, Vulkan instance, or window required.
 #[cfg(test)]
 mod tests {
     use super::*;

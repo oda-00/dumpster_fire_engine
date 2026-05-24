@@ -781,6 +781,11 @@ fn ancestors_into_fields(
         }
     }
     out.reverse();
+    debug_assert!(
+        out.len() <= 32,
+        "HSM depth {} exceeds recommended maximum of 32; ancestor chain will thrash L1 cache",
+        out.len()
+    );
 }
 
 /// Build the complete active-configuration set into `out` (cleared first),

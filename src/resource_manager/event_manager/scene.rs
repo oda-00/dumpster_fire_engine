@@ -5,6 +5,8 @@ use crate::resource_manager::manager::{
 use crate::resource_manager::world_manager::stage::StageId;
 use crate::resource_manager::world_manager::world::World;
 use glam::{Affine3A, Vec3};
+use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use thin_vec::ThinVec;
@@ -23,6 +25,16 @@ pub type EventId = Id<EventMarker>;
 
 pub struct TroupeMarker;
 pub type TroupeId = Id<TroupeMarker>;
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct TroupeGroupTag;
+pub type TroupeGroupHandle = Handle<TroupeGroupTag>;
+
+impl TroupeGroupHandle {
+    pub fn new(idx: u32) -> Self {
+        Handle { idx, generation: NonZeroU32::MIN, _tag: PhantomData }
+    }
+}
 
 // ── ActiveActor ─────────────────────────────────────────────────────────────
 //
@@ -72,12 +84,12 @@ impl Troupe {
         Troupe(ThinVec::new())
     }
 
-    pub fn group(&self, idx: usize) -> Option<&[ActiveActor]> {
-        self.0.get(idx).map(|v| v.as_slice())
+    pub fn group(&self, h: TroupeGroupHandle) -> Option<&[ActiveActor]> {
+        self.0.get(h.idx as usize).map(|v| v.as_slice())
     }
 
-    pub fn group_mut(&mut self, idx: usize) -> Option<&mut ThinVec<ActiveActor>> {
-        self.0.get_mut(idx)
+    pub fn group_mut(&mut self, h: TroupeGroupHandle) -> Option<&mut ThinVec<ActiveActor>> {
+        self.0.get_mut(h.idx as usize)
     }
 
     pub fn iter_all(&self) -> impl Iterator<Item = &ActiveActor> {
@@ -460,11 +472,15 @@ pub enum Condition {
     /// Every actor in the named troupe satisfies the inner predicate.
     TroupeAll {
         troupe: TroupeId,
+        /// Pre-resolved group index; computed once at construction time.
+        troupe_idx: TroupeGroupHandle,
         predicate: Arc<Condition>,
     },
     /// Any actor in the named troupe satisfies the inner predicate.
     TroupeAny {
         troupe: TroupeId,
+        /// Pre-resolved group index; computed once at construction time.
+        troupe_idx: TroupeGroupHandle,
         predicate: Arc<Condition>,
     },
     /// A Custom event with this id was drained this tick.
@@ -512,22 +528,16 @@ impl Condition {
                 actor,
                 component_type,
             } => actor_has_component(ctx, *actor, *component_type),
-            Condition::TroupeAll { troupe, predicate } => {
-                let Some(idx) = ctx.troupes.iter().position(|t| t == troupe) else {
-                    return false;
-                };
-                let Some(group) = ctx.actors.group(idx) else {
+            Condition::TroupeAll { troupe_idx, predicate, .. } => {
+                let Some(group) = ctx.actors.group(*troupe_idx) else {
                     return false;
                 };
                 group
                     .iter()
                     .all(|a| predicate.eval_for_actor(ctx, a.actor_id))
             }
-            Condition::TroupeAny { troupe, predicate } => {
-                let Some(idx) = ctx.troupes.iter().position(|t| t == troupe) else {
-                    return false;
-                };
-                let Some(group) = ctx.actors.group(idx) else {
+            Condition::TroupeAny { troupe_idx, predicate, .. } => {
+                let Some(group) = ctx.actors.group(*troupe_idx) else {
                     return false;
                 };
                 group
@@ -1070,7 +1080,10 @@ impl Scene {
         }
     }
 
-    pub fn troupe_idx(&self, id: TroupeId) -> Option<usize> {
-        self.troupes.iter().position(|t| *t == id)
+    pub fn troupe_idx(&self, id: TroupeId) -> Option<TroupeGroupHandle> {
+        self.troupes
+            .iter()
+            .position(|t| *t == id)
+            .map(|i| TroupeGroupHandle::new(i as u32))
     }
 }

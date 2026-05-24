@@ -62,6 +62,11 @@ impl Level {
         Some(self.stages.get_mut(stage_h)?.spawn_actor(id, local))
     }
 
+    pub fn reserve_actors(&mut self, stage_h: StageHandle, additional: usize) -> Option<()> {
+        self.stages.get_mut(stage_h)?.reserve(additional);
+        Some(())
+    }
+
     pub fn spawn_sub_entity(
         &mut self,
         stage_h: StageHandle,

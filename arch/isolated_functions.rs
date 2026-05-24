@@ -595,6 +595,7 @@ fn bench_condition_eval(c: &mut Criterion) {
     g.bench_function("TroupeAll_100actors", |b| {
         let cond = Condition::TroupeAll {
             troupe: TroupeId::new(1),
+            troupe_idx: TroupeGroupHandle::new(0),
             predicate: Arc::new(Condition::ActorHasComponent {
                 actor: ActorId::new(1), // re-targeted per member
                 component_type: ComponentType::Physics,
