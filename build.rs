@@ -192,6 +192,10 @@ fn compile_external(ec: &ExtCompiler, src: &str, out: &str) -> bool {
 // ── Dev-tooling bootstrap ──────────────────────────────────────────────────
 
 fn ensure_iai_callgrind_runner() {
+    // iai-callgrind requires valgrind, which doesn't exist on Windows.
+    if std::env::consts::OS == "windows" {
+        return;
+    }
     const VERSION: &str = "0.16.1";
     // The runner prints its version to stderr in an error message, not stdout.
     // Check both streams and also accept a successful (zero) exit code.
