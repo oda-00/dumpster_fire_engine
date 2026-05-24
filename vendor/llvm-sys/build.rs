@@ -633,18 +633,85 @@ impl Drop for LockGuard {
     fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
 }
 
+// Returns true if the process with the given PID is currently running.
+fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // `kill -0` sends no signal but checks existence; works on Linux, macOS, BSDs.
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        // tasklist /FI filters by PID; no output means process is gone.
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .map(|o| {
+                let out = String::from_utf8_lossy(&o.stdout);
+                // Second CSV field on each line is the PID.
+                out.lines().any(|line| {
+                    let mut fields = line.split(',');
+                    fields.next();
+                    fields.next()
+                        .map(|f| f.trim().trim_matches('"') == pid.to_string())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    { true } // unknown platform: assume alive (conservative)
+}
+
+// Returns true if the lock file was left behind by a process that no longer exists.
+fn lock_is_stale(lock_path: &Path) -> bool {
+    let content = match std::fs::read_to_string(lock_path) {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
+    let pid: u32 = match content.trim().parse() {
+        Ok(p) => p,
+        // Old lock format with no PID — fall back to mtime: stale after 10 min.
+        Err(_) => {
+            return std::fs::metadata(lock_path)
+                .and_then(|m| m.modified())
+                .and_then(|t| std::time::SystemTime::now().duration_since(t).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+                .map(|age| age.as_secs() > 600)
+                .unwrap_or(true);
+        }
+    };
+    !pid_is_alive(pid)
+}
+
 // Coordinates between parallel cargo build-script processes so only one
 // actually downloads LLVM — the other polls and waits.
 fn download_llvm_prebuilt_coordinated(prefix: &Path, os: &str, arch: &str, llvm_config: &Path) {
     std::fs::create_dir_all(prefix).expect("failed to create LLVM prefix dir");
     let lock_path = prefix.join(".downloading");
 
+    // Purge a stale lock left by a previously-killed build before racing.
+    if lock_path.exists() && lock_is_stale(&lock_path) {
+        println!("cargo:warning=Stale LLVM 18 download lock detected (owner process is gone). Removing and retrying...");
+        let _ = std::fs::remove_file(&lock_path);
+    }
+
     // Try to become the downloader by atomically creating the lock file.
     let got_lock = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true) // fails if the file already exists
         .open(&lock_path)
-        .is_ok();
+        .map(|mut f| {
+            // Write our PID so waiters can detect if we die.
+            let _ = std::io::Write::write_all(&mut f, std::process::id().to_string().as_bytes());
+            true
+        })
+        .unwrap_or(false);
 
     if got_lock {
         // We won the race. LockGuard removes the sentinel on return OR panic.
@@ -667,6 +734,15 @@ fn download_llvm_prebuilt_coordinated(prefix: &Path, os: &str, arch: &str, llvm_
                 println!(
                     "cargo:warning=Previous LLVM 18 download appears to have failed. Retrying..."
                 );
+                download_llvm_prebuilt_coordinated(prefix, os, arch, llvm_config);
+                return;
+            }
+            // Owner process is gone but forgot to clean up — purge and take over.
+            if lock_is_stale(&lock_path) {
+                println!(
+                    "cargo:warning=LLVM 18 download lock is stale (owner process died). Taking over..."
+                );
+                let _ = std::fs::remove_file(&lock_path);
                 download_llvm_prebuilt_coordinated(prefix, os, arch, llvm_config);
                 return;
             }
