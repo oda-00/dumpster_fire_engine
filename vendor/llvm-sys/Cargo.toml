@@ -68,4 +68,4 @@ repository = "taricorp/llvm-sys.rs"
 status = "passively-maintained"
 
 [env]
-LLVM_SYS_180_PREFIX = { value = ".llvm/18", relative = true }
+LLVM_SYS_180_PREFIX = { value = "/vendor/llvm-sys/.llvm_build/", relative = true }
