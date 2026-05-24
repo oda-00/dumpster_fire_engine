@@ -71,9 +71,9 @@ pub fn decode_bc7(blocks: &[u8], width: u32, height: u32) -> ThinVec<u8> {
 /// it into the output. Border tiles that overhang the image dimensions get
 /// per-texel clipping; aligned tiles use a 16-byte per-row memcpy.
 fn transcode_blocks(
-    blocks:     &[u8],
-    width:      u32,
-    height:     u32,
+    blocks: &[u8],
+    width: u32,
+    height: u32,
     block_size: usize,
     mut decode: impl FnMut(&[u8]) -> [u8; 64],
 ) -> ThinVec<u8> {
@@ -91,8 +91,8 @@ fn transcode_blocks(
         core::ptr::write_bytes(out.as_mut_ptr(), 0, out_len);
     }
 
-    let bw = (w + 3) / 4;
-    let bh = (h + 3) / 4;
+    let bw = w.div_ceil(4);
+    let bh = h.div_ceil(4);
     let block_count = (blocks.len() / block_size).min(bw * bh);
 
     for bi in 0..block_count {
@@ -100,7 +100,7 @@ fn transcode_blocks(
         let by = bi / bw;
         let img_x0 = bx * 4;
         let img_y0 = by * 4;
-        let block = &blocks[bi * block_size .. bi * block_size + block_size];
+        let block = &blocks[bi * block_size..bi * block_size + block_size];
         let texels = decode(block);
 
         if img_x0 + 4 <= w && img_y0 + 4 <= h {
@@ -110,7 +110,9 @@ fn transcode_blocks(
                 let dp_base = out.as_mut_ptr().add(img_y0 * row_pitch + img_x0 * 4);
                 for row in 0..4 {
                     core::ptr::copy_nonoverlapping(
-                        sp.add(row * 16), dp_base.add(row * row_pitch), 16,
+                        sp.add(row * 16),
+                        dp_base.add(row * row_pitch),
+                        16,
                     );
                 }
             }
@@ -118,15 +120,21 @@ fn transcode_blocks(
             // Slow path: per-texel clip for the right/bottom border.
             for row in 0..4 {
                 let img_y = img_y0 + row;
-                if img_y >= h { break; }
+                if img_y >= h {
+                    break;
+                }
                 for col in 0..4 {
                     let img_x = img_x0 + col;
-                    if img_x >= w { break; }
+                    if img_x >= w {
+                        break;
+                    }
                     let src = (row * 4 + col) * 4;
                     let dst = (img_y * w + img_x) * 4;
                     unsafe {
                         core::ptr::copy_nonoverlapping(
-                            texels.as_ptr().add(src), out.as_mut_ptr().add(dst), 4,
+                            texels.as_ptr().add(src),
+                            out.as_mut_ptr().add(dst),
+                            4,
                         );
                     }
                 }
@@ -142,13 +150,15 @@ fn transcode_blocks(
 #[inline(always)]
 fn rgb565_to_rgb8(v: u16) -> [u8; 3] {
     let r5 = ((v >> 11) & 0x1f) as u8;
-    let g6 = ((v >>  5) & 0x3f) as u8;
-    let b5 = ( v        & 0x1f) as u8;
+    let g6 = ((v >> 5) & 0x3f) as u8;
+    let b5 = (v & 0x1f) as u8;
     // Expand 5/6-bit channels to 8-bit by replicating the top bits into the low
     // bits (standard "bit-shift + or" expansion).
-    [ (r5 << 3) | (r5 >> 2),
-      (g6 << 2) | (g6 >> 4),
-      (b5 << 3) | (b5 >> 2) ]
+    [
+        (r5 << 3) | (r5 >> 2),
+        (g6 << 2) | (g6 >> 4),
+        (b5 << 3) | (b5 >> 2),
+    ]
 }
 
 #[inline(always)]
@@ -159,18 +169,30 @@ fn lerp_u8(a: u8, b: u8, num: u32, den: u32) -> u8 {
 fn decode_bc1_block(block: &[u8]) -> [u8; 64] {
     let c0_raw = u16::from_le_bytes([block[0], block[1]]);
     let c1_raw = u16::from_le_bytes([block[2], block[3]]);
-    let bits   = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    let bits = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
     let c0 = rgb565_to_rgb8(c0_raw);
     let c1 = rgb565_to_rgb8(c1_raw);
     let (c2, c3, alpha_for_3): ([u8; 3], [u8; 3], u8) = if c0_raw > c1_raw {
         (
-            [lerp_u8(c0[0], c1[0], 1, 3), lerp_u8(c0[1], c1[1], 1, 3), lerp_u8(c0[2], c1[2], 1, 3)],
-            [lerp_u8(c0[0], c1[0], 2, 3), lerp_u8(c0[1], c1[1], 2, 3), lerp_u8(c0[2], c1[2], 2, 3)],
+            [
+                lerp_u8(c0[0], c1[0], 1, 3),
+                lerp_u8(c0[1], c1[1], 1, 3),
+                lerp_u8(c0[2], c1[2], 1, 3),
+            ],
+            [
+                lerp_u8(c0[0], c1[0], 2, 3),
+                lerp_u8(c0[1], c1[1], 2, 3),
+                lerp_u8(c0[2], c1[2], 2, 3),
+            ],
             255,
         )
     } else {
         (
-            [lerp_u8(c0[0], c1[0], 1, 2), lerp_u8(c0[1], c1[1], 1, 2), lerp_u8(c0[2], c1[2], 1, 2)],
+            [
+                lerp_u8(c0[0], c1[0], 1, 2),
+                lerp_u8(c0[1], c1[1], 1, 2),
+                lerp_u8(c0[2], c1[2], 1, 2),
+            ],
             [0, 0, 0],
             0,
         )
@@ -178,21 +200,35 @@ fn decode_bc1_block(block: &[u8]) -> [u8; 64] {
 
     // Pack a 16-byte palette: 4 RGBA entries.
     let palette: [u8; 16] = [
-        c0[0], c0[1], c0[2], 255,
-        c1[0], c1[1], c1[2], 255,
-        c2[0], c2[1], c2[2], 255,
-        c3[0], c3[1], c3[2], alpha_for_3,
+        c0[0],
+        c0[1],
+        c0[2],
+        255,
+        c1[0],
+        c1[1],
+        c1[2],
+        255,
+        c2[0],
+        c2[1],
+        c2[2],
+        255,
+        c3[0],
+        c3[1],
+        c3[2],
+        alpha_for_3,
     ];
 
     #[cfg(target_arch = "x86_64")]
-    unsafe { return decode_bc1_block_pshufb(&palette, bits); }
+    unsafe {
+        decode_bc1_block_pshufb(&palette, bits)
+    }
     #[cfg(not(target_arch = "x86_64"))]
     {
         let mut out = [0u8; 64];
         for i in 0..16 {
             let sel = ((bits >> (i * 2)) & 0x3) as usize;
             let dst = i * 4;
-            out[dst]     = palette[sel * 4];
+            out[dst] = palette[sel * 4];
             out[dst + 1] = palette[sel * 4 + 1];
             out[dst + 2] = palette[sel * 4 + 2];
             out[dst + 3] = palette[sel * 4 + 3];
@@ -215,17 +251,29 @@ unsafe fn decode_bc1_block_pshufb(palette: &[u8; 16], bits: u32) -> [u8; 64] {
         let mut out = [0u8; 64];
         for row in 0..4 {
             let sel_byte = (bits >> (row * 8)) as u8;
-            let s0 = ((sel_byte     ) & 3) as i8;
+            let s0 = ((sel_byte) & 3) as i8;
             let s1 = ((sel_byte >> 2) & 3) as i8;
             let s2 = ((sel_byte >> 4) & 3) as i8;
             let s3 = ((sel_byte >> 6) & 3) as i8;
             // Build per-byte palette offsets: 4 texels × 4 channel bytes.
             // Each selector contributes [s*4, s*4+1, s*4+2, s*4+3].
             let shuf = _mm_setr_epi8(
-                s0 * 4, s0 * 4 + 1, s0 * 4 + 2, s0 * 4 + 3,
-                s1 * 4, s1 * 4 + 1, s1 * 4 + 2, s1 * 4 + 3,
-                s2 * 4, s2 * 4 + 1, s2 * 4 + 2, s2 * 4 + 3,
-                s3 * 4, s3 * 4 + 1, s3 * 4 + 2, s3 * 4 + 3,
+                s0 * 4,
+                s0 * 4 + 1,
+                s0 * 4 + 2,
+                s0 * 4 + 3,
+                s1 * 4,
+                s1 * 4 + 1,
+                s1 * 4 + 2,
+                s1 * 4 + 3,
+                s2 * 4,
+                s2 * 4 + 1,
+                s2 * 4 + 2,
+                s2 * 4 + 3,
+                s3 * 4,
+                s3 * 4 + 1,
+                s3 * 4 + 2,
+                s3 * 4 + 3,
             );
             let row_v = _mm_shuffle_epi8(pal_v, shuf);
             _mm_storeu_si128(out.as_mut_ptr().add(row * 16) as *mut __m128i, row_v);
@@ -241,33 +289,41 @@ fn decode_bc2_block(block: &[u8]) -> [u8; 64] {
         block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
     ]);
 
-    let c0_raw = u16::from_le_bytes([block[8],  block[9]]);
+    let c0_raw = u16::from_le_bytes([block[8], block[9]]);
     let c1_raw = u16::from_le_bytes([block[10], block[11]]);
-    let bits   = u32::from_le_bytes([block[12], block[13], block[14], block[15]]);
+    let bits = u32::from_le_bytes([block[12], block[13], block[14], block[15]]);
     let c0 = rgb565_to_rgb8(c0_raw);
     let c1 = rgb565_to_rgb8(c1_raw);
-    let c2 = [lerp_u8(c0[0], c1[0], 1, 3), lerp_u8(c0[1], c1[1], 1, 3), lerp_u8(c0[2], c1[2], 1, 3)];
-    let c3 = [lerp_u8(c0[0], c1[0], 2, 3), lerp_u8(c0[1], c1[1], 2, 3), lerp_u8(c0[2], c1[2], 2, 3)];
+    let c2 = [
+        lerp_u8(c0[0], c1[0], 1, 3),
+        lerp_u8(c0[1], c1[1], 1, 3),
+        lerp_u8(c0[2], c1[2], 1, 3),
+    ];
+    let c3 = [
+        lerp_u8(c0[0], c1[0], 2, 3),
+        lerp_u8(c0[1], c1[1], 2, 3),
+        lerp_u8(c0[2], c1[2], 2, 3),
+    ];
 
     // SIMD palette gather for RGB via the BC1 helper; alpha overlay per
     // texel using the 4-bit packed stream (4 → 8 bits via byte
     // replication: a8 = (a4 << 4) | a4).
     let palette: [u8; 16] = [
-        c0[0], c0[1], c0[2], 255,
-        c1[0], c1[1], c1[2], 255,
-        c2[0], c2[1], c2[2], 255,
-        c3[0], c3[1], c3[2], 255,
+        c0[0], c0[1], c0[2], 255, c1[0], c1[1], c1[2], 255, c2[0], c2[1], c2[2], 255, c3[0], c3[1],
+        c3[2], 255,
     ];
     let mut out = {
         #[cfg(target_arch = "x86_64")]
-        unsafe { decode_bc1_block_pshufb(&palette, bits) }
+        unsafe {
+            decode_bc1_block_pshufb(&palette, bits)
+        }
         #[cfg(not(target_arch = "x86_64"))]
         {
             let mut tmp = [0u8; 64];
             for i in 0..16 {
                 let sel = ((bits >> (i * 2)) & 0x3) as usize;
                 let dst = i * 4;
-                tmp[dst]     = palette[sel * 4];
+                tmp[dst] = palette[sel * 4];
                 tmp[dst + 1] = palette[sel * 4 + 1];
                 tmp[dst + 2] = palette[sel * 4 + 2];
                 tmp[dst + 3] = 255;
@@ -276,7 +332,7 @@ fn decode_bc2_block(block: &[u8]) -> [u8; 64] {
         }
     };
     for i in 0..16 {
-        let a4  = ((alpha_bits >> (i * 4)) & 0xf) as u8;
+        let a4 = ((alpha_bits >> (i * 4)) & 0xf) as u8;
         out[i * 4 + 3] = (a4 << 4) | a4;
     }
     out
@@ -287,13 +343,21 @@ fn decode_bc3_block(block: &[u8]) -> [u8; 64] {
     let alpha_table = decode_bc4_alpha_table(&block[0..8]);
     let alpha = decode_bc4_selectors(&block[0..8], &alpha_table);
 
-    let c0_raw = u16::from_le_bytes([block[8],  block[9]]);
+    let c0_raw = u16::from_le_bytes([block[8], block[9]]);
     let c1_raw = u16::from_le_bytes([block[10], block[11]]);
-    let bits   = u32::from_le_bytes([block[12], block[13], block[14], block[15]]);
+    let bits = u32::from_le_bytes([block[12], block[13], block[14], block[15]]);
     let c0 = rgb565_to_rgb8(c0_raw);
     let c1 = rgb565_to_rgb8(c1_raw);
-    let c2 = [lerp_u8(c0[0], c1[0], 1, 3), lerp_u8(c0[1], c1[1], 1, 3), lerp_u8(c0[2], c1[2], 1, 3)];
-    let c3 = [lerp_u8(c0[0], c1[0], 2, 3), lerp_u8(c0[1], c1[1], 2, 3), lerp_u8(c0[2], c1[2], 2, 3)];
+    let c2 = [
+        lerp_u8(c0[0], c1[0], 1, 3),
+        lerp_u8(c0[1], c1[1], 1, 3),
+        lerp_u8(c0[2], c1[2], 1, 3),
+    ];
+    let c3 = [
+        lerp_u8(c0[0], c1[0], 2, 3),
+        lerp_u8(c0[1], c1[1], 2, 3),
+        lerp_u8(c0[2], c1[2], 2, 3),
+    ];
 
     // Decode RGB via the same SSSE3 palette gather BC1 uses, then overlay the
     // independently-decoded 8-bit alpha channel byte-by-byte. The colour pass
@@ -301,21 +365,21 @@ fn decode_bc3_block(block: &[u8]) -> [u8; 64] {
     // alpha. Net cost: one SIMD palette gather + 16 byte writes vs 16 full
     // scalar texel writes.
     let palette: [u8; 16] = [
-        c0[0], c0[1], c0[2], 255,
-        c1[0], c1[1], c1[2], 255,
-        c2[0], c2[1], c2[2], 255,
-        c3[0], c3[1], c3[2], 255,
+        c0[0], c0[1], c0[2], 255, c1[0], c1[1], c1[2], 255, c2[0], c2[1], c2[2], 255, c3[0], c3[1],
+        c3[2], 255,
     ];
     let mut out = {
         #[cfg(target_arch = "x86_64")]
-        unsafe { decode_bc1_block_pshufb(&palette, bits) }
+        unsafe {
+            decode_bc1_block_pshufb(&palette, bits)
+        }
         #[cfg(not(target_arch = "x86_64"))]
         {
             let mut tmp = [0u8; 64];
             for i in 0..16 {
                 let sel = ((bits >> (i * 2)) & 0x3) as usize;
                 let dst = i * 4;
-                tmp[dst]     = palette[sel * 4];
+                tmp[dst] = palette[sel * 4];
                 tmp[dst + 1] = palette[sel * 4 + 1];
                 tmp[dst + 2] = palette[sel * 4 + 2];
                 tmp[dst + 3] = 255;
@@ -331,12 +395,12 @@ fn decode_bc3_block(block: &[u8]) -> [u8; 64] {
 
 fn decode_bc4_block(block: &[u8]) -> [u8; 64] {
     let table = decode_bc4_alpha_table(block);
-    let red   = decode_bc4_selectors(block, &table);
+    let red = decode_bc4_selectors(block, &table);
 
     let mut out = [0u8; 64];
-    for i in 0..16 {
+    for (i, &r) in red.iter().enumerate() {
         let dst = i * 4;
-        out[dst]     = red[i];
+        out[dst] = r;
         out[dst + 1] = 0;
         out[dst + 2] = 0;
         out[dst + 3] = 255;
@@ -346,15 +410,15 @@ fn decode_bc4_block(block: &[u8]) -> [u8; 64] {
 
 fn decode_bc5_block(block: &[u8]) -> [u8; 64] {
     let r_table = decode_bc4_alpha_table(&block[0..8]);
-    let red     = decode_bc4_selectors(&block[0..8], &r_table);
+    let red = decode_bc4_selectors(&block[0..8], &r_table);
     let g_table = decode_bc4_alpha_table(&block[8..16]);
-    let green   = decode_bc4_selectors(&block[8..16], &g_table);
+    let green = decode_bc4_selectors(&block[8..16], &g_table);
 
     let mut out = [0u8; 64];
-    for i in 0..16 {
+    for (i, (&r, &g)) in red.iter().zip(green.iter()).enumerate() {
         let dst = i * 4;
-        out[dst]     = red[i];
-        out[dst + 1] = green[i];
+        out[dst] = r;
+        out[dst + 1] = g;
         out[dst + 2] = 0;
         out[dst + 3] = 255;
     }
@@ -389,16 +453,16 @@ fn decode_bc4_alpha_table(block: &[u8]) -> [u8; 8] {
 fn decode_bc4_selectors(block: &[u8], table: &[u8; 8]) -> [u8; 16] {
     let sel_lo = u32::from_le_bytes([block[2], block[3], block[4], 0]);
     let sel_hi = u32::from_le_bytes([block[5], block[6], block[7], 0]);
-    let bits   = (sel_lo as u64) | ((sel_hi as u64) << 24);
+    let bits = (sel_lo as u64) | ((sel_hi as u64) << 24);
     // The compiler auto-vectorizes the 16 single-byte writes very
     // effectively here; an explicit pshufb path was 15-25% slower in
     // benchmarks because the 16 scalar bit-extractions to build the
     // shuffle vector dominate when the table lookup itself is
     // already one cycle.
     let mut out = [0u8; 16];
-    for i in 0..16 {
+    for (i, slot) in out.iter_mut().enumerate() {
         let idx = ((bits >> (i * 3)) & 0x7) as usize;
-        out[i] = table[idx];
+        *slot = table[idx];
     }
     out
 }
@@ -414,10 +478,8 @@ fn decode_bc4_selectors(block: &[u8], table: &[u8; 8]) -> [u8; 16] {
 
 fn decode_bc7_block(block: &[u8]) -> [u8; 64] {
     let data = u128::from_le_bytes([
-        block[ 0], block[ 1], block[ 2], block[ 3],
-        block[ 4], block[ 5], block[ 6], block[ 7],
-        block[ 8], block[ 9], block[10], block[11],
-        block[12], block[13], block[14], block[15],
+        block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7], block[8],
+        block[9], block[10], block[11], block[12], block[13], block[14], block[15],
     ]);
     // Mode = position of the lowest set bit; 0xff if data is zero.
     let mode = (data & 0xff) as u8;
@@ -425,7 +487,9 @@ fn decode_bc7_block(block: &[u8]) -> [u8; 64] {
         return fill_magenta();
     }
     let mut m = 0u8;
-    while (mode >> m) & 1 == 0 && m < 8 { m += 1; }
+    while (mode >> m) & 1 == 0 && m < 8 {
+        m += 1;
+    }
     match m {
         5 => decode_bc7_mode5(data),
         6 => decode_bc7_mode6(data),
@@ -437,7 +501,10 @@ fn fill_magenta() -> [u8; 64] {
     let mut out = [0u8; 64];
     for i in 0..16 {
         let d = i * 4;
-        out[d] = 255; out[d + 1] = 0; out[d + 2] = 255; out[d + 3] = 255;
+        out[d] = 255;
+        out[d + 1] = 0;
+        out[d + 2] = 255;
+        out[d + 3] = 255;
     }
     out
 }
@@ -451,8 +518,12 @@ fn decode_bc7_mode5(data: u128) -> [u8; 64] {
     // Endpoints: 4 × 7-bit (RGBA) for endpoint 0 and endpoint 1.
     let mut e0 = [0u8; 4];
     let mut e1 = [0u8; 4];
-    for c in 0..4 { e0[c] = (take_bits(data, &mut bit, 7) as u8) << 1; }
-    for c in 0..4 { e1[c] = (take_bits(data, &mut bit, 7) as u8) << 1; }
+    for slot in e0.iter_mut() {
+        *slot = (take_bits(data, &mut bit, 7) as u8) << 1;
+    }
+    for slot in e1.iter_mut() {
+        *slot = (take_bits(data, &mut bit, 7) as u8) << 1;
+    }
     // Add the lsb back as the high bit of the low byte (BC7 stores LSB
     // last, but mode-5 has no P-bits — so we keep the 7-bit value left-
     // shifted by 1 which biases the range correctly per the spec).
@@ -464,23 +535,23 @@ fn decode_bc7_mode5(data: u128) -> [u8; 64] {
     // Anchor index 0 has a 1-bit weight; the rest have 2-bit weights.
     // Decode colour weights first (16 weights, 31 bits total).
     let mut color_w = [0u8; 16];
-    for i in 0..16 {
+    for (i, slot) in color_w.iter_mut().enumerate() {
         let bits = if i == 0 { 1 } else { 2 };
-        color_w[i] = take_bits(data, &mut bit, bits) as u8;
+        *slot = take_bits(data, &mut bit, bits) as u8;
     }
     let mut alpha_w = [0u8; 16];
-    for i in 0..16 {
+    for (i, slot) in alpha_w.iter_mut().enumerate() {
         let bits = if i == 0 { 1 } else { 2 };
-        alpha_w[i] = take_bits(data, &mut bit, bits) as u8;
+        *slot = take_bits(data, &mut bit, bits) as u8;
     }
 
     let mut out = [0u8; 64];
-    for i in 0..16 {
+    for (i, (&cw_raw, &aw_raw)) in color_w.iter().zip(alpha_w.iter()).enumerate() {
         // 2-bit weights: BC7 spec weight table is {0, 21, 43, 64} for 2-bit
         // (the anchor's 1-bit form expands to {0, 32} but the same
         // interpolation formula applies via this table).
-        let cw = bc7_2bit_weight(color_w[i]);
-        let aw = bc7_2bit_weight(alpha_w[i]);
+        let cw = bc7_2bit_weight(cw_raw);
+        let aw = bc7_2bit_weight(aw_raw);
         let r = interpolate(e0[0], e1[0], cw);
         let g = interpolate(e0[1], e1[1], cw);
         let b = interpolate(e0[2], e1[2], cw);
@@ -495,7 +566,7 @@ fn decode_bc7_mode5(data: u128) -> [u8; 64] {
         };
 
         let d = i * 4;
-        out[d]     = r;
+        out[d] = r;
         out[d + 1] = g;
         out[d + 2] = b;
         out[d + 3] = a;
@@ -509,8 +580,12 @@ fn decode_bc7_mode6(data: u128) -> [u8; 64] {
     let mut bit = 7u32; // skip 7 mode bits (6 zeros + the 1 bit)
     let mut e0 = [0u8; 4];
     let mut e1 = [0u8; 4];
-    for c in 0..4 { e0[c] = take_bits(data, &mut bit, 7) as u8; }
-    for c in 0..4 { e1[c] = take_bits(data, &mut bit, 7) as u8; }
+    for slot in e0.iter_mut() {
+        *slot = take_bits(data, &mut bit, 7) as u8;
+    }
+    for slot in e1.iter_mut() {
+        *slot = take_bits(data, &mut bit, 7) as u8;
+    }
     let p0 = take_bits(data, &mut bit, 1) as u8;
     let p1 = take_bits(data, &mut bit, 1) as u8;
     for c in 0..4 {
@@ -520,16 +595,16 @@ fn decode_bc7_mode6(data: u128) -> [u8; 64] {
 
     // 16 × 4-bit weights (anchor has 3-bit weight).
     let mut weights = [0u8; 16];
-    for i in 0..16 {
+    for (i, slot) in weights.iter_mut().enumerate() {
         let bits = if i == 0 { 3 } else { 4 };
-        weights[i] = take_bits(data, &mut bit, bits) as u8;
+        *slot = take_bits(data, &mut bit, bits) as u8;
     }
 
     let mut out = [0u8; 64];
-    for i in 0..16 {
-        let w = bc7_4bit_weight(weights[i]);
+    for (i, &wt) in weights.iter().enumerate() {
+        let w = bc7_4bit_weight(wt);
         let d = i * 4;
-        out[d]     = interpolate(e0[0], e1[0], w);
+        out[d] = interpolate(e0[0], e1[0], w);
         out[d + 1] = interpolate(e0[1], e1[1], w);
         out[d + 2] = interpolate(e0[2], e1[2], w);
         out[d + 3] = interpolate(e0[3], e1[3], w);
@@ -547,7 +622,12 @@ fn take_bits(data: u128, bit: &mut u32, n: u32) -> u32 {
 #[inline(always)]
 fn bc7_2bit_weight(w: u8) -> u32 {
     // 2-bit weight table from the BC7 spec.
-    match w & 0x3 { 0 => 0, 1 => 21, 2 => 43, _ => 64 }
+    match w & 0x3 {
+        0 => 0,
+        1 => 21,
+        2 => 43,
+        _ => 64,
+    }
 }
 
 #[inline(always)]
@@ -574,16 +654,18 @@ mod tests {
         // c1 (or their lerps, which are also red). Selectors all-zero.
         let red = 0xF800u16.to_le_bytes();
         let mut block = [0u8; 8];
-        block[0] = red[0]; block[1] = red[1];
-        block[2] = red[0]; block[3] = red[1];
+        block[0] = red[0];
+        block[1] = red[1];
+        block[2] = red[0];
+        block[3] = red[1];
         // selectors all 00 → c0 for every texel
         let out = decode_bc1_block(&block);
         // RGB565 0xF800 → R5 = 0x1f → 0xFF (5-bit-to-8-bit replication).
         for i in 0..16 {
-            assert_eq!(out[i * 4],     0xFF, "R should be red at texel {i}");
-            assert_eq!(out[i * 4 + 1], 0,    "G should be 0 at texel {i}");
-            assert_eq!(out[i * 4 + 2], 0,    "B should be 0 at texel {i}");
-            assert_eq!(out[i * 4 + 3], 255,  "A should be 255 at texel {i}");
+            assert_eq!(out[i * 4], 0xFF, "R should be red at texel {i}");
+            assert_eq!(out[i * 4 + 1], 0, "G should be 0 at texel {i}");
+            assert_eq!(out[i * 4 + 2], 0, "B should be 0 at texel {i}");
+            assert_eq!(out[i * 4 + 3], 255, "A should be 255 at texel {i}");
         }
     }
 
@@ -592,7 +674,7 @@ mod tests {
         let block = [0u8; 8];
         let out = decode_bc4_block(&block);
         for i in 0..16 {
-            assert_eq!(out[i * 4],     0);
+            assert_eq!(out[i * 4], 0);
             assert_eq!(out[i * 4 + 1], 0);
             assert_eq!(out[i * 4 + 2], 0);
             assert_eq!(out[i * 4 + 3], 255);
@@ -603,7 +685,8 @@ mod tests {
     fn bc4_endpoint_pair_lerps_correctly() {
         // a0 = 0, a1 = 255 with selectors all 1 should produce a1=255.
         let mut block = [0u8; 8];
-        block[0] = 0;  block[1] = 255;
+        block[0] = 0;
+        block[1] = 255;
         // All selectors = 1 (3 bits each, 16 entries = 48 bits = 6 bytes).
         // Pack 1 every 3 bits: 0b001001001001001001001001001001001001001001001001 = 0x249249249249.
         let pat: u64 = 0x249249249249;

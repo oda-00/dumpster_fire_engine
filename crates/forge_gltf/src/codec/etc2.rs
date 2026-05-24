@@ -58,9 +58,9 @@ pub fn decode_eac_r11g11(blocks: &[u8], width: u32, height: u32) -> ThinVec<u8> 
 // ─── Scatter driver (shared with BC) ────────────────────────────────────────
 
 fn transcode_blocks(
-    blocks:     &[u8],
-    width:      u32,
-    height:     u32,
+    blocks: &[u8],
+    width: u32,
+    height: u32,
     block_size: usize,
     mut decode: impl FnMut(&[u8]) -> [u8; 64],
 ) -> ThinVec<u8> {
@@ -73,15 +73,15 @@ fn transcode_blocks(
         out.set_len(out_len);
         core::ptr::write_bytes(out.as_mut_ptr(), 0, out_len);
     }
-    let bw = (w + 3) / 4;
-    let bh = (h + 3) / 4;
+    let bw = w.div_ceil(4);
+    let bh = h.div_ceil(4);
     let block_count = (blocks.len() / block_size).min(bw * bh);
     for bi in 0..block_count {
         let bx = bi % bw;
         let by = bi / bw;
         let img_x0 = bx * 4;
         let img_y0 = by * 4;
-        let block = &blocks[bi * block_size .. bi * block_size + block_size];
+        let block = &blocks[bi * block_size..bi * block_size + block_size];
         let texels = decode(block);
         if img_x0 + 4 <= w && img_y0 + 4 <= h {
             unsafe {
@@ -89,22 +89,30 @@ fn transcode_blocks(
                 let dp_base = out.as_mut_ptr().add(img_y0 * row_pitch + img_x0 * 4);
                 for row in 0..4 {
                     core::ptr::copy_nonoverlapping(
-                        sp.add(row * 16), dp_base.add(row * row_pitch), 16,
+                        sp.add(row * 16),
+                        dp_base.add(row * row_pitch),
+                        16,
                     );
                 }
             }
         } else {
             for row in 0..4 {
                 let img_y = img_y0 + row;
-                if img_y >= h { break; }
+                if img_y >= h {
+                    break;
+                }
                 for col in 0..4 {
                     let img_x = img_x0 + col;
-                    if img_x >= w { break; }
+                    if img_x >= w {
+                        break;
+                    }
                     let src = (row * 4 + col) * 4;
                     let dst = (img_y * w + img_x) * 4;
                     unsafe {
                         core::ptr::copy_nonoverlapping(
-                            texels.as_ptr().add(src), out.as_mut_ptr().add(dst), 4,
+                            texels.as_ptr().add(src),
+                            out.as_mut_ptr().add(dst),
+                            4,
                         );
                     }
                 }
@@ -119,14 +127,14 @@ fn transcode_blocks(
 /// ETC1 / ETC2 four-entry intensity modifier per intensity-table index.
 /// Per the Khronos ETC2 spec table 3.17.2.
 const INTEN_TABLE: [[i16; 4]; 8] = [
-    [ -8,  -2,   2,   8],
-    [-17,  -5,   5,  17],
-    [-29,  -9,   9,  29],
-    [-42, -13,  13,  42],
-    [-60, -18,  18,  60],
-    [-80, -24,  24,  80],
-    [-106,-33,  33, 106],
-    [-183,-47,  47, 183],
+    [-8, -2, 2, 8],
+    [-17, -5, 5, 17],
+    [-29, -9, 9, 29],
+    [-42, -13, 13, 42],
+    [-60, -18, 18, 60],
+    [-80, -24, 24, 80],
+    [-106, -33, 33, 106],
+    [-183, -47, 47, 183],
 ];
 
 /// ETC2 "T" mode distance table — Khronos ETC2 spec table 3.17.5.
@@ -137,26 +145,28 @@ const T_DISTANCE: [u16; 8] = [3, 6, 11, 16, 23, 32, 41, 64];
 
 /// EAC 8-bit alpha modifier table per intensity index. 16 entries × 8 rows.
 const EAC_TABLE: [[i16; 16]; 16] = [
-    [-3, -6,  -9, -15, 2, 5, 8, 14, -3, -6,  -9, -15, 2, 5, 8, 14],
+    [-3, -6, -9, -15, 2, 5, 8, 14, -3, -6, -9, -15, 2, 5, 8, 14],
     [-3, -7, -10, -13, 2, 6, 9, 12, -3, -7, -10, -13, 2, 6, 9, 12],
-    [-2, -5,  -8, -13, 1, 4, 7, 12, -2, -5,  -8, -13, 1, 4, 7, 12],
-    [-2, -4,  -6, -13, 1, 3, 5, 12, -2, -4,  -6, -13, 1, 3, 5, 12],
-    [-3, -6,  -8, -12, 2, 5, 7, 11, -3, -6,  -8, -12, 2, 5, 7, 11],
-    [-3, -7,  -9, -11, 2, 6, 8, 10, -3, -7,  -9, -11, 2, 6, 8, 10],
-    [-4, -7,  -8, -11, 3, 6, 7, 10, -4, -7,  -8, -11, 3, 6, 7, 10],
-    [-3, -5,  -8, -11, 2, 4, 7, 10, -3, -5,  -8, -11, 2, 4, 7, 10],
-    [-2, -6,  -8, -10, 1, 5, 7,  9, -2, -6,  -8, -10, 1, 5, 7,  9],
-    [-2, -5,  -8, -10, 1, 4, 7,  9, -2, -5,  -8, -10, 1, 4, 7,  9],
-    [-2, -4,  -8, -10, 1, 3, 7,  9, -2, -4,  -8, -10, 1, 3, 7,  9],
-    [-2, -5,  -7, -10, 1, 4, 6,  9, -2, -5,  -7, -10, 1, 4, 6,  9],
-    [-3, -4,  -7, -10, 2, 3, 6,  9, -3, -4,  -7, -10, 2, 3, 6,  9],
-    [-1, -2,  -3, -10, 0, 1, 2,  9, -1, -2,  -3, -10, 0, 1, 2,  9],
-    [-4, -6,  -8,  -9, 3, 5, 7,  8, -4, -6,  -8,  -9, 3, 5, 7,  8],
-    [-3, -5,  -7,  -9, 2, 4, 6,  8, -3, -5,  -7,  -9, 2, 4, 6,  8],
+    [-2, -5, -8, -13, 1, 4, 7, 12, -2, -5, -8, -13, 1, 4, 7, 12],
+    [-2, -4, -6, -13, 1, 3, 5, 12, -2, -4, -6, -13, 1, 3, 5, 12],
+    [-3, -6, -8, -12, 2, 5, 7, 11, -3, -6, -8, -12, 2, 5, 7, 11],
+    [-3, -7, -9, -11, 2, 6, 8, 10, -3, -7, -9, -11, 2, 6, 8, 10],
+    [-4, -7, -8, -11, 3, 6, 7, 10, -4, -7, -8, -11, 3, 6, 7, 10],
+    [-3, -5, -8, -11, 2, 4, 7, 10, -3, -5, -8, -11, 2, 4, 7, 10],
+    [-2, -6, -8, -10, 1, 5, 7, 9, -2, -6, -8, -10, 1, 5, 7, 9],
+    [-2, -5, -8, -10, 1, 4, 7, 9, -2, -5, -8, -10, 1, 4, 7, 9],
+    [-2, -4, -8, -10, 1, 3, 7, 9, -2, -4, -8, -10, 1, 3, 7, 9],
+    [-2, -5, -7, -10, 1, 4, 6, 9, -2, -5, -7, -10, 1, 4, 6, 9],
+    [-3, -4, -7, -10, 2, 3, 6, 9, -3, -4, -7, -10, 2, 3, 6, 9],
+    [-1, -2, -3, -10, 0, 1, 2, 9, -1, -2, -3, -10, 0, 1, 2, 9],
+    [-4, -6, -8, -9, 3, 5, 7, 8, -4, -6, -8, -9, 3, 5, 7, 8],
+    [-3, -5, -7, -9, 2, 4, 6, 8, -3, -5, -7, -9, 2, 4, 6, 8],
 ];
 
 #[inline(always)]
-fn clamp_u8(v: i32) -> u8 { v.clamp(0, 255) as u8 }
+fn clamp_u8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
 
 #[inline(always)]
 fn expand_signed_3bit(v: u8) -> i8 {
@@ -166,9 +176,13 @@ fn expand_signed_3bit(v: u8) -> i8 {
 }
 
 #[inline(always)]
-fn extend4to8(v: u8) -> u8 { (v << 4) | v }
+fn extend4to8(v: u8) -> u8 {
+    (v << 4) | v
+}
 #[inline(always)]
-fn extend5to8(v: u8) -> u8 { (v << 3) | (v >> 2) }
+fn extend5to8(v: u8) -> u8 {
+    (v << 3) | (v >> 2)
+}
 
 // ─── ETC2 RGB block decode ──────────────────────────────────────────────────
 
@@ -196,10 +210,10 @@ fn decode_etc2_rgba8_block(block: &[u8]) -> [u8; 64] {
 }
 
 fn decode_etc2_rgb_into(block: &[u8], out: &mut [u8; 64], default_alpha: u8, punch_through: bool) {
-    let r1     = block[0];
-    let g1     = block[1];
-    let b1     = block[2];
-    let r2     = block[3];
+    let r1 = block[0];
+    let g1 = block[1];
+    let b1 = block[2];
+    let r2 = block[3];
     let pixels = u32::from_be_bytes([block[4], block[5], block[6], block[7]]);
 
     // The "diffbit" of byte 0..3 controls ETC1-individual vs ETC1-differential.
@@ -209,12 +223,29 @@ fn decode_etc2_rgb_into(block: &[u8], out: &mut [u8; 64], default_alpha: u8, pun
 
     if !diffbit {
         // ETC1 individual mode: two 4-bit colours per subblock.
-        let c1 = [extend4to8(r1 >> 4), extend4to8(g1 >> 4), extend4to8(b1 >> 4)];
-        let c2 = [extend4to8(r1 & 0xf), extend4to8(g1 & 0xf), extend4to8(b1 & 0xf)];
+        let c1 = [
+            extend4to8(r1 >> 4),
+            extend4to8(g1 >> 4),
+            extend4to8(b1 >> 4),
+        ];
+        let c2 = [
+            extend4to8(r1 & 0xf),
+            extend4to8(g1 & 0xf),
+            extend4to8(b1 & 0xf),
+        ];
         let table1 = (block[3] >> 5) & 0x7;
         let table2 = (block[3] >> 2) & 0x7;
         let flipbit = (block[3] & 0x1) != 0;
-        decode_etc1_subblocks(&c1, &c2, table1, table2, flipbit, pixels, out, default_alpha);
+        decode_etc1_subblocks(
+            &c1,
+            &c2,
+            table1,
+            table2,
+            flipbit,
+            pixels,
+            out,
+            default_alpha,
+        );
         return;
     }
 
@@ -233,31 +264,50 @@ fn decode_etc2_rgb_into(block: &[u8], out: &mut [u8; 64], default_alpha: u8, pun
     // overflows the 5-bit range, T/H/Planar take over. The branching
     // order is fixed by the spec — R overflow → T, G overflow → H,
     // B overflow → Planar.
-    if r5_b < 0 || r5_b > 31 {
+    if !(0..=31).contains(&r5_b) {
         decode_etc2_t_mode(block, out, default_alpha);
         return;
     }
-    if g5_b < 0 || g5_b > 31 {
+    if !(0..=31).contains(&g5_b) {
         decode_etc2_h_mode(block, out, default_alpha);
         return;
     }
-    if b5_b < 0 || b5_b > 31 {
+    if !(0..=31).contains(&b5_b) {
         decode_etc2_planar_mode(block, out, default_alpha);
         return;
     }
 
-    let c1 = [extend5to8(r5_a),       extend5to8(g5_a),       extend5to8(b5_a)];
-    let c2 = [extend5to8(r5_b as u8), extend5to8(g5_b as u8), extend5to8(b5_b as u8)];
+    let c1 = [extend5to8(r5_a), extend5to8(g5_a), extend5to8(b5_a)];
+    let c2 = [
+        extend5to8(r5_b as u8),
+        extend5to8(g5_b as u8),
+        extend5to8(b5_b as u8),
+    ];
     let table1 = (block[3] >> 5) & 0x7;
     let table2 = (block[3] >> 2) & 0x7;
     let flipbit = (block[3] & 0x1) != 0;
-    decode_etc1_subblocks(&c1, &c2, table1, table2, flipbit, pixels, out, default_alpha);
+    decode_etc1_subblocks(
+        &c1,
+        &c2,
+        table1,
+        table2,
+        flipbit,
+        pixels,
+        out,
+        default_alpha,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_etc1_subblocks(
-    c1: &[u8; 3], c2: &[u8; 3],
-    table1: u8, table2: u8, flipbit: bool,
-    pixels: u32, out: &mut [u8; 64], default_alpha: u8,
+    c1: &[u8; 3],
+    c2: &[u8; 3],
+    table1: u8,
+    table2: u8,
+    flipbit: bool,
+    pixels: u32,
+    out: &mut [u8; 64],
+    default_alpha: u8,
 ) {
     let row1 = &INTEN_TABLE[(table1 & 7) as usize];
     let row2 = &INTEN_TABLE[(table2 & 7) as usize];
@@ -271,7 +321,6 @@ fn decode_etc1_subblocks(
     #[cfg(target_arch = "x86_64")]
     unsafe {
         decode_etc1_subblocks_pshufb(&pal1, &pal2, flipbit, pixels, out);
-        return;
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -284,11 +333,15 @@ fn decode_etc1_subblocks(
             let sel = (msb << 1) | lsb;
             let x = tx >> 2;
             let y = tx & 3;
-            let in_sub1 = if flipbit { (y as u32) < 2 } else { (x as u32) < 2 };
+            let in_sub1 = if flipbit {
+                (y as u32) < 2
+            } else {
+                (x as u32) < 2
+            };
             let pal = if in_sub1 { &pal1 } else { &pal2 };
             let src = (sel as usize) * 4;
             let dst = (y * 4 + x) * 4;
-            out[dst]     = pal[src];
+            out[dst] = pal[src];
             out[dst + 1] = pal[src + 1];
             out[dst + 2] = pal[src + 2];
             out[dst + 3] = pal[src + 3];
@@ -302,7 +355,7 @@ fn make_etc1_palette(base: &[u8; 3], table: &[i16; 4], default_alpha: u8) -> [u8
     let mut p = [0u8; 16];
     for sel in 0..4 {
         let m = table[sel] as i32;
-        p[sel * 4    ] = clamp_u8(base[0] as i32 + m);
+        p[sel * 4] = clamp_u8(base[0] as i32 + m);
         p[sel * 4 + 1] = clamp_u8(base[1] as i32 + m);
         p[sel * 4 + 2] = clamp_u8(base[2] as i32 + m);
         p[sel * 4 + 3] = default_alpha;
@@ -320,8 +373,11 @@ fn make_etc1_palette(base: &[u8; 3], table: &[i16; 4], default_alpha: u8) -> [u8
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3")]
 unsafe fn decode_etc1_subblocks_pshufb(
-    pal1: &[u8; 16], pal2: &[u8; 16],
-    flipbit: bool, pixels: u32, out: &mut [u8; 64],
+    pal1: &[u8; 16],
+    pal2: &[u8; 16],
+    flipbit: bool,
+    pixels: u32,
+    out: &mut [u8; 64],
 ) {
     use std::arch::x86_64::*;
     unsafe {
@@ -338,22 +394,37 @@ unsafe fn decode_etc1_subblocks_pshufb(
         };
 
         for y in 0..4usize {
-            let s0 = sel(0 + y) as i8;
+            let s0 = sel(y) as i8;
             let s1 = sel(4 + y) as i8;
             let s2 = sel(8 + y) as i8;
             let s3 = sel(12 + y) as i8;
             let shuf = _mm_setr_epi8(
-                s0 * 4, s0 * 4 + 1, s0 * 4 + 2, s0 * 4 + 3,
-                s1 * 4, s1 * 4 + 1, s1 * 4 + 2, s1 * 4 + 3,
-                s2 * 4, s2 * 4 + 1, s2 * 4 + 2, s2 * 4 + 3,
-                s3 * 4, s3 * 4 + 1, s3 * 4 + 2, s3 * 4 + 3,
+                s0 * 4,
+                s0 * 4 + 1,
+                s0 * 4 + 2,
+                s0 * 4 + 3,
+                s1 * 4,
+                s1 * 4 + 1,
+                s1 * 4 + 2,
+                s1 * 4 + 3,
+                s2 * 4,
+                s2 * 4 + 1,
+                s2 * 4 + 2,
+                s2 * 4 + 3,
+                s3 * 4,
+                s3 * 4 + 1,
+                s3 * 4 + 2,
+                s3 * 4 + 3,
             );
 
             // Pick palette (or blend two) for this row.
             let row_v = if flipbit {
                 // Whole row in one sub-block: y < 2 → sub1, else sub2.
-                if y < 2 { _mm_shuffle_epi8(p1_v, shuf) }
-                else     { _mm_shuffle_epi8(p2_v, shuf) }
+                if y < 2 {
+                    _mm_shuffle_epi8(p1_v, shuf)
+                } else {
+                    _mm_shuffle_epi8(p2_v, shuf)
+                }
             } else {
                 // Per-texel split at column 2. Gather from both palettes,
                 // mask-blend the four 4-byte pixels: pixels 0,1 from sub1,
@@ -362,10 +433,7 @@ unsafe fn decode_etc1_subblocks_pshufb(
                 let from_p2 = _mm_shuffle_epi8(p2_v, shuf);
                 // Mask: 0x00 for sub1 bytes (pixels 0,1 = bytes 0..7),
                 //       0xFF for sub2 bytes (pixels 2,3 = bytes 8..15).
-                let mask = _mm_setr_epi8(
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                    -1, -1, -1, -1, -1, -1, -1, -1,
-                );
+                let mask = _mm_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1);
                 // result = (from_p1 & ~mask) | (from_p2 & mask) using
                 // SSE2 ops (no SSE4.1 _mm_blendv_epi8 dependency).
                 let keep_p1 = _mm_andnot_si128(mask, from_p1);
@@ -430,12 +498,20 @@ fn decode_etc2_t_mode(block: &[u8], out: &mut [u8; 64], default_alpha: u8) {
         let sel = etc2_selector(pixels, tx);
         let rgb = match sel {
             0 => c0,
-            1 => [clamp_u8(c0[0] as i32 + d), clamp_u8(c0[1] as i32 + d), clamp_u8(c0[2] as i32 + d)],
+            1 => [
+                clamp_u8(c0[0] as i32 + d),
+                clamp_u8(c0[1] as i32 + d),
+                clamp_u8(c0[2] as i32 + d),
+            ],
             2 => c1,
-            _ => [clamp_u8(c1[0] as i32 - d), clamp_u8(c1[1] as i32 - d), clamp_u8(c1[2] as i32 - d)],
+            _ => [
+                clamp_u8(c1[0] as i32 - d),
+                clamp_u8(c1[1] as i32 - d),
+                clamp_u8(c1[2] as i32 - d),
+            ],
         };
         let dst = etc2_dst_offset(tx);
-        out[dst]     = rgb[0];
+        out[dst] = rgb[0];
         out[dst + 1] = rgb[1];
         out[dst + 2] = rgb[2];
         out[dst + 3] = default_alpha;
@@ -478,16 +554,16 @@ fn decode_etc2_h_mode(block: &[u8], out: &mut [u8; 64], default_alpha: u8) {
     for tx in 0..16 {
         let sel = etc2_selector(pixels, tx);
         let (base, sign) = match sel {
-            0 => (c0,  1),
+            0 => (c0, 1),
             1 => (c0, -1),
-            2 => (c1,  1),
+            2 => (c1, 1),
             _ => (c1, -1),
         };
         let r = clamp_u8(base[0] as i32 + sign * d);
         let g = clamp_u8(base[1] as i32 + sign * d);
         let b = clamp_u8(base[2] as i32 + sign * d);
         let dst = etc2_dst_offset(tx);
-        out[dst]     = r;
+        out[dst] = r;
         out[dst + 1] = g;
         out[dst + 2] = b;
         out[dst + 3] = default_alpha;
@@ -510,7 +586,7 @@ fn decode_etc2_planar_mode(block: &[u8], out: &mut [u8; 64], default_alpha: u8) 
     // RV[5..0] = (b4[0] << 5) | (b5[7..3])
     // GV[6..1] = (b5[2..0] << 4) | (b6[7..5]); GV[0] = b6[4]
     // BV[5..0] = b6[3..0] << 2 | b7[7..6]    (then bits 5..0 used)
-    let r_o6 = ((block[0] >> 1) & 0x3E) | ((block[0] >> 0) & 0x01);
+    let r_o6 = ((block[0] >> 1) & 0x3E) | (block[0] & 0x01);
     let g_o6_full = (((block[0] & 0x01) as u32) << 6) | (((block[1] >> 1) & 0x7F) as u32);
     let g_o6 = (g_o6_full >> 1) as u8 & 0x3F;
     let b_o6 = (((block[1] & 0x03) as u32) << 4) | (((block[2] >> 4) & 0x0F) as u32);
@@ -520,7 +596,7 @@ fn decode_etc2_planar_mode(block: &[u8], out: &mut [u8; 64], default_alpha: u8) 
     let r_h6 = r_h6 as u8 & 0x3F;
     let g_h6 = (((block[3] & 0x3F) as u32) << 1) | (((block[4] >> 7) & 0x01) as u32);
     let g_h6 = g_h6 as u8 & 0x3F;
-    let b_h6 = ((block[4] >> 1) & 0x3F) as u8;
+    let b_h6 = (block[4] >> 1) & 0x3F;
 
     let r_v6 = (((block[4] & 0x01) as u32) << 5) | (((block[5] >> 3) & 0x1F) as u32);
     let r_v6 = r_v6 as u8 & 0x3F;
@@ -545,7 +621,7 @@ fn decode_etc2_planar_mode(block: &[u8], out: &mut [u8; 64], default_alpha: u8) 
             let g = (x * (gh - go) + y * (gv - go) + 4 * go + 2) >> 2;
             let b = (x * (bh - bo) + y * (bv - bo) + 4 * bo + 2) >> 2;
             let dst = ((y as usize) * 4 + (x as usize)) * 4;
-            out[dst]     = r.clamp(0, 255) as u8;
+            out[dst] = r.clamp(0, 255) as u8;
             out[dst + 1] = g.clamp(0, 255) as u8;
             out[dst + 2] = b.clamp(0, 255) as u8;
             out[dst + 3] = default_alpha;
@@ -564,7 +640,9 @@ fn decode_eac_alpha(block: &[u8]) -> [u8; 16] {
     let table_idx = (block[1] & 0xf) as usize;
     let row = &EAC_TABLE[table_idx];
 
-    let bits = u64::from_be_bytes([0, 0, block[2], block[3], block[4], block[5], block[6], block[7]]);
+    let bits = u64::from_be_bytes([
+        0, 0, block[2], block[3], block[4], block[5], block[6], block[7],
+    ]);
     let mut out = [0u8; 16];
     for tx in 0..16 {
         // Bit positions per spec: MSB of texel 0 at bit 45, then 3 bits per
@@ -584,9 +662,9 @@ fn decode_eac_alpha(block: &[u8]) -> [u8; 16] {
 fn decode_eac_r11_block(block: &[u8]) -> [u8; 64] {
     let alpha = decode_eac_alpha(block);
     let mut out = [0u8; 64];
-    for i in 0..16 {
+    for (i, &a) in alpha.iter().enumerate() {
         let d = i * 4;
-        out[d]     = alpha[i];
+        out[d] = a;
         out[d + 1] = 0;
         out[d + 2] = 0;
         out[d + 3] = 255;
@@ -600,7 +678,7 @@ fn decode_eac_r11g11_block(block: &[u8]) -> [u8; 64] {
     let mut out = [0u8; 64];
     for i in 0..16 {
         let d = i * 4;
-        out[d]     = r[i];
+        out[d] = r[i];
         out[d + 1] = g[i];
         out[d + 2] = 0;
         out[d + 3] = 255;
@@ -621,7 +699,7 @@ mod tests {
         // pick +2; the all-zero block uses selector index 0 everywhere
         // so we should get an all-black-then-clamped tile.
         for i in 0..16 {
-            assert_eq!(out[i * 4],     0);
+            assert_eq!(out[i * 4], 0);
             assert_eq!(out[i * 4 + 1], 0);
             assert_eq!(out[i * 4 + 2], 0);
             assert_eq!(out[i * 4 + 3], 255);
@@ -635,7 +713,7 @@ mod tests {
         for i in 0..16 {
             // base=0 + modifier=row[0]*mult — with mult=0 the whole
             // contribution is zero, so all texels stay at base=0.
-            assert_eq!(out[i * 4],     0);
+            assert_eq!(out[i * 4], 0);
             assert_eq!(out[i * 4 + 1], 0);
             assert_eq!(out[i * 4 + 2], 0);
             assert_eq!(out[i * 4 + 3], 255);

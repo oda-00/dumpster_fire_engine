@@ -1,22 +1,22 @@
 pub mod asset;
 pub mod env_loader;
+pub mod fetch;
 pub mod gltf_loader;
 pub mod ies_loader;
-pub mod send;
-pub mod fetch;
 pub mod pipe;
 pub mod pipeline;
+pub mod send;
 
 pub use asset::*;
 pub use gltf_loader::*;
 // `ies_loader::parse` and `env_loader::parse` both publish `parse` so they
 // stay namespaced — callers say `ies_loader::parse(...)` / `env_loader::parse(...)`.
-pub use ies_loader::{IesProfile, IesError, IES_LUT_W, IES_LUT_H};
-pub use env_loader::{EnvironmentMap, EnvError};
-pub use send::*;
+pub use env_loader::{EnvError, EnvironmentMap};
 pub use fetch::*;
+pub use ies_loader::{IES_LUT_H, IES_LUT_W, IesError, IesProfile};
 pub use pipe::*;
 pub use pipeline::*;
+pub use send::*;
 
 // Re-export the hand-rolled glTF facade so callers can `use
 // dumpster_fire_engine::resource_manager::asset_manager::forge_gltf::*` and
@@ -30,7 +30,7 @@ mod tests {
 
     use crate::resource_manager::asset_manager::fetch::Fetcher;
 
-use super::*;
+    use super::*;
 
     fn texture(path: &str) -> AssetKind {
         AssetKind::Texture(Texture {

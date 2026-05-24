@@ -16,23 +16,31 @@ use thin_vec::ThinVec;
 
 // ── Tag bytes ────────────────────────────────────────────────────────────────
 
-pub const TAG_WATCH:     u8 = 1;
-pub const TAG_UNWATCH:   u8 = 2;
-pub const TAG_SHUTDOWN:  u8 = 3;
-pub const TAG_COMPILE_OK:  u8 = 4;
+pub const TAG_WATCH: u8 = 1;
+pub const TAG_UNWATCH: u8 = 2;
+pub const TAG_SHUTDOWN: u8 = 3;
+pub const TAG_COMPILE_OK: u8 = 4;
 pub const TAG_COMPILE_ERR: u8 = 5;
 
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 pub enum EngineMsg {
-    Watch    { script_id: i64, path: Arc<str> },
-    Unwatch  { script_id: i64 },
+    Watch { script_id: i64, path: Arc<str> },
+    Unwatch { script_id: i64 },
     Shutdown,
 }
 
 pub enum DaemonMsg {
-    CompileOk  { script_id: i64, o_path: Arc<str>, state_size: u32, state_version: u32 },
-    CompileErr { script_id: i64, diagnostics: ThinVec<Arc<str>> },
+    CompileOk {
+        script_id: i64,
+        o_path: Arc<str>,
+        state_size: u32,
+        state_version: u32,
+    },
+    CompileErr {
+        script_id: i64,
+        diagnostics: ThinVec<Arc<str>>,
+    },
 }
 
 // ── Encoding ─────────────────────────────────────────────────────────────────
@@ -60,18 +68,28 @@ pub fn write_engine_msg<W: Write>(w: &mut W, m: &EngineMsg) -> std::io::Result<(
 pub fn write_daemon_msg<W: Write>(w: &mut W, m: &DaemonMsg) -> std::io::Result<()> {
     let mut buf: ThinVec<u8> = ThinVec::new();
     match m {
-        DaemonMsg::CompileOk { script_id, o_path, state_size, state_version } => {
+        DaemonMsg::CompileOk {
+            script_id,
+            o_path,
+            state_size,
+            state_version,
+        } => {
             buf.push(TAG_COMPILE_OK);
             buf.extend_from_slice(&script_id.to_le_bytes());
             put_str(&mut buf, o_path);
             buf.extend_from_slice(&state_size.to_le_bytes());
             buf.extend_from_slice(&state_version.to_le_bytes());
         }
-        DaemonMsg::CompileErr { script_id, diagnostics } => {
+        DaemonMsg::CompileErr {
+            script_id,
+            diagnostics,
+        } => {
             buf.push(TAG_COMPILE_ERR);
             buf.extend_from_slice(&script_id.to_le_bytes());
             buf.extend_from_slice(&(diagnostics.len() as u32).to_le_bytes());
-            for d in diagnostics { put_str(&mut buf, d); }
+            for d in diagnostics {
+                put_str(&mut buf, d);
+            }
         }
     }
     let len = buf.len() as u32;
@@ -87,11 +105,16 @@ pub fn read_engine_msg<R: Read>(r: &mut R) -> std::io::Result<EngineMsg> {
     match tag {
         TAG_WATCH => Ok(EngineMsg::Watch {
             script_id: c.i64()?,
-            path:      c.string()?,
+            path: c.string()?,
         }),
-        TAG_UNWATCH => Ok(EngineMsg::Unwatch { script_id: c.i64()? }),
+        TAG_UNWATCH => Ok(EngineMsg::Unwatch {
+            script_id: c.i64()?,
+        }),
         TAG_SHUTDOWN => Ok(EngineMsg::Shutdown),
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unknown tag {tag}"))),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unknown tag {tag}"),
+        )),
     }
 }
 
@@ -101,19 +124,27 @@ pub fn read_daemon_msg<R: Read>(r: &mut R) -> std::io::Result<DaemonMsg> {
     let tag = c.u8()?;
     match tag {
         TAG_COMPILE_OK => Ok(DaemonMsg::CompileOk {
-            script_id:     c.i64()?,
-            o_path:       c.string()?,
-            state_size:    c.u32()?,
+            script_id: c.i64()?,
+            o_path: c.string()?,
+            state_size: c.u32()?,
             state_version: c.u32()?,
         }),
         TAG_COMPILE_ERR => {
             let script_id = c.i64()?;
             let n = c.u32()? as usize;
             let mut diags = ThinVec::with_capacity(n);
-            for _ in 0..n { diags.push(c.string()?); }
-            Ok(DaemonMsg::CompileErr { script_id, diagnostics: diags })
+            for _ in 0..n {
+                diags.push(c.string()?);
+            }
+            Ok(DaemonMsg::CompileErr {
+                script_id,
+                diagnostics: diags,
+            })
         }
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unknown tag {tag}"))),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unknown tag {tag}"),
+        )),
     }
 }
 
@@ -134,26 +165,33 @@ fn read_frame<R: Read>(r: &mut R) -> std::io::Result<ThinVec<u8>> {
     Ok(buf)
 }
 
-struct Cursor<'a> { buf: &'a [u8], pos: usize }
+struct Cursor<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
 impl<'a> Cursor<'a> {
-    fn u8(&mut self)  -> std::io::Result<u8>  {
+    fn u8(&mut self) -> std::io::Result<u8> {
         let v = *self.buf.get(self.pos).ok_or_else(short)?;
-        self.pos += 1; Ok(v)
+        self.pos += 1;
+        Ok(v)
     }
     fn u32(&mut self) -> std::io::Result<u32> {
-        let s = self.pos; self.pos += 4;
-        let bs = self.buf.get(s..s+4).ok_or_else(short)?;
+        let s = self.pos;
+        self.pos += 4;
+        let bs = self.buf.get(s..s + 4).ok_or_else(short)?;
         Ok(u32::from_le_bytes(bs.try_into().unwrap()))
     }
     fn i64(&mut self) -> std::io::Result<i64> {
-        let s = self.pos; self.pos += 8;
-        let bs = self.buf.get(s..s+8).ok_or_else(short)?;
+        let s = self.pos;
+        self.pos += 8;
+        let bs = self.buf.get(s..s + 8).ok_or_else(short)?;
         Ok(i64::from_le_bytes(bs.try_into().unwrap()))
     }
     fn string(&mut self) -> std::io::Result<Arc<str>> {
         let n = self.u32()? as usize;
-        let s = self.pos; self.pos += n;
-        let bs = self.buf.get(s..s+n).ok_or_else(short)?;
+        let s = self.pos;
+        self.pos += n;
+        let bs = self.buf.get(s..s + n).ok_or_else(short)?;
         Ok(Arc::from(core::str::from_utf8(bs).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "non-utf8 string")
         })?))

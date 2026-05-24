@@ -11,9 +11,8 @@
 use thin_vec::ThinVec;
 
 use crate::animation::{
-    AnimPath, Animation,
-    sample_quat, sample_scalar, sample_vec3,
-    sample_quat_hinted, sample_scalar_hinted, sample_vec3_hinted,
+    AnimPath, Animation, sample_quat, sample_quat_hinted, sample_scalar, sample_scalar_hinted,
+    sample_vec3, sample_vec3_hinted,
 };
 use crate::asset::GltfAsset;
 use crate::material::{Material, TextureRef};
@@ -22,10 +21,10 @@ use crate::scene::{compose_trs, compose_world_matrices_from, mat4_mul};
 #[derive(Debug, Clone)]
 pub struct Pose {
     pub translation: ThinVec<[f32; 3]>,
-    pub rotation:    ThinVec<[f32; 4]>,
-    pub scale:       ThinVec<[f32; 3]>,
-    pub local:       ThinVec<[f32; 16]>,
-    pub world:       ThinVec<[f32; 16]>,
+    pub rotation: ThinVec<[f32; 4]>,
+    pub scale: ThinVec<[f32; 3]>,
+    pub local: ThinVec<[f32; 16]>,
+    pub world: ThinVec<[f32; 16]>,
     /// Per-node morph-target weight overrides. Empty `ThinVec` = "use the
     /// owning mesh's default weights".
     pub morph_weights: ThinVec<ThinVec<f32>>,
@@ -42,9 +41,9 @@ impl Pose {
     pub fn rest(asset: &GltfAsset) -> Self {
         let n = asset.nodes.len();
         let mut translation = ThinVec::with_capacity(n);
-        let mut rotation    = ThinVec::with_capacity(n);
-        let mut scale       = ThinVec::with_capacity(n);
-        let mut local       = ThinVec::with_capacity(n);
+        let mut rotation = ThinVec::with_capacity(n);
+        let mut scale = ThinVec::with_capacity(n);
+        let mut local = ThinVec::with_capacity(n);
         let mut morph_weights = ThinVec::with_capacity(n);
         for node in &asset.nodes {
             translation.push(node.translation);
@@ -55,9 +54,17 @@ impl Pose {
         }
         let world = match asset.primary_scene() {
             Some(scene) => compose_world_matrices_from(&scene.roots, &asset.nodes, &local),
-            None        => (0..n).map(|_| crate::pipeline::IDENTITY_M4).collect(),
+            None => (0..n).map(|_| crate::pipeline::IDENTITY_M4).collect(),
         };
-        Self { translation, rotation, scale, local, world, morph_weights, last_segments: ThinVec::new() }
+        Self {
+            translation,
+            rotation,
+            scale,
+            local,
+            world,
+            morph_weights,
+            last_segments: ThinVec::new(),
+        }
     }
 
     /// Sample one animation at time `t` seconds and refresh the pose. Times
@@ -73,12 +80,16 @@ impl Pose {
         for (ch_i, ch) in anim.channels.iter().enumerate() {
             let sampler = &anim.samplers[ch.sampler as usize];
             let idx = ch.target_node as usize;
-            if idx >= self.translation.len() { continue; }
+            if idx >= self.translation.len() {
+                continue;
+            }
             let hint = &mut self.last_segments[ch_i];
             match ch.target_path {
-                AnimPath::Translation => self.translation[idx] = sample_vec3_hinted(sampler, t, hint),
-                AnimPath::Rotation    => self.rotation[idx]    = sample_quat_hinted(sampler, t, hint),
-                AnimPath::Scale       => self.scale[idx]       = sample_vec3_hinted(sampler, t, hint),
+                AnimPath::Translation => {
+                    self.translation[idx] = sample_vec3_hinted(sampler, t, hint)
+                }
+                AnimPath::Rotation => self.rotation[idx] = sample_quat_hinted(sampler, t, hint),
+                AnimPath::Scale => self.scale[idx] = sample_vec3_hinted(sampler, t, hint),
                 AnimPath::MorphWeights => {
                     let stride = self.morph_weights[idx].len().max(1);
                     let mut out = ThinVec::with_capacity(stride);
@@ -88,7 +99,8 @@ impl Pose {
                     self.morph_weights[idx] = out;
                 }
             }
-            self.local[idx] = compose_trs(self.translation[idx], self.rotation[idx], self.scale[idx]);
+            self.local[idx] =
+                compose_trs(self.translation[idx], self.rotation[idx], self.scale[idx]);
         }
         if let Some(scene) = asset.primary_scene() {
             self.world = compose_world_matrices_from(&scene.roots, &asset.nodes, &self.local);
@@ -111,8 +123,10 @@ impl Pose {
     pub fn sample_blended(
         &mut self,
         asset: &GltfAsset,
-        a: &Animation, b: &Animation,
-        ta: f32, tb: f32,
+        a: &Animation,
+        b: &Animation,
+        ta: f32,
+        tb: f32,
         weight: f32,
     ) {
         // Sample `a` into the pose, then blend each channel from `b` on top.
@@ -121,7 +135,9 @@ impl Pose {
         for ch in &b.channels {
             let sampler = &b.samplers[ch.sampler as usize];
             let idx = ch.target_node as usize;
-            if idx >= self.translation.len() { continue; }
+            if idx >= self.translation.len() {
+                continue;
+            }
             match ch.target_path {
                 AnimPath::Translation => {
                     let v = sample_vec3(sampler, tb);
@@ -145,7 +161,8 @@ impl Pose {
                     }
                 }
             }
-            self.local[idx] = compose_trs(self.translation[idx], self.rotation[idx], self.scale[idx]);
+            self.local[idx] =
+                compose_trs(self.translation[idx], self.rotation[idx], self.scale[idx]);
         }
         if let Some(scene) = asset.primary_scene() {
             self.world = compose_world_matrices_from(&scene.roots, &asset.nodes, &self.local);
@@ -161,7 +178,8 @@ impl Pose {
         let n = skin.joints.len();
         let mut out = ThinVec::with_capacity(n);
         for (i, &joint_node) in skin.joints.iter().enumerate() {
-            let world = self.world
+            let world = self
+                .world
                 .get(joint_node as usize)
                 .copied()
                 .unwrap_or(crate::pipeline::IDENTITY_M4);
@@ -177,11 +195,7 @@ impl Pose {
 
     /// Active morph weight vector for one mesh node. Falls back to the
     /// mesh's default weights when the node has no override.
-    pub fn morph_weights_for_node(
-        &self,
-        asset: &GltfAsset,
-        node_idx: u32,
-    ) -> Option<ThinVec<f32>> {
+    pub fn morph_weights_for_node(&self, asset: &GltfAsset, node_idx: u32) -> Option<ThinVec<f32>> {
         let node_idx = node_idx as usize;
         let node = asset.nodes.get(node_idx)?;
         let mesh_idx = node.mesh? as usize;
@@ -199,12 +213,7 @@ impl Pose {
     /// and write the sampled values into the given asset's
     /// materials / lights / nodes / cameras. Only paths the engine actually
     /// drives are recognised; unknown pointers are skipped silently.
-    pub fn sample_pointer_animation(
-        &self,
-        asset: &mut GltfAsset,
-        anim:  &Animation,
-        t:     f32,
-    ) {
+    pub fn sample_pointer_animation(&self, asset: &mut GltfAsset, anim: &Animation, t: f32) {
         for pc in &anim.pointer_channels {
             apply_pointer(asset, &anim.samplers[pc.sampler as usize], &pc.pointer, t);
         }
@@ -212,7 +221,11 @@ impl Pose {
 }
 
 fn lerp3(a: [f32; 3], b: [f32; 3], u: f32) -> [f32; 3] {
-    [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u]
+    [
+        a[0] + (b[0] - a[0]) * u,
+        a[1] + (b[1] - a[1]) * u,
+        a[2] + (b[2] - a[2]) * u,
+    ]
 }
 
 // ── Morph target blending ──────────────────────────────────────────────────
@@ -224,24 +237,29 @@ fn lerp3(a: [f32; 3], b: [f32; 3], u: f32) -> [f32; 3] {
 #[derive(Debug, Clone)]
 pub struct BlendedStreams {
     pub positions: ThinVec<[f32; 3]>,
-    pub normals:   ThinVec<[f32; 3]>,
-    pub tangents:  ThinVec<[f32; 3]>,
+    pub normals: ThinVec<[f32; 3]>,
+    pub tangents: ThinVec<[f32; 3]>,
 }
 
 /// Apply morph deltas to a primitive's rest streams.
-pub fn blend_morph_targets(
-    prim:    &crate::mesh::Primitive,
-    weights: &[f32],
-) -> BlendedStreams {
+pub fn blend_morph_targets(prim: &crate::mesh::Primitive, weights: &[f32]) -> BlendedStreams {
     let n = prim.streams.positions.len();
     let mut positions: ThinVec<[f32; 3]> = prim.streams.positions.clone();
-    let mut normals:   ThinVec<[f32; 3]> = prim.streams.normals.clone();
-    let mut tangents:  ThinVec<[f32; 3]> = prim.streams.tangents
-        .iter().map(|t| [t[0], t[1], t[2]]).collect();
+    let mut normals: ThinVec<[f32; 3]> = prim.streams.normals.clone();
+    let mut tangents: ThinVec<[f32; 3]> = prim
+        .streams
+        .tangents
+        .iter()
+        .map(|t| [t[0], t[1], t[2]])
+        .collect();
 
     for (m_idx, m) in prim.morph_targets.iter().enumerate() {
-        let Some(&w) = weights.get(m_idx) else { continue };
-        if w == 0.0 { continue; }
+        let Some(&w) = weights.get(m_idx) else {
+            continue;
+        };
+        if w == 0.0 {
+            continue;
+        }
         for i in 0..n {
             if let Some(d) = m.positions.get(i) {
                 positions[i][0] += d[0] * w;
@@ -261,7 +279,11 @@ pub fn blend_morph_targets(
         }
     }
 
-    BlendedStreams { positions, normals, tangents }
+    BlendedStreams {
+        positions,
+        normals,
+        tangents,
+    }
 }
 
 // ── KHR_animation_pointer evaluation ───────────────────────────────────────
@@ -273,15 +295,15 @@ pub fn blend_morph_targets(
 // the channel list.
 
 fn apply_pointer(
-    asset:   &mut GltfAsset,
+    asset: &mut GltfAsset,
     sampler: &crate::animation::AnimSampler,
     pointer: &str,
-    t:       f32,
+    t: f32,
 ) {
     let parts: Vec<&str> = pointer.trim_start_matches('/').split('/').collect();
     let stride = match &sampler.output {
-        crate::animation::SamplerOutput::Vec3(_)    => 3,
-        crate::animation::SamplerOutput::Vec4(_)    => 4,
+        crate::animation::SamplerOutput::Vec3(_) => 3,
+        crate::animation::SamplerOutput::Vec4(_) => 4,
         crate::animation::SamplerOutput::Scalars(_) => 1,
     };
 
@@ -330,14 +352,21 @@ fn apply_pointer(
             }
         }
         // /materials/{i}/{kind_texture}/extensions/KHR_texture_transform/{field}
-        ["materials", i, tex_kind, "extensions", "KHR_texture_transform", field] => {
+        [
+            "materials",
+            i,
+            tex_kind,
+            "extensions",
+            "KHR_texture_transform",
+            field,
+        ] => {
             if let Some(m) = parse_idx(i).and_then(|i| asset.materials.get_mut(i)) {
                 let tex: Option<&mut TextureRef> = match *tex_kind {
-                    "baseColorTexture"         => m.pbr.base_color_texture.as_mut(),
+                    "baseColorTexture" => m.pbr.base_color_texture.as_mut(),
                     "metallicRoughnessTexture" => m.pbr.metallic_roughness_texture.as_mut(),
-                    "emissiveTexture"          => m.emissive_texture.as_mut(),
-                    "normalTexture"            => m.normal.texture.as_mut(),
-                    "occlusionTexture"         => m.occlusion.texture.as_mut(),
+                    "emissiveTexture" => m.emissive_texture.as_mut(),
+                    "normalTexture" => m.normal.texture.as_mut(),
+                    "occlusionTexture" => m.occlusion.texture.as_mut(),
                     _ => None,
                 };
                 if let Some(tr) = tex {
@@ -350,8 +379,8 @@ fn apply_pointer(
             if let Some(l) = parse_idx(i).and_then(|i| asset.lights.get_mut(i)) {
                 match *field {
                     "intensity" => l.intensity = read_scalar(sampler, t, stride),
-                    "range"     => l.range     = read_scalar(sampler, t, stride),
-                    "color"     => l.color     = read_vec3(sampler, t),
+                    "range" => l.range = read_scalar(sampler, t, stride),
+                    "color" => l.color = read_vec3(sampler, t),
                     _ => {}
                 }
             }
@@ -361,26 +390,30 @@ fn apply_pointer(
             if let Some(n) = parse_idx(i).and_then(|i| asset.nodes.get_mut(i)) {
                 match *field {
                     "translation" => n.translation = read_vec3(sampler, t),
-                    "rotation"    => n.rotation    = read_vec4(sampler, t),
-                    "scale"       => n.scale       = read_vec3(sampler, t),
+                    "rotation" => n.rotation = read_vec4(sampler, t),
+                    "scale" => n.scale = read_vec3(sampler, t),
                     _ => {}
                 }
             }
         }
         // /cameras/{i}/perspective/{yfov,znear,zfar,aspectRatio}
         ["cameras", i, "perspective", field] => {
-            if let Some(c) = parse_idx(i).and_then(|i| asset.cameras.get_mut(i)) {
-                if let crate::camera::Camera::Perspective {
-                    aspect_ratio, y_fov, z_near, z_far, ..
-                } = c {
-                    let v = read_scalar(sampler, t, stride);
-                    match *field {
-                        "yfov"        => *y_fov = v,
-                        "znear"       => *z_near = v,
-                        "zfar"        => *z_far = Some(v),
-                        "aspectRatio" => *aspect_ratio = Some(v),
-                        _ => {}
-                    }
+            if let Some(c) = parse_idx(i).and_then(|i| asset.cameras.get_mut(i))
+                && let crate::camera::Camera::Perspective {
+                    aspect_ratio,
+                    y_fov,
+                    z_near,
+                    z_far,
+                    ..
+                } = c
+            {
+                let v = read_scalar(sampler, t, stride);
+                match *field {
+                    "yfov" => *y_fov = v,
+                    "znear" => *z_near = v,
+                    "zfar" => *z_far = Some(v),
+                    "aspectRatio" => *aspect_ratio = Some(v),
+                    _ => {}
                 }
             }
         }
@@ -389,43 +422,63 @@ fn apply_pointer(
 }
 
 fn apply_pointer_material_extension(
-    m:       &mut Material,
-    ext:     &str,
-    rest:    &[&str],
+    m: &mut Material,
+    ext: &str,
+    rest: &[&str],
     sampler: &crate::animation::AnimSampler,
-    t:       f32,
-    stride:  usize,
+    t: f32,
+    stride: usize,
 ) {
     match (ext, rest) {
         ("KHR_materials_clearcoat", ["clearcoatFactor"]) => {
-            if let Some(c) = m.clearcoat.as_mut() { c.factor = read_scalar(sampler, t, stride); }
+            if let Some(c) = m.clearcoat.as_mut() {
+                c.factor = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_clearcoat", ["clearcoatRoughnessFactor"]) => {
-            if let Some(c) = m.clearcoat.as_mut() { c.roughness_factor = read_scalar(sampler, t, stride); }
+            if let Some(c) = m.clearcoat.as_mut() {
+                c.roughness_factor = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_sheen", ["sheenColorFactor"]) => {
-            if let Some(s) = m.sheen.as_mut() { s.color_factor = read_vec3(sampler, t); }
+            if let Some(s) = m.sheen.as_mut() {
+                s.color_factor = read_vec3(sampler, t);
+            }
         }
         ("KHR_materials_sheen", ["sheenRoughnessFactor"]) => {
-            if let Some(s) = m.sheen.as_mut() { s.roughness_factor = read_scalar(sampler, t, stride); }
+            if let Some(s) = m.sheen.as_mut() {
+                s.roughness_factor = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_specular", ["specularFactor"]) => {
-            if let Some(s) = m.specular.as_mut() { s.factor = read_scalar(sampler, t, stride); }
+            if let Some(s) = m.specular.as_mut() {
+                s.factor = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_specular", ["specularColorFactor"]) => {
-            if let Some(s) = m.specular.as_mut() { s.color_factor = read_vec3(sampler, t); }
+            if let Some(s) = m.specular.as_mut() {
+                s.color_factor = read_vec3(sampler, t);
+            }
         }
         ("KHR_materials_iridescence", ["iridescenceFactor"]) => {
-            if let Some(i) = m.iridescence.as_mut() { i.factor = read_scalar(sampler, t, stride); }
+            if let Some(i) = m.iridescence.as_mut() {
+                i.factor = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_iridescence", ["iridescenceIor"]) => {
-            if let Some(i) = m.iridescence.as_mut() { i.ior = read_scalar(sampler, t, stride); }
+            if let Some(i) = m.iridescence.as_mut() {
+                i.ior = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_anisotropy", ["anisotropyStrength"]) => {
-            if let Some(a) = m.anisotropy.as_mut() { a.strength = read_scalar(sampler, t, stride); }
+            if let Some(a) = m.anisotropy.as_mut() {
+                a.strength = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_anisotropy", ["anisotropyRotation"]) => {
-            if let Some(a) = m.anisotropy.as_mut() { a.rotation = read_scalar(sampler, t, stride); }
+            if let Some(a) = m.anisotropy.as_mut() {
+                a.rotation = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_transmission", ["transmissionFactor"]) => {
             m.transmission.factor = read_scalar(sampler, t, stride);
@@ -446,10 +499,14 @@ fn apply_pointer_material_extension(
             m.emissive_strength = read_scalar(sampler, t, stride);
         }
         ("KHR_materials_diffuse_transmission", ["diffuseTransmissionFactor"]) => {
-            if let Some(d) = m.diffuse_transmission.as_mut() { d.factor = read_scalar(sampler, t, stride); }
+            if let Some(d) = m.diffuse_transmission.as_mut() {
+                d.factor = read_scalar(sampler, t, stride);
+            }
         }
         ("KHR_materials_diffuse_transmission", ["diffuseTransmissionColorFactor"]) => {
-            if let Some(d) = m.diffuse_transmission.as_mut() { d.color_factor = read_vec3(sampler, t); }
+            if let Some(d) = m.diffuse_transmission.as_mut() {
+                d.color_factor = read_vec3(sampler, t);
+            }
         }
         ("KHR_materials_dispersion", ["dispersion"]) => {
             m.dispersion = read_scalar(sampler, t, stride);
@@ -466,37 +523,55 @@ fn apply_pointer_material_extension(
 
 fn pick_ext_texture<'a>(m: &'a mut Material, ext: &str, tex: &str) -> Option<&'a mut TextureRef> {
     match (ext, tex) {
-        ("KHR_materials_clearcoat", "clearcoatTexture")             => m.clearcoat.as_mut()?.texture.as_mut(),
-        ("KHR_materials_clearcoat", "clearcoatRoughnessTexture")    => m.clearcoat.as_mut()?.roughness_texture.as_mut(),
-        ("KHR_materials_clearcoat", "clearcoatNormalTexture")       => m.clearcoat.as_mut()?.normal_texture.as_mut(),
-        ("KHR_materials_sheen",     "sheenColorTexture")            => m.sheen.as_mut()?.color_texture.as_mut(),
-        ("KHR_materials_sheen",     "sheenRoughnessTexture")        => m.sheen.as_mut()?.roughness_texture.as_mut(),
-        ("KHR_materials_specular",  "specularTexture")              => m.specular.as_mut()?.texture.as_mut(),
-        ("KHR_materials_specular",  "specularColorTexture")         => m.specular.as_mut()?.color_texture.as_mut(),
-        ("KHR_materials_iridescence", "iridescenceTexture")         => m.iridescence.as_mut()?.texture.as_mut(),
-        ("KHR_materials_iridescence", "iridescenceThicknessTexture")=> m.iridescence.as_mut()?.thickness_texture.as_mut(),
-        ("KHR_materials_anisotropy", "anisotropyTexture")           => m.anisotropy.as_mut()?.texture.as_mut(),
-        ("KHR_materials_transmission", "transmissionTexture")       => m.transmission.texture.as_mut(),
-        ("KHR_materials_volume", "thicknessTexture")                => m.volume.thickness_texture.as_mut(),
-        ("KHR_materials_diffuse_transmission", "diffuseTransmissionTexture")     => m.diffuse_transmission.as_mut()?.texture.as_mut(),
-        ("KHR_materials_diffuse_transmission", "diffuseTransmissionColorTexture")=> m.diffuse_transmission.as_mut()?.color_texture.as_mut(),
+        ("KHR_materials_clearcoat", "clearcoatTexture") => m.clearcoat.as_mut()?.texture.as_mut(),
+        ("KHR_materials_clearcoat", "clearcoatRoughnessTexture") => {
+            m.clearcoat.as_mut()?.roughness_texture.as_mut()
+        }
+        ("KHR_materials_clearcoat", "clearcoatNormalTexture") => {
+            m.clearcoat.as_mut()?.normal_texture.as_mut()
+        }
+        ("KHR_materials_sheen", "sheenColorTexture") => m.sheen.as_mut()?.color_texture.as_mut(),
+        ("KHR_materials_sheen", "sheenRoughnessTexture") => {
+            m.sheen.as_mut()?.roughness_texture.as_mut()
+        }
+        ("KHR_materials_specular", "specularTexture") => m.specular.as_mut()?.texture.as_mut(),
+        ("KHR_materials_specular", "specularColorTexture") => {
+            m.specular.as_mut()?.color_texture.as_mut()
+        }
+        ("KHR_materials_iridescence", "iridescenceTexture") => {
+            m.iridescence.as_mut()?.texture.as_mut()
+        }
+        ("KHR_materials_iridescence", "iridescenceThicknessTexture") => {
+            m.iridescence.as_mut()?.thickness_texture.as_mut()
+        }
+        ("KHR_materials_anisotropy", "anisotropyTexture") => {
+            m.anisotropy.as_mut()?.texture.as_mut()
+        }
+        ("KHR_materials_transmission", "transmissionTexture") => m.transmission.texture.as_mut(),
+        ("KHR_materials_volume", "thicknessTexture") => m.volume.thickness_texture.as_mut(),
+        ("KHR_materials_diffuse_transmission", "diffuseTransmissionTexture") => {
+            m.diffuse_transmission.as_mut()?.texture.as_mut()
+        }
+        ("KHR_materials_diffuse_transmission", "diffuseTransmissionColorTexture") => {
+            m.diffuse_transmission.as_mut()?.color_texture.as_mut()
+        }
         _ => None,
     }
 }
 
 fn apply_texture_transform_field(
-    tr:      &mut TextureRef,
-    field:   &str,
+    tr: &mut TextureRef,
+    field: &str,
     sampler: &crate::animation::AnimSampler,
-    t:       f32,
-    stride:  usize,
+    t: f32,
+    stride: usize,
 ) {
     match field {
-        "offset"   => {
+        "offset" => {
             let v = read_vec3(sampler, t); // vec2 stored as vec3 trailing zero
             tr.uv_offset = [v[0], v[1]];
         }
-        "scale"    => {
+        "scale" => {
             let v = read_vec3(sampler, t);
             tr.uv_scale = [v[0], v[1]];
         }
@@ -505,7 +580,9 @@ fn apply_texture_transform_field(
     }
 }
 
-fn parse_idx(s: &str) -> Option<usize> { s.parse().ok() }
+fn parse_idx(s: &str) -> Option<usize> {
+    s.parse().ok()
+}
 
 fn read_scalar(s: &crate::animation::AnimSampler, t: f32, stride: usize) -> f32 {
     sample_scalar(s, t, stride, 0)
@@ -518,9 +595,11 @@ fn read_vec3(s: &crate::animation::AnimSampler, t: f32) -> [f32; 3] {
             let v = sample_quat(s, t);
             [v[0], v[1], v[2]]
         }
-        crate::animation::SamplerOutput::Scalars(_) => {
-            [sample_scalar(s, t, 3, 0), sample_scalar(s, t, 3, 1), sample_scalar(s, t, 3, 2)]
-        }
+        crate::animation::SamplerOutput::Scalars(_) => [
+            sample_scalar(s, t, 3, 0),
+            sample_scalar(s, t, 3, 1),
+            sample_scalar(s, t, 3, 2),
+        ],
     }
 }
 
@@ -539,4 +618,3 @@ fn read_vec4(s: &crate::animation::AnimSampler, t: f32) -> [f32; 4] {
         ],
     }
 }
-

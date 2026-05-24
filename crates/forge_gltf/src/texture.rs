@@ -19,7 +19,10 @@ pub enum ImageFormatHint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum MagFilter { Nearest, Linear }
+pub enum MagFilter {
+    Nearest,
+    Linear,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -34,15 +37,19 @@ pub enum MinFilter {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum WrapMode { ClampToEdge, MirroredRepeat, Repeat }
+pub enum WrapMode {
+    ClampToEdge,
+    MirroredRepeat,
+    Repeat,
+}
 
 #[derive(Debug, Clone)]
 pub struct Sampler {
-    pub name:       Option<String>,
+    pub name: Option<String>,
     pub mag_filter: MagFilter,
     pub min_filter: MinFilter,
-    pub wrap_s:     WrapMode,
-    pub wrap_t:     WrapMode,
+    pub wrap_s: WrapMode,
+    pub wrap_t: WrapMode,
 }
 
 impl Default for Sampler {
@@ -59,30 +66,30 @@ impl Default for Sampler {
 
 #[derive(Debug, Clone)]
 pub struct Image {
-    pub name:   Option<String>,
-    pub width:  u32,
+    pub name: Option<String>,
+    pub width: u32,
     pub height: u32,
     /// 4 bytes per pixel, top-left origin (matches gltf::image::Data conventions).
-    pub rgba:   ThinVec<u8>,
+    pub rgba: ThinVec<u8>,
     pub format: ImageFormatHint,
 }
 
 #[derive(Debug, Clone)]
 pub struct Texture {
-    pub name:    Option<String>,
-    pub image:   u32,
+    pub name: Option<String>,
+    pub image: u32,
     pub sampler: Option<u32>,
 }
 
 pub(crate) fn min_filter_from(f: gltf::texture::MinFilter) -> MinFilter {
     use gltf::texture::MinFilter as G;
     match f {
-        G::Nearest              => MinFilter::Nearest,
-        G::Linear               => MinFilter::Linear,
+        G::Nearest => MinFilter::Nearest,
+        G::Linear => MinFilter::Linear,
         G::NearestMipmapNearest => MinFilter::NearestMipmapNearest,
-        G::LinearMipmapNearest  => MinFilter::LinearMipmapNearest,
-        G::NearestMipmapLinear  => MinFilter::NearestMipmapLinear,
-        G::LinearMipmapLinear   => MinFilter::LinearMipmapLinear,
+        G::LinearMipmapNearest => MinFilter::LinearMipmapNearest,
+        G::NearestMipmapLinear => MinFilter::NearestMipmapLinear,
+        G::LinearMipmapLinear => MinFilter::LinearMipmapLinear,
     }
 }
 
@@ -90,15 +97,15 @@ pub(crate) fn mag_filter_from(f: gltf::texture::MagFilter) -> MagFilter {
     use gltf::texture::MagFilter as G;
     match f {
         G::Nearest => MagFilter::Nearest,
-        G::Linear  => MagFilter::Linear,
+        G::Linear => MagFilter::Linear,
     }
 }
 
 pub(crate) fn wrap_from(w: gltf::texture::WrappingMode) -> WrapMode {
     use gltf::texture::WrappingMode as G;
     match w {
-        G::ClampToEdge    => WrapMode::ClampToEdge,
+        G::ClampToEdge => WrapMode::ClampToEdge,
         G::MirroredRepeat => WrapMode::MirroredRepeat,
-        G::Repeat         => WrapMode::Repeat,
+        G::Repeat => WrapMode::Repeat,
     }
 }

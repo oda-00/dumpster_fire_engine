@@ -48,7 +48,7 @@ pub struct VulkanContext {
     /// chosen device AND the `DFE_RT` env var did not disable RT.
     pub has_ray_tracing: bool,
     /// Acceleration-structure extension loader. `Some` when `has_ray_tracing`.
-    pub rt_accel:    Option<ash::khr::acceleration_structure::Device>,
+    pub rt_accel: Option<ash::khr::acceleration_structure::Device>,
     /// Ray-tracing pipeline extension loader. `Some` when `has_ray_tracing`.
     pub rt_pipeline: Option<ash::khr::ray_tracing_pipeline::Device>,
     /// Deferred-host-ops extension loader (required by RT pipeline build).
@@ -63,11 +63,11 @@ pub struct VulkanContext {
 /// `pNext` chain pointers around past device creation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RtProps {
-    pub shader_group_handle_size:         u32,
-    pub shader_group_handle_alignment:    u32,
-    pub shader_group_base_alignment:      u32,
+    pub shader_group_handle_size: u32,
+    pub shader_group_handle_alignment: u32,
+    pub shader_group_base_alignment: u32,
     pub max_pipeline_ray_recursion_depth: u32,
-    pub max_shader_group_stride:          u32,
+    pub max_shader_group_stride: u32,
 }
 
 /// Honour the `DFE_RT` env var: any value other than `"0"` enables RT when
@@ -93,12 +93,12 @@ impl VulkanContext {
     /// Bundle the device handles into a `MeshUploadCtx` for `GpuMesh::upload`.
     pub fn mesh_upload_ctx(&self) -> MeshUploadCtx<'_> {
         MeshUploadCtx {
-            device:                &self.device,
-            memory_properties:     &self.memory_properties,
-            transfer_queue:        self.transfer_queue,
+            device: &self.device,
+            memory_properties: &self.memory_properties,
+            transfer_queue: self.transfer_queue,
             transfer_queue_family: self.transfer_queue_family,
             transfer_command_pool: self.transfer_command_pool,
-            graphics_queue:        self.queue,
+            graphics_queue: self.queue,
             graphics_queue_family: self.queue_family_index,
             graphics_command_pool: self.command_pool,
         }
@@ -135,8 +135,7 @@ impl VulkanContext {
 
         // Validation layer setup (debug only). Held outside the cfg block so
         // its lifetime spans `create_instance`.
-        let validation_layer_name =
-            std::ffi::CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+        let validation_layer_name = std::ffi::CString::new("VK_LAYER_KHRONOS_validation").unwrap();
         #[allow(unused_mut)]
         let mut enabled_layers: Vec<*const i8> = Vec::new();
         #[cfg(debug_assertions)]
@@ -151,7 +150,9 @@ impl VulkanContext {
                 enabled_layers.push(validation_layer_name.as_ptr());
                 println!("vulkan: validation layer enabled");
             } else {
-                println!("vulkan: validation layer requested but not installed; continuing without");
+                println!(
+                    "vulkan: validation layer requested but not installed; continuing without"
+                );
             }
         }
         let _ = &validation_layer_name; // hold lifetime in release too
@@ -179,7 +180,8 @@ impl VulkanContext {
         // may surface both /dev/dxg (DZN/D3D12 — a real GPU) and lavapipe
         // (CPU); the user can force the GPU even when our heuristic loses.
         let override_idx: Option<usize> = std::env::var("DUMPSTER_VK_DEVICE_INDEX")
-            .ok().and_then(|s| s.parse().ok());
+            .ok()
+            .and_then(|s| s.parse().ok());
 
         // WSL detection — `/proc/version` carries "microsoft" / "WSL" on
         // WSL1+2 kernels. Cached to a single read; missing or unreadable
@@ -195,15 +197,15 @@ impl VulkanContext {
             // Warn if the user has forced lavapipe on WSL — that's almost
             // certainly a mistake; the dzn ICD (real D3D12-backed GPU) is
             // what they actually want.
-            if let Ok(icds) = std::env::var("VK_ICD_FILENAMES") {
-                if icds.to_ascii_lowercase().contains("lvp_icd") {
-                    eprintln!(
-                        "vulkan: VK_ICD_FILENAMES={icds} forces lavapipe on a WSL host\n\
+            if let Ok(icds) = std::env::var("VK_ICD_FILENAMES")
+                && icds.to_ascii_lowercase().contains("lvp_icd")
+            {
+                eprintln!(
+                    "vulkan: VK_ICD_FILENAMES={icds} forces lavapipe on a WSL host\n\
                          vulkan: DZN (the real D3D12-backed GPU) will NOT be considered.\n\
                          vulkan: unset VK_ICD_FILENAMES (or point it at dzn_icd.x86_64.json)\n\
                          vulkan: to let the loader pick the GPU."
-                    );
-                }
+                );
             }
         }
 
@@ -212,8 +214,7 @@ impl VulkanContext {
 
         println!("vulkan: enumerating {} physical device(s)", physicals.len());
         for (pd_idx, pd) in physicals.into_iter().enumerate() {
-            let families =
-                unsafe { instance.get_physical_device_queue_family_properties(pd) };
+            let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
             let qfi_opt = families
                 .iter()
                 .enumerate()
@@ -221,28 +222,29 @@ impl VulkanContext {
                 .map(|(i, _)| i as u32);
 
             let props = unsafe { instance.get_physical_device_properties(pd) };
-            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
-                .to_string_lossy();
+            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
             let type_tier: u8 = match props.device_type {
-                vk::PhysicalDeviceType::DISCRETE_GPU   => 4,
+                vk::PhysicalDeviceType::DISCRETE_GPU => 4,
                 vk::PhysicalDeviceType::INTEGRATED_GPU => 3,
-                vk::PhysicalDeviceType::VIRTUAL_GPU    => 2,
-                vk::PhysicalDeviceType::CPU            => 1,
-                _                                      => 0,
+                vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
+                vk::PhysicalDeviceType::CPU => 1,
+                _ => 0,
             };
             let type_str = match props.device_type {
-                vk::PhysicalDeviceType::DISCRETE_GPU   => "DISCRETE_GPU",
+                vk::PhysicalDeviceType::DISCRETE_GPU => "DISCRETE_GPU",
                 vk::PhysicalDeviceType::INTEGRATED_GPU => "INTEGRATED_GPU",
-                vk::PhysicalDeviceType::VIRTUAL_GPU    => "VIRTUAL_GPU",
-                vk::PhysicalDeviceType::CPU            => "CPU",
-                _                                      => "OTHER",
+                vk::PhysicalDeviceType::VIRTUAL_GPU => "VIRTUAL_GPU",
+                vk::PhysicalDeviceType::CPU => "CPU",
+                _ => "OTHER",
             };
 
             let mem = unsafe { instance.get_physical_device_memory_properties(pd) };
             let vram: u64 = (0..mem.memory_heap_count as usize)
-                .filter(|&i| mem.memory_heaps[i]
-                    .flags
-                    .contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+                .filter(|&i| {
+                    mem.memory_heaps[i]
+                        .flags
+                        .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+                })
                 .map(|i| mem.memory_heaps[i].size)
                 .sum();
 
@@ -258,10 +260,14 @@ impl VulkanContext {
                 if lower.contains("microsoft")
                     || lower.contains("direct3d")
                     || lower.contains("d3d12")
-                    || lower.contains("dzn") { 2 }
-                else if lower.contains("llvmpipe")
-                    || lower.contains("swiftshader") { 0 }
-                else { 1 }
+                    || lower.contains("dzn")
+                {
+                    2
+                } else if lower.contains("llvmpipe") || lower.contains("swiftshader") {
+                    0
+                } else {
+                    1
+                }
             };
             println!(
                 "vulkan:   [{pd_idx}] {name} — {type_str} (tier {type_tier}), \
@@ -277,7 +283,9 @@ impl VulkanContext {
                 println!("vulkan: device [{pd_idx}] forced via DUMPSTER_VK_DEVICE_INDEX");
                 continue;
             }
-            if override_idx.is_some() { continue; }
+            if override_idx.is_some() {
+                continue;
+            }
 
             let score = (type_tier, vram, dzn_pref);
             if score > best_score {
@@ -294,13 +302,11 @@ impl VulkanContext {
             }
         };
 
-        let selected_props =
-            unsafe { instance.get_physical_device_properties(physical_device) };
-        let device_name: Arc<str> =
-            unsafe { CStr::from_ptr(selected_props.device_name.as_ptr()) }
-                .to_string_lossy()
-                .as_ref()
-                .into();
+        let selected_props = unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_name: Arc<str> = unsafe { CStr::from_ptr(selected_props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .as_ref()
+            .into();
         println!(
             "GPU: {} ({:.0} MB DEVICE_LOCAL, score tier {})",
             device_name,
@@ -346,7 +352,7 @@ impl VulkanContext {
         }
 
         let swapchain_ext = ash::khr::swapchain::NAME.as_ptr();
-        let sync2_ext     = ash::khr::synchronization2::NAME.as_ptr();
+        let sync2_ext = ash::khr::synchronization2::NAME.as_ptr();
         let mut device_extensions: Vec<*const i8> = Vec::new();
         if want_graphics {
             device_extensions.push(swapchain_ext);
@@ -378,16 +384,18 @@ impl VulkanContext {
             ash::ext::descriptor_indexing::NAME,
             ash::ext::scalar_block_layout::NAME,
         ];
-        let all_rt_ext_present = want_graphics
-            && rt_ext_names.iter().all(|n| has_dev_ext(n));
+        let all_rt_ext_present = want_graphics && rt_ext_names.iter().all(|n| has_dev_ext(n));
         let has_ray_tracing = all_rt_ext_present && env_allows_rt();
         if has_ray_tracing {
             println!("vulkan: ray-tracing path enabled (all 8 RT extensions present)");
-            for n in rt_ext_names.iter() { device_extensions.push(n.as_ptr()); }
+            for n in rt_ext_names.iter() {
+                device_extensions.push(n.as_ptr());
+            }
         } else if all_rt_ext_present {
             println!("vulkan: ray-tracing extensions present but DFE_RT=0 — using raster fallback");
         } else if want_graphics {
-            let missing: Vec<&str> = rt_ext_names.iter()
+            let missing: Vec<&str> = rt_ext_names
+                .iter()
                 .filter(|n| !has_dev_ext(n))
                 .map(|n| n.to_str().unwrap_or("?"))
                 .collect();
@@ -401,23 +409,23 @@ impl VulkanContext {
         // cmd_pipeline_barrier2 / queue_submit2 / VK_KHR_synchronization2
         // call. Baked into Vulkan 1.3 but we explicitly request the KHR
         // extension so the loader pulls it in on 1.2 drivers too.
-        let mut sync2_features = vk::PhysicalDeviceSynchronization2Features::default()
-            .synchronization2(true);
+        let mut sync2_features =
+            vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
         // RT feature chain — only chained when has_ray_tracing.
-        let mut bda_features = vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
-            .buffer_device_address(true);
+        let mut bda_features =
+            vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
         let mut idx_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default()
             .runtime_descriptor_array(true)
             .descriptor_binding_partially_bound(true)
             .descriptor_binding_variable_descriptor_count(true)
             .descriptor_binding_sampled_image_update_after_bind(true)
             .shader_sampled_image_array_non_uniform_indexing(true);
-        let mut scalar_features = vk::PhysicalDeviceScalarBlockLayoutFeatures::default()
-            .scalar_block_layout(true);
+        let mut scalar_features =
+            vk::PhysicalDeviceScalarBlockLayoutFeatures::default().scalar_block_layout(true);
         let mut accel_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
             .acceleration_structure(true);
-        let mut rt_features = vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default()
-            .ray_tracing_pipeline(true);
+        let mut rt_features =
+            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
 
         let mut device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
@@ -503,37 +511,45 @@ impl VulkanContext {
         // intersection of the device's per-framebuffer colour + depth
         // sample-count masks and pick the highest set bit. Most discrete
         // GPUs report at least 8×; lavapipe is `TYPE_1`-only.
-        let dev_props = unsafe {
-            instance.get_physical_device_properties(physical_device)
-        };
+        let dev_props = unsafe { instance.get_physical_device_properties(physical_device) };
         let supported = dev_props.limits.framebuffer_color_sample_counts
             & dev_props.limits.framebuffer_depth_sample_counts;
-        let msaa_samples = if supported.contains(vk::SampleCountFlags::TYPE_64) { vk::SampleCountFlags::TYPE_64 }
-                      else if supported.contains(vk::SampleCountFlags::TYPE_32) { vk::SampleCountFlags::TYPE_32 }
-                      else if supported.contains(vk::SampleCountFlags::TYPE_16) { vk::SampleCountFlags::TYPE_16 }
-                      else if supported.contains(vk::SampleCountFlags::TYPE_8 ) { vk::SampleCountFlags::TYPE_8  }
-                      else if supported.contains(vk::SampleCountFlags::TYPE_4 ) { vk::SampleCountFlags::TYPE_4  }
-                      else if supported.contains(vk::SampleCountFlags::TYPE_2 ) { vk::SampleCountFlags::TYPE_2  }
-                      else                                                       { vk::SampleCountFlags::TYPE_1  };
+        let msaa_samples = if supported.contains(vk::SampleCountFlags::TYPE_64) {
+            vk::SampleCountFlags::TYPE_64
+        } else if supported.contains(vk::SampleCountFlags::TYPE_32) {
+            vk::SampleCountFlags::TYPE_32
+        } else if supported.contains(vk::SampleCountFlags::TYPE_16) {
+            vk::SampleCountFlags::TYPE_16
+        } else if supported.contains(vk::SampleCountFlags::TYPE_8) {
+            vk::SampleCountFlags::TYPE_8
+        } else if supported.contains(vk::SampleCountFlags::TYPE_4) {
+            vk::SampleCountFlags::TYPE_4
+        } else if supported.contains(vk::SampleCountFlags::TYPE_2) {
+            vk::SampleCountFlags::TYPE_2
+        } else {
+            vk::SampleCountFlags::TYPE_1
+        };
         println!("vulkan: MSAA capability — using {msaa_samples:?}");
 
         // ── RT loaders + properties ─────────────────────────────────────
         // Built only when the device was created with the RT extensions.
         let (rt_accel, rt_pipeline, rt_deferred, rt_props) = if has_ray_tracing {
             let accel = ash::khr::acceleration_structure::Device::new(&instance, &device);
-            let rtpl  = ash::khr::ray_tracing_pipeline::Device::new(&instance, &device);
-            let dho   = ash::khr::deferred_host_operations::Device::new(&instance, &device);
+            let rtpl = ash::khr::ray_tracing_pipeline::Device::new(&instance, &device);
+            let dho = ash::khr::deferred_host_operations::Device::new(&instance, &device);
 
             // Query RT pipeline properties via VkPhysicalDeviceProperties2.
             let mut rt_props_khr = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
             let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut rt_props_khr);
-            unsafe { instance.get_physical_device_properties2(physical_device, &mut props2); }
+            unsafe {
+                instance.get_physical_device_properties2(physical_device, &mut props2);
+            }
             let props = RtProps {
-                shader_group_handle_size:         rt_props_khr.shader_group_handle_size,
-                shader_group_handle_alignment:    rt_props_khr.shader_group_handle_alignment,
-                shader_group_base_alignment:      rt_props_khr.shader_group_base_alignment,
+                shader_group_handle_size: rt_props_khr.shader_group_handle_size,
+                shader_group_handle_alignment: rt_props_khr.shader_group_handle_alignment,
+                shader_group_base_alignment: rt_props_khr.shader_group_base_alignment,
                 max_pipeline_ray_recursion_depth: rt_props_khr.max_ray_recursion_depth,
-                max_shader_group_stride:          rt_props_khr.max_shader_group_stride,
+                max_shader_group_stride: rt_props_khr.max_shader_group_stride,
             };
             println!(
                 "vulkan: RT props — handle_size={} handle_align={} base_align={} max_recursion={}",
@@ -581,7 +597,7 @@ fn find_supported_format(
     for &f in candidates {
         let props = unsafe { instance.get_physical_device_format_properties(physical_device, f) };
         let supported = match tiling {
-            vk::ImageTiling::LINEAR  => props.linear_tiling_features.contains(features),
+            vk::ImageTiling::LINEAR => props.linear_tiling_features.contains(features),
             vk::ImageTiling::OPTIMAL => props.optimal_tiling_features.contains(features),
             _ => false,
         };
@@ -600,7 +616,8 @@ impl Drop for VulkanContext {
             if self.transfer_command_pool != self.command_pool
                 && self.transfer_command_pool != vk::CommandPool::null()
             {
-                self.device.destroy_command_pool(self.transfer_command_pool, None);
+                self.device
+                    .destroy_command_pool(self.transfer_command_pool, None);
                 self.transfer_command_pool = vk::CommandPool::null();
             }
             if self.command_pool != vk::CommandPool::null() {

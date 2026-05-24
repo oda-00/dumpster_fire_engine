@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use glam::Affine3A;
-use thin_vec::ThinVec;
 use crate::resource_manager::component::{Component, ComponentType};
 use crate::resource_manager::manager::{
     Actor, ActorHandle, ActorId, ActorTag, ActorType, Arena, Id, SubEntity,
 };
+use glam::Affine3A;
+use std::sync::Arc;
+use thin_vec::ThinVec;
 
 pub struct StageMarker;
 pub type StageId = Id<StageMarker>;
@@ -29,16 +29,16 @@ pub const MAX_ACTORS_PER_STAGE: usize = 1024;
 // propagate_transforms only visits actors that actually changed.
 
 pub struct Stage {
-    pub id:       StageId,
-    pub name:     Arc<str>,
-    pub actors:   Arena<ActorTag, Actor>,
+    pub id: StageId,
+    pub name: Arc<str>,
+    pub actors: Arena<ActorTag, Actor>,
     // cache[i] = handles of actors that have ≥1 sub-entity with ComponentType index i
-    pub cache:    [ThinVec<ActorHandle>; ComponentType::COUNT],
+    pub cache: [ThinVec<ActorHandle>; ComponentType::COUNT],
     dirty_actors: ThinVec<ActorHandle>,
-    pub play:     Option<crate::resource_manager::event_manager::Play>,
+    pub play: Option<crate::resource_manager::event_manager::Play>,
     /// Reusable scratch buffer for cue_troupe_direct so per-cue fan-out
     /// stays allocation-free in the hot path.
-    cue_scratch:  ThinVec<ActorHandle>,
+    cue_scratch: ThinVec<ActorHandle>,
 
     // ── SoA hot transform arrays — parallel to `actors`, indexed by `ah.idx`
     //
@@ -50,8 +50,8 @@ pub struct Stage {
     // (push-on-grow, overwrite on free-list reuse). Stage::despawn_actor leaves
     // the entries as garbage; next reuse overwrites. Validity is gated by the
     // corresponding Arena slot's generation, same as Actor itself.
-    pub locals:      Vec<Affine3A>,
-    pub worlds:      Vec<Affine3A>,
+    pub locals: Vec<Affine3A>,
+    pub worlds: Vec<Affine3A>,
     /// One bool per actor slot; true means the slot has a pending transform.
     /// Kept parallel to `locals`/`worlds` (same length). Direct bool indexing
     /// is faster than a packed bitset here because the code uses a dirty_actors
@@ -67,15 +67,15 @@ pub struct Stage {
     // All three are parallel to locals/worlds/dirty_flags (same slot lifecycle).
     // Using u16 caps supported actors at 65535 — well above MAX_ACTORS_PER_STAGE.
     // Sentinel u16::MAX avoids Option<u16> overhead (wider load + unpacking).
-    pub cache_pos:       Vec<[u16; ComponentType::COUNT]>,
-    pub dirty_pos:       Vec<u16>,
+    pub cache_pos: Vec<[u16; ComponentType::COUNT]>,
+    pub dirty_pos: Vec<u16>,
     pub level_cache_pos: Vec<[u16; ComponentType::COUNT]>,
 }
 
 impl Stage {
     pub fn new(id: StageId, name: impl Into<Arc<str>>) -> Self {
         let mut dirty_actors = ThinVec::with_capacity(MAX_ACTORS_PER_STAGE);
-        let mut cue_scratch  = ThinVec::with_capacity(MAX_ACTORS_PER_STAGE);
+        let mut cue_scratch = ThinVec::with_capacity(MAX_ACTORS_PER_STAGE);
         // ThinVec::with_capacity is a request, not a guarantee on a fresh vec.
         // Force the allocation now so the first cue/dirty push doesn't trigger one.
         dirty_actors.reserve(MAX_ACTORS_PER_STAGE);
@@ -83,17 +83,17 @@ impl Stage {
 
         Self {
             id,
-            name:         name.into(),
-            actors:       Arena::with_capacity(MAX_ACTORS_PER_STAGE),
-            cache:        std::array::from_fn(|_| ThinVec::with_capacity(MAX_ACTORS_PER_STAGE)),
+            name: name.into(),
+            actors: Arena::with_capacity(MAX_ACTORS_PER_STAGE),
+            cache: std::array::from_fn(|_| ThinVec::with_capacity(MAX_ACTORS_PER_STAGE)),
             dirty_actors,
-            play:         None,
+            play: None,
             cue_scratch,
-            locals:          Vec::with_capacity(MAX_ACTORS_PER_STAGE),
-            worlds:          Vec::with_capacity(MAX_ACTORS_PER_STAGE),
-            dirty_flags:     Vec::with_capacity(MAX_ACTORS_PER_STAGE),
-            cache_pos:       Vec::with_capacity(MAX_ACTORS_PER_STAGE),
-            dirty_pos:       Vec::with_capacity(MAX_ACTORS_PER_STAGE),
+            locals: Vec::with_capacity(MAX_ACTORS_PER_STAGE),
+            worlds: Vec::with_capacity(MAX_ACTORS_PER_STAGE),
+            dirty_flags: Vec::with_capacity(MAX_ACTORS_PER_STAGE),
+            cache_pos: Vec::with_capacity(MAX_ACTORS_PER_STAGE),
+            dirty_pos: Vec::with_capacity(MAX_ACTORS_PER_STAGE),
             level_cache_pos: Vec::with_capacity(MAX_ACTORS_PER_STAGE),
         }
     }
@@ -165,7 +165,9 @@ impl Stage {
     }
 
     pub fn despawn_actor(&mut self, actor_h: ActorHandle) {
-        if self.actors.remove(actor_h).is_none() { return }
+        if self.actors.remove(actor_h).is_none() {
+            return;
+        }
         let slot = actor_h.idx as usize;
 
         // O(1) cache eviction: use cache_pos inverse index, update displaced entry.
@@ -206,7 +208,9 @@ impl Stage {
         // Per component the sub held: evict actor from cache if no other sub carries it.
         for ct_idx in 0..ComponentType::COUNT {
             if sub.components[ct_idx].is_some() {
-                let still_has = actor.sub_entities.iter()
+                let still_has = actor
+                    .sub_entities
+                    .iter()
                     .filter_map(|s| s.as_ref())
                     .any(|s| s.components[ct_idx].is_some());
                 if !still_has {
@@ -236,8 +240,12 @@ impl Stage {
         comp: Component,
     ) -> bool {
         let ct = comp.component_type();
-        let Some(actor) = self.actors.get_mut(actor_h) else { return false };
-        let Some(sub) = actor.sub_entities[variant_idx].as_mut() else { return false };
+        let Some(actor) = self.actors.get_mut(actor_h) else {
+            return false;
+        };
+        let Some(sub) = actor.sub_entities[variant_idx].as_mut() else {
+            return false;
+        };
         sub.components[ct.index()] = Some(comp);
         // O(1) dedup using cache_pos inverse index.
         let ct_idx = ct.index();
@@ -258,7 +266,9 @@ impl Stage {
     ) -> Option<Component> {
         let actor = self.actors.get_mut(actor_h)?;
         let removed = actor.sub_entities[variant_idx].as_mut()?.components[ct.index()].take()?;
-        let still_has = actor.sub_entities.iter()
+        let still_has = actor
+            .sub_entities
+            .iter()
             .filter_map(|s| s.as_ref())
             .any(|s| s.components[ct.index()].is_some());
         if !still_has {
@@ -282,7 +292,9 @@ impl Stage {
     #[inline]
     pub fn set_actor_local(&mut self, actor_h: ActorHandle, t: Affine3A) {
         // Generation gate via the Arena, then directly index the SoA arrays.
-        if !self.actors.contains(actor_h) { return }
+        if !self.actors.contains(actor_h) {
+            return;
+        }
         let idx = actor_h.idx as usize;
         self.locals[idx] = t;
         if !self.dirty_flags[idx] {
@@ -294,7 +306,9 @@ impl Stage {
 
     #[inline]
     pub fn set_sub_entity_local(&mut self, actor_h: ActorHandle, variant_idx: usize, t: Affine3A) {
-        let Some(actor) = self.actors.get_mut(actor_h) else { return };
+        let Some(actor) = self.actors.get_mut(actor_h) else {
+            return;
+        };
         if let Some(sub) = actor.sub_entities[variant_idx].as_mut() {
             sub.local = t;
             sub.dirty = true;
@@ -354,7 +368,15 @@ impl Stage {
         delta: Affine3A,
     ) {
         // Disjoint-field borrow: we mutate `cue_scratch` while reading/mutating `play`.
-        let Self { play, cue_scratch, locals, dirty_flags, dirty_actors, dirty_pos, .. } = self;
+        let Self {
+            play,
+            cue_scratch,
+            locals,
+            dirty_flags,
+            dirty_actors,
+            dirty_pos,
+            ..
+        } = self;
         let is_identity = delta == Affine3A::IDENTITY;
 
         // Static-troupe fast path: if the script never moves this troupe AND
@@ -382,7 +404,9 @@ impl Stage {
                 if let Some(idx) = scene.troupe_idx(troupe)
                     && let Some(group) = scene.actors.group(idx)
                 {
-                    for a in group { cue_scratch.push(a.actor_h); }
+                    for a in group {
+                        cue_scratch.push(a.actor_h);
+                    }
                 }
             }
         }
@@ -392,7 +416,14 @@ impl Stage {
         if is_identity {
             apply_identity_block_soa(locals, dirty_flags, dirty_actors, dirty_pos, cue_scratch);
         } else {
-            apply_delta_block_soa(locals, dirty_flags, dirty_actors, dirty_pos, cue_scratch, delta);
+            apply_delta_block_soa(
+                locals,
+                dirty_flags,
+                dirty_actors,
+                dirty_pos,
+                cue_scratch,
+                delta,
+            );
         }
     }
 
@@ -405,7 +436,15 @@ impl Stage {
             return;
         }
 
-        let Self { dirty_actors, dirty_pos, locals, worlds, dirty_flags, actors, .. } = self;
+        let Self {
+            dirty_actors,
+            dirty_pos,
+            locals,
+            worlds,
+            dirty_flags,
+            actors,
+            ..
+        } = self;
         let n = dirty_actors.len();
         let cap = locals.len();
 
@@ -437,8 +476,9 @@ impl Stage {
     /// Number of actors with a pending transform update. Used by the parallel
     /// propagate threshold in `World::propagate_transforms`.
     #[inline]
-    pub fn dirty_count(&self) -> usize { self.dirty_actors.len() }
-
+    pub fn dirty_count(&self) -> usize {
+        self.dirty_actors.len()
+    }
 }
 
 // ── Propagate inner kernel ──────────────────────────────────────────────────
@@ -458,7 +498,9 @@ fn propagate_one(
     cap: usize,
 ) {
     let idx = actor_h.idx as usize;
-    if idx >= cap { return }
+    if idx >= cap {
+        return;
+    }
     // Note: the `actors.get_mut` below gates sub-entity composition behind a
     // generation check. The two SoA writes that follow execute unconditionally,
     // which is intentional: in normal operation `dirty_actors` only contains
@@ -509,19 +551,35 @@ fn apply_delta_block_soa(
 
         if i0 < cap {
             locals[i0] = delta * locals[i0];
-            if !dirty_flags[i0] { dirty_flags[i0] = true; dirty_pos[i0] = dirty_actors.len() as u16; dirty_actors.push(h0); }
+            if !dirty_flags[i0] {
+                dirty_flags[i0] = true;
+                dirty_pos[i0] = dirty_actors.len() as u16;
+                dirty_actors.push(h0);
+            }
         }
         if i1 < cap {
             locals[i1] = delta * locals[i1];
-            if !dirty_flags[i1] { dirty_flags[i1] = true; dirty_pos[i1] = dirty_actors.len() as u16; dirty_actors.push(h1); }
+            if !dirty_flags[i1] {
+                dirty_flags[i1] = true;
+                dirty_pos[i1] = dirty_actors.len() as u16;
+                dirty_actors.push(h1);
+            }
         }
         if i2 < cap {
             locals[i2] = delta * locals[i2];
-            if !dirty_flags[i2] { dirty_flags[i2] = true; dirty_pos[i2] = dirty_actors.len() as u16; dirty_actors.push(h2); }
+            if !dirty_flags[i2] {
+                dirty_flags[i2] = true;
+                dirty_pos[i2] = dirty_actors.len() as u16;
+                dirty_actors.push(h2);
+            }
         }
         if i3 < cap {
             locals[i3] = delta * locals[i3];
-            if !dirty_flags[i3] { dirty_flags[i3] = true; dirty_pos[i3] = dirty_actors.len() as u16; dirty_actors.push(h3); }
+            if !dirty_flags[i3] {
+                dirty_flags[i3] = true;
+                dirty_pos[i3] = dirty_actors.len() as u16;
+                dirty_actors.push(h3);
+            }
         }
         i += 4;
     }
@@ -531,7 +589,11 @@ fn apply_delta_block_soa(
         let idx = h.idx as usize;
         if idx < cap {
             locals[idx] = delta * locals[idx];
-            if !dirty_flags[idx] { dirty_flags[idx] = true; dirty_pos[idx] = dirty_actors.len() as u16; dirty_actors.push(h); }
+            if !dirty_flags[idx] {
+                dirty_flags[idx] = true;
+                dirty_pos[idx] = dirty_actors.len() as u16;
+                dirty_actors.push(h);
+            }
         }
         i += 1;
     }
@@ -559,17 +621,37 @@ fn apply_identity_block_soa(
         let i2 = h2.idx as usize;
         let i3 = h3.idx as usize;
 
-        if i0 < cap && !dirty_flags[i0] { dirty_flags[i0] = true; dirty_pos[i0] = dirty_actors.len() as u16; dirty_actors.push(h0); }
-        if i1 < cap && !dirty_flags[i1] { dirty_flags[i1] = true; dirty_pos[i1] = dirty_actors.len() as u16; dirty_actors.push(h1); }
-        if i2 < cap && !dirty_flags[i2] { dirty_flags[i2] = true; dirty_pos[i2] = dirty_actors.len() as u16; dirty_actors.push(h2); }
-        if i3 < cap && !dirty_flags[i3] { dirty_flags[i3] = true; dirty_pos[i3] = dirty_actors.len() as u16; dirty_actors.push(h3); }
+        if i0 < cap && !dirty_flags[i0] {
+            dirty_flags[i0] = true;
+            dirty_pos[i0] = dirty_actors.len() as u16;
+            dirty_actors.push(h0);
+        }
+        if i1 < cap && !dirty_flags[i1] {
+            dirty_flags[i1] = true;
+            dirty_pos[i1] = dirty_actors.len() as u16;
+            dirty_actors.push(h1);
+        }
+        if i2 < cap && !dirty_flags[i2] {
+            dirty_flags[i2] = true;
+            dirty_pos[i2] = dirty_actors.len() as u16;
+            dirty_actors.push(h2);
+        }
+        if i3 < cap && !dirty_flags[i3] {
+            dirty_flags[i3] = true;
+            dirty_pos[i3] = dirty_actors.len() as u16;
+            dirty_actors.push(h3);
+        }
         i += 4;
     }
 
     while i < n {
         let h = handles[i];
         let idx = h.idx as usize;
-        if idx < cap && !dirty_flags[idx] { dirty_flags[idx] = true; dirty_pos[idx] = dirty_actors.len() as u16; dirty_actors.push(h); }
+        if idx < cap && !dirty_flags[idx] {
+            dirty_flags[idx] = true;
+            dirty_pos[idx] = dirty_actors.len() as u16;
+            dirty_actors.push(h);
+        }
         i += 1;
     }
 }

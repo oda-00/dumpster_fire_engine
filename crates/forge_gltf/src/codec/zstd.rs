@@ -38,14 +38,16 @@ pub fn decompress(src: &[u8]) -> GltfResult<ThinVec<u8>> {
 
     let header = read_frame_header(&mut r)?;
     if header.dictionary_id != 0 {
-        return Err(GltfError::UnsupportedFeature(
-            format!("ZSTD frame uses dictionary {} (no dict support)", header.dictionary_id)
-        ));
+        return Err(GltfError::UnsupportedFeature(format!(
+            "ZSTD frame uses dictionary {} (no dict support)",
+            header.dictionary_id
+        )));
     }
 
     // Pre-size the output when content_size is known. Otherwise allocate
     // optimistically off the window descriptor.
-    let initial_capacity = header.frame_content_size
+    let initial_capacity = header
+        .frame_content_size
         .map(|s| s as usize)
         .unwrap_or_else(|| header.window_size.min(1 << 24) as usize);
     let mut out: Vec<u8> = Vec::with_capacity(initial_capacity);
@@ -80,22 +82,26 @@ pub fn decompress(src: &[u8]) -> GltfResult<ThinVec<u8>> {
                 // Compressed block: literals + sequences.
                 let block_end_pos = r.pos + bh.block_size as usize;
                 decompress_compressed_block(
-                    &mut r, block_end_pos, &mut out,
+                    &mut r,
+                    block_end_pos,
+                    &mut out,
                     &mut repeats,
-                    &mut prev_ll, &mut prev_ml, &mut prev_of,
+                    &mut prev_ll,
+                    &mut prev_ml,
+                    &mut prev_of,
                     &mut prev_huff,
                 )?;
                 if r.pos != block_end_pos {
                     return Err(GltfError::InvalidAccessor(
-                        "ZSTD compressed block: trailing bytes after decode"
+                        "ZSTD compressed block: trailing bytes after decode",
                     ));
                 }
             }
-            _ => return Err(GltfError::InvalidAccessor(
-                "ZSTD: reserved block type 3"
-            )),
+            _ => return Err(GltfError::InvalidAccessor("ZSTD: reserved block type 3")),
         }
-        if bh.last_block { break; }
+        if bh.last_block {
+            break;
+        }
     }
 
     // Optional 4-byte content checksum (XXH64 low 32 bits) — skipped.
@@ -119,14 +125,16 @@ struct FrameHeader {
 
 fn read_frame_header(r: &mut ByteReader<'_>) -> GltfResult<FrameHeader> {
     let fhd = r.read_u8()?;
-    let dict_id_flag       =  fhd        & 0x3;
-    let content_checksum   = (fhd >> 2) & 0x1 != 0;
+    let dict_id_flag = fhd & 0x3;
+    let content_checksum = (fhd >> 2) & 0x1 != 0;
     // bit 3 reserved (must be 0).
-    let unused_bit3        = (fhd >> 3) & 0x1;
-    let single_segment     = (fhd >> 5) & 0x1 != 0;
-    let fcs_flag           = (fhd >> 6) & 0x3;
+    let unused_bit3 = (fhd >> 3) & 0x1;
+    let single_segment = (fhd >> 5) & 0x1 != 0;
+    let fcs_flag = (fhd >> 6) & 0x3;
     if unused_bit3 != 0 {
-        return Err(GltfError::InvalidAccessor("ZSTD: reserved bit set in frame header descriptor"));
+        return Err(GltfError::InvalidAccessor(
+            "ZSTD: reserved bit set in frame header descriptor",
+        ));
     }
 
     // Window descriptor (omitted iff single_segment).
@@ -155,11 +163,11 @@ fn read_frame_header(r: &mut ByteReader<'_>) -> GltfResult<FrameHeader> {
     // Frame content size (0, 1, 2, 4, or 8 bytes).
     let frame_content_size: Option<u64> = match fcs_flag {
         0 if single_segment => Some(r.read_u8()? as u64),
-        0                   => None,
-        1                   => Some(r.read_u16_le()? as u64 + 256),
-        2                   => Some(r.read_u32_le()? as u64),
-        3                   => Some(r.read_u64_le()?),
-        _                   => unreachable!(),
+        0 => None,
+        1 => Some(r.read_u16_le()? as u64 + 256),
+        2 => Some(r.read_u32_le()? as u64),
+        3 => Some(r.read_u64_le()?),
+        _ => unreachable!(),
     };
 
     let window_size = if single_segment {
@@ -169,7 +177,12 @@ fn read_frame_header(r: &mut ByteReader<'_>) -> GltfResult<FrameHeader> {
         window_size
     };
 
-    Ok(FrameHeader { window_size, frame_content_size, dictionary_id, content_checksum })
+    Ok(FrameHeader {
+        window_size,
+        frame_content_size,
+        dictionary_id,
+        content_checksum,
+    })
 }
 
 // ─── Block header ───────────────────────────────────────────────────────────
@@ -188,20 +201,25 @@ fn read_block_header(r: &mut ByteReader<'_>) -> GltfResult<BlockHeader> {
     let last_block = (raw & 0x1) != 0;
     let block_type = ((raw >> 1) & 0x3) as u8;
     let block_size = raw >> 3;
-    Ok(BlockHeader { last_block, block_type, block_size })
+    Ok(BlockHeader {
+        last_block,
+        block_type,
+        block_size,
+    })
 }
 
 // ─── Compressed block ───────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn decompress_compressed_block(
-    r:           &mut ByteReader<'_>,
-    block_end:   usize,
-    out:         &mut Vec<u8>,
-    repeats:     &mut [u32; 3],
-    prev_ll:     &mut Option<FseTable>,
-    prev_ml:     &mut Option<FseTable>,
-    prev_of:     &mut Option<FseTable>,
-    prev_huff:   &mut Option<HuffmanTable>,
+    r: &mut ByteReader<'_>,
+    block_end: usize,
+    out: &mut Vec<u8>,
+    repeats: &mut [u32; 3],
+    prev_ll: &mut Option<FseTable>,
+    prev_ml: &mut Option<FseTable>,
+    prev_of: &mut Option<FseTable>,
+    prev_huff: &mut Option<HuffmanTable>,
 ) -> GltfResult<()> {
     // ── Literals section ──
     let lit_header = read_literals_section_header(r)?;
@@ -224,17 +242,21 @@ fn decompress_compressed_block(
                 let (table, header_consumed) = HuffmanTable::parse(comp_bytes)?;
                 let payload = &comp_bytes[header_consumed..];
                 let decoded = huffman_decompress(
-                    &table, payload, lit_header.num_streams,
+                    &table,
+                    payload,
+                    lit_header.num_streams,
                     lit_header.regen_size as usize,
                 )?;
                 *prev_huff = Some(table);
                 decoded
             } else {
                 let table = prev_huff.as_ref().ok_or(GltfError::InvalidAccessor(
-                    "ZSTD: treeless literals with no prior Huffman table"
+                    "ZSTD: treeless literals with no prior Huffman table",
                 ))?;
                 huffman_decompress(
-                    table, comp_bytes, lit_header.num_streams,
+                    table,
+                    comp_bytes,
+                    lit_header.num_streams,
                     lit_header.regen_size as usize,
                 )?
             }
@@ -253,15 +275,27 @@ fn decompress_compressed_block(
     // Build the three FSE tables (literal-length, offset-code, match-length)
     // based on their mode bits.
     let ll_table = build_fse_table(
-        r, seq_header.ll_mode, prev_ll, &LL_PREDEFINED_DIST, LL_PREDEFINED_AL,
+        r,
+        seq_header.ll_mode,
+        prev_ll,
+        &LL_PREDEFINED_DIST,
+        LL_PREDEFINED_AL,
         "literal_length",
     )?;
     let of_table = build_fse_table(
-        r, seq_header.of_mode, prev_of, &OF_PREDEFINED_DIST, OF_PREDEFINED_AL,
+        r,
+        seq_header.of_mode,
+        prev_of,
+        &OF_PREDEFINED_DIST,
+        OF_PREDEFINED_AL,
         "offset",
     )?;
     let ml_table = build_fse_table(
-        r, seq_header.ml_mode, prev_ml, &ML_PREDEFINED_DIST, ML_PREDEFINED_AL,
+        r,
+        seq_header.ml_mode,
+        prev_ml,
+        &ML_PREDEFINED_DIST,
+        ML_PREDEFINED_AL,
         "match_length",
     )?;
 
@@ -276,7 +310,9 @@ fn decompress_compressed_block(
     let bitstream_start = r.pos;
     let bitstream_end = block_end;
     if bitstream_end <= bitstream_start {
-        return Err(GltfError::InvalidAccessor("ZSTD sequences: empty bitstream"));
+        return Err(GltfError::InvalidAccessor(
+            "ZSTD sequences: empty bitstream",
+        ));
     }
     let bitstream = r.slice_range(bitstream_start, bitstream_end)?;
     r.pos = bitstream_end;
@@ -315,14 +351,19 @@ fn decompress_compressed_block(
         // Emit `literal_len` bytes of literals then copy `match_len` from
         // (output position - actual_offset).
         if lit_cursor + literal_len as usize > literals.len() {
-            return Err(GltfError::InvalidAccessor("ZSTD: literal_length exceeds literals section"));
+            return Err(GltfError::InvalidAccessor(
+                "ZSTD: literal_length exceeds literals section",
+            ));
         }
         out.extend_from_slice(&literals[lit_cursor..lit_cursor + literal_len as usize]);
         lit_cursor += literal_len as usize;
 
-        let copy_from = out.len().checked_sub(actual_offset as usize).ok_or(
-            GltfError::InvalidAccessor("ZSTD: match offset before output start")
-        )?;
+        let copy_from =
+            out.len()
+                .checked_sub(actual_offset as usize)
+                .ok_or(GltfError::InvalidAccessor(
+                    "ZSTD: match offset before output start",
+                ))?;
         // Match copy may overlap (offset < match_len) — emit byte-by-byte
         // for correctness in that case. The fast path (no overlap) uses a
         // single copy_within when we know the source range is fully behind
@@ -364,16 +405,16 @@ fn decompress_compressed_block(
 // ─── Literals section header ────────────────────────────────────────────────
 
 struct LiteralsSectionHeader {
-    section_type:  u8,    // 0=raw, 1=RLE, 2=compressed, 3=treeless
-    regen_size:    u32,
-    comp_size:     u32,   // ignored for raw/RLE
-    num_streams:   u32,   // 1 or 4
+    section_type: u8, // 0=raw, 1=RLE, 2=compressed, 3=treeless
+    regen_size: u32,
+    comp_size: u32,   // ignored for raw/RLE
+    num_streams: u32, // 1 or 4
 }
 
 fn read_literals_section_header(r: &mut ByteReader<'_>) -> GltfResult<LiteralsSectionHeader> {
     let b0 = r.read_u8()?;
     let section_type = b0 & 0x3;
-    let size_format  = (b0 >> 2) & 0x3;
+    let size_format = (b0 >> 2) & 0x3;
 
     match section_type {
         0 | 1 => {
@@ -392,7 +433,10 @@ fn read_literals_section_header(r: &mut ByteReader<'_>) -> GltfResult<LiteralsSe
                 _ => unreachable!(),
             };
             Ok(LiteralsSectionHeader {
-                section_type, regen_size, comp_size: 0, num_streams: 1,
+                section_type,
+                regen_size,
+                comp_size: 0,
+                num_streams: 1,
             })
         }
         2 | 3 => {
@@ -405,7 +449,7 @@ fn read_literals_section_header(r: &mut ByteReader<'_>) -> GltfResult<LiteralsSe
                     let b1 = r.read_u8()? as u32;
                     let b2 = r.read_u8()? as u32;
                     let regen = ((b0 as u32) >> 4) | ((b1 & 0x3f) << 4);
-                    let comp  = (b1 >> 6) | (b2 << 2);
+                    let comp = (b1 >> 6) | (b2 << 2);
                     (regen, comp)
                 }
                 2 => {
@@ -414,7 +458,7 @@ fn read_literals_section_header(r: &mut ByteReader<'_>) -> GltfResult<LiteralsSe
                     let b2 = r.read_u8()? as u32;
                     let b3 = r.read_u8()? as u32;
                     let regen = ((b0 as u32) >> 4) | (b1 << 4) | ((b2 & 0x3) << 12);
-                    let comp  = (b2 >> 2) | (b3 << 6);
+                    let comp = (b2 >> 2) | (b3 << 6);
                     (regen, comp)
                 }
                 3 => {
@@ -424,13 +468,16 @@ fn read_literals_section_header(r: &mut ByteReader<'_>) -> GltfResult<LiteralsSe
                     let b3 = r.read_u8()? as u32;
                     let b4 = r.read_u8()? as u32;
                     let regen = ((b0 as u32) >> 4) | (b1 << 4) | (b2 << 12) | ((b3 & 0x3) << 16);
-                    let comp  = (b3 >> 2) | (b4 << 6);
+                    let comp = (b3 >> 2) | (b4 << 6);
                     (regen, comp)
                 }
                 _ => unreachable!(),
             };
             Ok(LiteralsSectionHeader {
-                section_type, regen_size, comp_size, num_streams,
+                section_type,
+                regen_size,
+                comp_size,
+                num_streams,
             })
         }
         _ => unreachable!(),
@@ -460,7 +507,10 @@ fn read_sequences_section_header(r: &mut ByteReader<'_>) -> GltfResult<Sequences
     };
     if num_sequences == 0 {
         return Ok(SequencesSectionHeader {
-            num_sequences: 0, ll_mode: 0, of_mode: 0, ml_mode: 0,
+            num_sequences: 0,
+            ll_mode: 0,
+            of_mode: 0,
+            ml_mode: 0,
         });
     }
     let modes = r.read_u8()?;
@@ -468,16 +518,21 @@ fn read_sequences_section_header(r: &mut ByteReader<'_>) -> GltfResult<Sequences
     let of_mode = (modes >> 4) & 0x3;
     let ml_mode = (modes >> 2) & 0x3;
     // Bits 0-1 reserved.
-    Ok(SequencesSectionHeader { num_sequences, ll_mode, of_mode, ml_mode })
+    Ok(SequencesSectionHeader {
+        num_sequences,
+        ll_mode,
+        of_mode,
+        ml_mode,
+    })
 }
 
 // ─── FSE table construction ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 struct FseEntry {
-    symbol:  u8,
+    symbol: u8,
     nb_bits: u8,
-    base:    u16,
+    base: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -487,12 +542,12 @@ struct FseTable {
 }
 
 fn build_fse_table(
-    r:               &mut ByteReader<'_>,
-    mode:            u8,
-    prev:            &Option<FseTable>,
+    r: &mut ByteReader<'_>,
+    mode: u8,
+    prev: &Option<FseTable>,
     predefined_dist: &[i32],
-    predefined_al:   u32,
-    name:            &'static str,
+    predefined_al: u32,
+    name: &'static str,
 ) -> GltfResult<FseTable> {
     match mode {
         0 => {
@@ -502,8 +557,15 @@ fn build_fse_table(
         1 => {
             // RLE — single symbol repeated.
             let sym = r.read_u8()?;
-            let entry = FseEntry { symbol: sym, nb_bits: 0, base: 0 };
-            Ok(FseTable { entries: vec![entry; 1], acc_log: 0 })
+            let entry = FseEntry {
+                symbol: sym,
+                nb_bits: 0,
+                base: 0,
+            };
+            Ok(FseTable {
+                entries: vec![entry; 1],
+                acc_log: 0,
+            })
         }
         2 => {
             // Compressed (FSE-coded distribution).
@@ -517,7 +579,7 @@ fn build_fse_table(
         3 => {
             // Repeat — reuse the previous block's table.
             prev.clone().ok_or(GltfError::InvalidAccessor(
-                "ZSTD: FSE mode Repeat with no previous table"
+                "ZSTD: FSE mode Repeat with no previous table",
             ))
         }
         _ => unreachable!(),
@@ -526,7 +588,14 @@ fn build_fse_table(
 
 fn build_fse_from_distribution(dist: &[i32], acc_log: u32) -> FseTable {
     let size = 1usize << acc_log;
-    let mut entries = vec![FseEntry { symbol: 0, nb_bits: 0, base: 0 }; size];
+    let mut entries = vec![
+        FseEntry {
+            symbol: 0,
+            nb_bits: 0,
+            base: 0
+        };
+        size
+    ];
 
     // Spread symbols across the table per the spec's gap-pattern:
     //   step = (size >> 1) + (size >> 3) + 3; mask = size - 1.
@@ -534,15 +603,22 @@ fn build_fse_from_distribution(dist: &[i32], acc_log: u32) -> FseTable {
     let mask = size - 1;
     let mut pos = 0usize;
     for (sym, &n) in dist.iter().enumerate() {
-        if n <= 0 { continue; } // negative = "low-prob symbol" — handled below
+        if n <= 0 {
+            continue;
+        } // negative = "low-prob symbol" — handled below
         for _ in 0..n {
             entries[pos].symbol = sym as u8;
             pos = (pos + step) & mask;
-            while pos >= size.wrapping_sub(0) || entries[pos].symbol != 0 && entries[pos].nb_bits != 0 {
+            while pos >= size.wrapping_sub(0)
+                || entries[pos].symbol != 0 && entries[pos].nb_bits != 0
+            {
                 // Skip cells already used by negative-prob symbols (we
                 // placed them up-front; this is a stable placeholder).
-                if entries[pos].nb_bits != 0 { pos = (pos + step) & mask; }
-                else { break; }
+                if entries[pos].nb_bits != 0 {
+                    pos = (pos + step) & mask;
+                } else {
+                    break;
+                }
             }
         }
     }
@@ -553,7 +629,7 @@ fn build_fse_from_distribution(dist: &[i32], acc_log: u32) -> FseTable {
             entries[tail].symbol = sym as u8;
             entries[tail].nb_bits = acc_log as u8;
             entries[tail].base = 0;
-            if tail > 0 { tail -= 1; }
+            tail = tail.saturating_sub(1);
         }
     }
 
@@ -564,14 +640,20 @@ fn build_fse_from_distribution(dist: &[i32], acc_log: u32) -> FseTable {
         next_state[sym] = if n > 0 { n as u16 } else { 1 };
     }
     for entry in entries.iter_mut() {
-        if entry.nb_bits != 0 { continue; } // already filled by low-prob branch
+        if entry.nb_bits != 0 {
+            continue;
+        } // already filled by low-prob branch
         let sym = entry.symbol as usize;
-        if sym >= next_state.len() { continue; }
+        if sym >= next_state.len() {
+            continue;
+        }
         let nx = next_state[sym] as u32;
-        if nx == 0 { continue; }
+        if nx == 0 {
+            continue;
+        }
         let n_bits = (acc_log) - log2_floor(nx);
         entry.nb_bits = n_bits as u8;
-        entry.base = (((nx as u32) << n_bits) - size as u32) as u16;
+        entry.base = ((nx << n_bits) - size as u32) as u16;
         next_state[sym] += 1;
     }
 
@@ -582,9 +664,7 @@ fn log2_floor(x: u32) -> u32 {
     if x == 0 { 0 } else { 31 - x.leading_zeros() }
 }
 
-fn parse_compressed_fse_table(bytes: &[u8], _name: &'static str)
-    -> GltfResult<(FseTable, usize)>
-{
+fn parse_compressed_fse_table(bytes: &[u8], _name: &'static str) -> GltfResult<(FseTable, usize)> {
     if bytes.is_empty() {
         return Err(GltfError::InvalidAccessor("ZSTD FSE table: empty"));
     }
@@ -596,7 +676,7 @@ fn parse_compressed_fse_table(bytes: &[u8], _name: &'static str)
     while remaining > 1 {
         // Number of bits to read = log2(remaining) + 1.
         let max_n_bits = log2_floor(remaining as u32) + 1;
-        let threshold  = (1u32 << max_n_bits) - 1 - remaining as u32;
+        let threshold = (1u32 << max_n_bits) - 1 - remaining as u32;
         let mut value = br.read_bits(max_n_bits - 1)? as u32;
         if value < threshold {
             // Use only max_n_bits-1 bits.
@@ -615,12 +695,14 @@ fn parse_compressed_fse_table(bytes: &[u8], _name: &'static str)
             // Repeat marker — read 2 bits at a time until non-3.
             loop {
                 let r2 = br.read_bits(2)? as i32;
-                for _ in 0..r2 { dist.push(0); }
-                if r2 != 3 { break; }
+                dist.extend(std::iter::repeat_n(0, r2 as usize));
+                if r2 != 3 {
+                    break;
+                }
             }
         }
     }
-    let consumed = (br.bits_consumed + 7) / 8;
+    let consumed = br.bits_consumed.div_ceil(8);
     Ok((build_fse_from_distribution(&dist, acc_log), consumed))
 }
 
@@ -657,8 +739,12 @@ fn decode_offset(raw: u32, literal_length: u32, mut rep: [u32; 3]) -> (u32, [u32
             new[0] = actual;
             let mut w = 1;
             for &v in rep.iter() {
-                if v == actual { continue; }
-                if w >= 3 { break; }
+                if v == actual {
+                    continue;
+                }
+                if w >= 3 {
+                    break;
+                }
                 new[w] = v;
                 w += 1;
             }
@@ -691,7 +777,9 @@ impl HuffmanTable {
             // FSE-compressed weights — header_byte bytes of FSE table follow.
             let weights_size = header_byte as usize;
             if 1 + weights_size > src.len() {
-                return Err(GltfError::InvalidAccessor("ZSTD Huffman: weights body truncated"));
+                return Err(GltfError::InvalidAccessor(
+                    "ZSTD Huffman: weights body truncated",
+                ));
             }
             // For our use case we only need to handle the direct path; FSE
             // weights are rare in KTX2 supercompression. Decode anyway by
@@ -707,9 +795,11 @@ impl HuffmanTable {
             // Direct weight encoding: `header_byte - 127` weights packed
             // as 4 bits each in the following bytes.
             let num_weights = (header_byte - 127) as usize;
-            let bytes_needed = (num_weights + 1) / 2;
+            let bytes_needed = num_weights.div_ceil(2);
             if 1 + bytes_needed > src.len() {
-                return Err(GltfError::InvalidAccessor("ZSTD Huffman: direct weights truncated"));
+                return Err(GltfError::InvalidAccessor(
+                    "ZSTD Huffman: direct weights truncated",
+                ));
             }
             let mut weights = Vec::with_capacity(num_weights);
             for i in 0..num_weights {
@@ -726,7 +816,9 @@ impl HuffmanTable {
         // maximum code length.
         let mut sum: u32 = 0;
         for &w in &weights {
-            if w > 0 { sum += 1u32 << (w - 1); }
+            if w > 0 {
+                sum += 1u32 << (w - 1);
+            }
         }
         if sum == 0 {
             return Err(GltfError::InvalidAccessor("ZSTD Huffman: all-zero weights"));
@@ -748,12 +840,15 @@ impl HuffmanTable {
         }
         let mut rank_offset = vec![0u32; max_len as usize + 2];
         for l in 1..=max_len as usize {
-            rank_offset[l + 1] = rank_offset[l] + symbols_per_len[l] * (1 << (max_len as usize - l));
+            rank_offset[l + 1] =
+                rank_offset[l] + symbols_per_len[l] * (1 << (max_len as usize - l));
         }
         let mut table = vec![(0u8, 0u8); 1 << max_len];
         let mut rank_cursor = vec![0u32; max_len as usize + 1];
         for (sym, &w) in all_weights.iter().enumerate() {
-            if w == 0 { continue; }
+            if w == 0 {
+                continue;
+            }
             let len = (max_len + 1 - w as u32) as usize;
             let base = rank_offset[len] + rank_cursor[len] * (1 << (max_len as usize - len));
             let span = 1 << (max_len as usize - len);
@@ -766,7 +861,13 @@ impl HuffmanTable {
             rank_cursor[len] += 1;
         }
 
-        Ok((HuffmanTable { max_len: max_len as u8, table }, consumed))
+        Ok((
+            HuffmanTable {
+                max_len: max_len as u8,
+                table,
+            },
+            consumed,
+        ))
     }
 }
 
@@ -781,13 +882,17 @@ fn huffman_decode_weight_stream(fse: &FseTable, src: &[u8]) -> GltfResult<Vec<u8
     loop {
         let e1 = fse.entries[s1];
         out.push(e1.symbol);
-        if br.is_exhausted() { break; }
+        if br.is_exhausted() {
+            break;
+        }
         let nb1 = br.read_bits(e1.nb_bits as u32)? as usize;
         s1 = e1.base as usize + nb1;
 
         let e2 = fse.entries[s2];
         out.push(e2.symbol);
-        if br.is_exhausted() { break; }
+        if br.is_exhausted() {
+            break;
+        }
         let nb2 = br.read_bits(e2.nb_bits as u32)? as usize;
         s2 = e2.base as usize + nb2;
     }
@@ -795,7 +900,10 @@ fn huffman_decode_weight_stream(fse: &FseTable, src: &[u8]) -> GltfResult<Vec<u8
 }
 
 fn huffman_decompress(
-    table: &HuffmanTable, src: &[u8], num_streams: u32, regen_size: usize,
+    table: &HuffmanTable,
+    src: &[u8],
+    num_streams: u32,
+    regen_size: usize,
 ) -> GltfResult<Vec<u8>> {
     let mut out = Vec::with_capacity(regen_size);
     if num_streams == 1 {
@@ -804,18 +912,22 @@ fn huffman_decompress(
         // 4-stream layout: 6-byte jump table holds stream 1/2/3 sizes;
         // stream 4 occupies the rest.
         if src.len() < 6 {
-            return Err(GltfError::InvalidAccessor("ZSTD 4-stream Huffman: header truncated"));
+            return Err(GltfError::InvalidAccessor(
+                "ZSTD 4-stream Huffman: header truncated",
+            ));
         }
         let s1 = u16::from_le_bytes([src[0], src[1]]) as usize;
         let s2 = u16::from_le_bytes([src[2], src[3]]) as usize;
         let s3 = u16::from_le_bytes([src[4], src[5]]) as usize;
         let rest = &src[6..];
         if s1 + s2 + s3 > rest.len() {
-            return Err(GltfError::InvalidAccessor("ZSTD 4-stream Huffman: sizes overflow"));
+            return Err(GltfError::InvalidAccessor(
+                "ZSTD 4-stream Huffman: sizes overflow",
+            ));
         }
         let s4 = rest.len() - s1 - s2 - s3;
         // Each of 4 streams produces ~1/4 of the literals.
-        let q  = regen_size / 4;
+        let q = regen_size / 4;
         let last_q = regen_size - 3 * q;
         let mut buf = Vec::with_capacity(q);
         huffman_decode_stream(table, &rest[0..s1], q, &mut buf)?;
@@ -827,14 +939,22 @@ fn huffman_decompress(
         huffman_decode_stream(table, &rest[s1 + s2..s1 + s2 + s3], q, &mut buf)?;
         out.append(&mut buf);
         buf.clear();
-        huffman_decode_stream(table, &rest[s1 + s2 + s3..s1 + s2 + s3 + s4], last_q, &mut buf)?;
+        huffman_decode_stream(
+            table,
+            &rest[s1 + s2 + s3..s1 + s2 + s3 + s4],
+            last_q,
+            &mut buf,
+        )?;
         out.append(&mut buf);
     }
     Ok(out)
 }
 
 fn huffman_decode_stream(
-    table: &HuffmanTable, src: &[u8], n: usize, out: &mut Vec<u8>,
+    table: &HuffmanTable,
+    src: &[u8],
+    n: usize,
+    out: &mut Vec<u8>,
 ) -> GltfResult<()> {
     let mut br = BackwardBitReader::new(src)?;
     for _ in 0..n {
@@ -864,12 +984,21 @@ struct ForwardBitReader<'a> {
 }
 
 impl<'a> ForwardBitReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self { Self { bytes, bits_consumed: 0 } }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            bits_consumed: 0,
+        }
+    }
 
     fn read_bits(&mut self, n: u32) -> GltfResult<u64> {
-        if n == 0 { return Ok(0); }
+        if n == 0 {
+            return Ok(0);
+        }
         if self.bits_consumed + n as usize > self.bytes.len() * 8 {
-            return Err(GltfError::InvalidAccessor("ZSTD ForwardBitReader: underflow"));
+            return Err(GltfError::InvalidAccessor(
+                "ZSTD ForwardBitReader: underflow",
+            ));
         }
         let mut v = 0u64;
         for i in 0..n {
@@ -884,10 +1013,10 @@ impl<'a> ForwardBitReader<'a> {
 
 /// Backward MSB-first bit reader. ZSTD's compressed bitstreams (sequences
 /// + Huffman literals) are read from end-to-start, with the highest bit
-/// of the last byte being the first bit consumed. A marker bit on the
-/// last byte tells us where the actual data starts.
+///   of the last byte being the first bit consumed. A marker bit on the
+///   last byte tells us where the actual data starts.
 struct BackwardBitReader<'a> {
-    bytes:      &'a [u8],
+    bytes: &'a [u8],
     /// Next bit position (counting from the *end* of the buffer in bits).
     bit_pos: i64,
 }
@@ -901,18 +1030,27 @@ impl<'a> BackwardBitReader<'a> {
         // marks the position of the stream's most-significant bit.
         let last = *bytes.last().unwrap();
         if last == 0 {
-            return Err(GltfError::InvalidAccessor("ZSTD BackwardBitReader: no marker bit"));
+            return Err(GltfError::InvalidAccessor(
+                "ZSTD BackwardBitReader: no marker bit",
+            ));
         }
         let marker = 7i64 - last.leading_zeros() as i64;
         let total_bits = (bytes.len() as i64) * 8 - (8 - marker - 1);
-        Ok(Self { bytes, bit_pos: total_bits - 1 })
+        Ok(Self {
+            bytes,
+            bit_pos: total_bits - 1,
+        })
     }
 
     /// Read `n` bits MSB-first.
     fn read_bits(&mut self, n: u32) -> GltfResult<u64> {
-        if n == 0 { return Ok(0); }
+        if n == 0 {
+            return Ok(0);
+        }
         if self.bit_pos < (n as i64 - 1) {
-            return Err(GltfError::InvalidAccessor("ZSTD BackwardBitReader: underflow"));
+            return Err(GltfError::InvalidAccessor(
+                "ZSTD BackwardBitReader: underflow",
+            ));
         }
         let mut v = 0u64;
         for _ in 0..n {
@@ -926,11 +1064,16 @@ impl<'a> BackwardBitReader<'a> {
     }
 
     fn peek_bits(&self, n: u32) -> u64 {
-        if n == 0 { return 0; }
+        if n == 0 {
+            return 0;
+        }
         let mut v = 0u64;
         for i in 0..n {
             let bit_idx = self.bit_pos - i as i64;
-            if bit_idx < 0 { v <<= 1; continue; }
+            if bit_idx < 0 {
+                v <<= 1;
+                continue;
+            }
             let byte = self.bytes[(bit_idx / 8) as usize];
             let bit = (byte >> (bit_idx % 8)) & 1;
             v = (v << 1) | bit as u64;
@@ -951,13 +1094,18 @@ impl<'a> BackwardBitReader<'a> {
 
 struct ByteReader<'a> {
     bytes: &'a [u8],
-    pos:   usize,
+    pos: usize,
 }
 
 impl<'a> ByteReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self { Self { bytes, pos: 0 } }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
     fn read_u8(&mut self) -> GltfResult<u8> {
-        let b = *self.bytes.get(self.pos).ok_or(GltfError::InvalidAccessor("ZSTD: read past end"))?;
+        let b = *self
+            .bytes
+            .get(self.pos)
+            .ok_or(GltfError::InvalidAccessor("ZSTD: read past end"))?;
         self.pos += 1;
         Ok(b)
     }
@@ -971,10 +1119,15 @@ impl<'a> ByteReader<'a> {
     }
     fn read_u64_le(&mut self) -> GltfResult<u64> {
         let bs = self.read_bytes(8)?;
-        Ok(u64::from_le_bytes([bs[0], bs[1], bs[2], bs[3], bs[4], bs[5], bs[6], bs[7]]))
+        Ok(u64::from_le_bytes([
+            bs[0], bs[1], bs[2], bs[3], bs[4], bs[5], bs[6], bs[7],
+        ]))
     }
     fn read_bytes(&mut self, n: usize) -> GltfResult<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or(GltfError::InvalidAccessor("ZSTD: read overflow"))?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(GltfError::InvalidAccessor("ZSTD: read overflow"))?;
         if end > self.bytes.len() {
             return Err(GltfError::InvalidAccessor("ZSTD: read past end"));
         }
@@ -982,9 +1135,13 @@ impl<'a> ByteReader<'a> {
         self.pos = end;
         Ok(slice)
     }
-    fn remaining(&self) -> &'a [u8] { &self.bytes[self.pos..] }
+    fn remaining(&self) -> &'a [u8] {
+        &self.bytes[self.pos..]
+    }
     fn slice_range(&self, lo: usize, hi: usize) -> GltfResult<&'a [u8]> {
-        self.bytes.get(lo..hi).ok_or(GltfError::InvalidAccessor("ZSTD: bad slice"))
+        self.bytes
+            .get(lo..hi)
+            .ok_or(GltfError::InvalidAccessor("ZSTD: bad slice"))
     }
 }
 
@@ -992,50 +1149,41 @@ impl<'a> ByteReader<'a> {
 
 // Literal-length base / extra-bits per code.
 const LL_BASE: [u32; 36] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-    16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048,
-    4096, 8192, 16384, 32768, 65536,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64,
+    128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
 ];
 const LL_EXTRA: [u8; 36] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11,
     12, 13, 14, 15, 16,
 ];
 
 // Match-length base / extra-bits per code.
 const ML_BASE: [u32; 53] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
-    35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051,
-    4099, 8195, 16387, 32771, 65539,
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+    28, 29, 30, 31, 32, 33, 34, 35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027,
+    2051, 4099, 8195, 16387, 32771, 65539,
 ];
 const ML_EXTRA: [u8; 53] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11,
-    12, 13, 14, 15, 16,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
 ];
 
 // Predefined distributions + accuracy logs (RFC 8478 Appendix A).
 const LL_PREDEFINED_AL: u32 = 6;
 const LL_PREDEFINED_DIST: [i32; 36] = [
-    4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
+    4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
     -1, -1, -1, -1,
 ];
 
 const ML_PREDEFINED_AL: u32 = 6;
 const ML_PREDEFINED_DIST: [i32; 53] = [
-    1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    -1, -1, -1, -1, -1,
+    1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
 ];
 
 const OF_PREDEFINED_AL: u32 = 5;
 const OF_PREDEFINED_DIST: [i32; 29] = [
-    1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
+    1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
 ];
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -1066,11 +1214,11 @@ mod tests {
         let mut data = vec![0x28, 0xB5, 0x2F, 0xFD];
         // Frame header descriptor: single_segment=1, fcs_flag=0
         //   (single_segment + fcs=0 ⇒ 1-byte FCS follows).
-        data.push(0b001_00000 | (0 << 6) | (1 << 5));
+        data.push(0b001_00000 | (1 << 5));
         // FCS = 5 (we'll emit 5 raw bytes).
         data.push(5);
         // Block header: 3 bytes — last_block=1, type=0 (raw), size=5.
-        let bh: u32 = 1 | (0 << 1) | (5 << 3);
+        let bh: u32 = 1 | (5 << 3);
         data.push((bh & 0xff) as u8);
         data.push(((bh >> 8) & 0xff) as u8);
         data.push(((bh >> 16) & 0xff) as u8);
@@ -1086,7 +1234,7 @@ mod tests {
         // Frame magic.
         let mut data = vec![0x28, 0xB5, 0x2F, 0xFD];
         // single_segment + fcs=0 ⇒ 1-byte FCS follows.
-        data.push(0b001_00000 | (0 << 6) | (1 << 5));
+        data.push(0b001_00000 | (1 << 5));
         data.push(7); // produce 7 bytes
         // Block header: last_block=1, type=1 (RLE), size=7.
         let bh: u32 = 1 | (1 << 1) | (7 << 3);

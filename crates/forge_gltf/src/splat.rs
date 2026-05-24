@@ -44,13 +44,16 @@ impl GaussianSplatSet {
     /// Number of splats — derived from the longest populated stream so a
     /// partial set (positions only, say) still reports correctly.
     pub fn len(&self) -> usize {
-        self.positions.len()
+        self.positions
+            .len()
             .max(self.scales.len())
             .max(self.rotations.len())
             .max(self.colors.len())
             .max(self.opacities.len())
     }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Extract `KHR_gaussian_splatting` sets from a glTF document. Each
@@ -59,14 +62,18 @@ impl GaussianSplatSet {
 /// External-buffer reads use `buffer_data` so this works for both `.glb`
 /// (everything inline) and `.gltf` + sibling `.bin` files.
 pub fn extract_splats(
-    doc:         &gltf::Document,
+    doc: &gltf::Document,
     buffer_data: &[gltf::buffer::Data],
 ) -> ThinVec<GaussianSplatSet> {
     let mut out = ThinVec::new();
     for node in doc.nodes() {
-        let Some(ext) = node.extension_value("KHR_gaussian_splatting") else { continue };
+        let Some(ext) = node.extension_value("KHR_gaussian_splatting") else {
+            continue;
+        };
         let Some(obj) = ext.as_object() else { continue };
-        let Some(attrs) = obj.get("attributes").and_then(|a| a.as_object()) else { continue };
+        let Some(attrs) = obj.get("attributes").and_then(|a| a.as_object()) else {
+            continue;
+        };
 
         let mut set = GaussianSplatSet {
             name: node.name().map(str::to_owned),
@@ -98,7 +105,9 @@ pub fn extract_splats(
             }
         }
 
-        if !set.is_empty() { out.push(set); }
+        if !set.is_empty() {
+            out.push(set);
+        }
     }
     out
 }
@@ -111,9 +120,9 @@ pub fn extract_splats(
 // custom attribute names we walk the offsets ourselves.
 
 fn accessor_bytes<'a>(
-    doc:    &gltf::Document,
-    bufs:   &'a [gltf::buffer::Data],
-    idx:    usize,
+    doc: &gltf::Document,
+    bufs: &'a [gltf::buffer::Data],
+    idx: usize,
 ) -> Option<(&'a [u8], usize, usize)> {
     // Returns (bytes, count, component_count).
     let acc = doc.accessors().nth(idx)?;
@@ -124,12 +133,12 @@ fn accessor_bytes<'a>(
     let bytes = buf.get(off..off + len)?;
     let count = acc.count();
     let nc = match acc.dimensions() {
-        gltf::accessor::Dimensions::Vec2   => 2,
-        gltf::accessor::Dimensions::Vec3   => 3,
-        gltf::accessor::Dimensions::Vec4   => 4,
-        gltf::accessor::Dimensions::Mat2   => 4,
-        gltf::accessor::Dimensions::Mat3   => 9,
-        gltf::accessor::Dimensions::Mat4   => 16,
+        gltf::accessor::Dimensions::Vec2 => 2,
+        gltf::accessor::Dimensions::Vec3 => 3,
+        gltf::accessor::Dimensions::Vec4 => 4,
+        gltf::accessor::Dimensions::Mat2 => 4,
+        gltf::accessor::Dimensions::Mat3 => 9,
+        gltf::accessor::Dimensions::Mat4 => 16,
         gltf::accessor::Dimensions::Scalar => 1,
     };
     Some((bytes, count, nc))
@@ -140,12 +149,21 @@ fn read_f32_accessor(
     bufs: &[gltf::buffer::Data],
     idx: usize,
 ) -> ThinVec<f32> {
-    let Some((bytes, count, _)) = accessor_bytes(doc, bufs, idx) else { return ThinVec::new() };
+    let Some((bytes, count, _)) = accessor_bytes(doc, bufs, idx) else {
+        return ThinVec::new();
+    };
     let mut out = ThinVec::with_capacity(count);
     for i in 0..count {
         let off = i * 4;
-        if off + 4 > bytes.len() { break; }
-        out.push(f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]));
+        if off + 4 > bytes.len() {
+            break;
+        }
+        out.push(f32::from_le_bytes([
+            bytes[off],
+            bytes[off + 1],
+            bytes[off + 2],
+            bytes[off + 3],
+        ]));
     }
     out
 }
@@ -155,14 +173,28 @@ fn read_vec3_accessor(
     bufs: &[gltf::buffer::Data],
     idx: usize,
 ) -> ThinVec<[f32; 3]> {
-    let Some((bytes, count, _)) = accessor_bytes(doc, bufs, idx) else { return ThinVec::new() };
+    let Some((bytes, count, _)) = accessor_bytes(doc, bufs, idx) else {
+        return ThinVec::new();
+    };
     let mut out = ThinVec::with_capacity(count);
     for i in 0..count {
         let off = i * 12;
-        if off + 12 > bytes.len() { break; }
-        let x = f32::from_le_bytes([bytes[off    ], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
-        let y = f32::from_le_bytes([bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7]]);
-        let z = f32::from_le_bytes([bytes[off + 8], bytes[off + 9], bytes[off +10], bytes[off +11]]);
+        if off + 12 > bytes.len() {
+            break;
+        }
+        let x = f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+        let y = f32::from_le_bytes([
+            bytes[off + 4],
+            bytes[off + 5],
+            bytes[off + 6],
+            bytes[off + 7],
+        ]);
+        let z = f32::from_le_bytes([
+            bytes[off + 8],
+            bytes[off + 9],
+            bytes[off + 10],
+            bytes[off + 11],
+        ]);
         out.push([x, y, z]);
     }
     out
@@ -173,15 +205,34 @@ fn read_vec4_accessor(
     bufs: &[gltf::buffer::Data],
     idx: usize,
 ) -> ThinVec<[f32; 4]> {
-    let Some((bytes, count, _)) = accessor_bytes(doc, bufs, idx) else { return ThinVec::new() };
+    let Some((bytes, count, _)) = accessor_bytes(doc, bufs, idx) else {
+        return ThinVec::new();
+    };
     let mut out = ThinVec::with_capacity(count);
     for i in 0..count {
         let off = i * 16;
-        if off + 16 > bytes.len() { break; }
-        let x = f32::from_le_bytes([bytes[off    ], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
-        let y = f32::from_le_bytes([bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7]]);
-        let z = f32::from_le_bytes([bytes[off + 8], bytes[off + 9], bytes[off +10], bytes[off +11]]);
-        let w = f32::from_le_bytes([bytes[off+12], bytes[off +13], bytes[off +14], bytes[off +15]]);
+        if off + 16 > bytes.len() {
+            break;
+        }
+        let x = f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+        let y = f32::from_le_bytes([
+            bytes[off + 4],
+            bytes[off + 5],
+            bytes[off + 6],
+            bytes[off + 7],
+        ]);
+        let z = f32::from_le_bytes([
+            bytes[off + 8],
+            bytes[off + 9],
+            bytes[off + 10],
+            bytes[off + 11],
+        ]);
+        let w = f32::from_le_bytes([
+            bytes[off + 12],
+            bytes[off + 13],
+            bytes[off + 14],
+            bytes[off + 15],
+        ]);
         out.push([x, y, z, w]);
     }
     out
@@ -200,9 +251,11 @@ mod tests {
 
     #[test]
     fn set_len_uses_longest_populated_stream() {
-        let mut set = GaussianSplatSet::default();
-        set.positions = thin_vec::thin_vec![[0.0, 0.0, 0.0]; 5];
-        set.opacities = thin_vec::thin_vec![1.0; 7]; // longer
+        let set = GaussianSplatSet {
+            positions: thin_vec::thin_vec![[0.0, 0.0, 0.0]; 5],
+            opacities: thin_vec::thin_vec![1.0; 7], // longer
+            ..GaussianSplatSet::default()
+        };
         assert_eq!(set.len(), 7);
         assert!(!set.is_empty());
     }

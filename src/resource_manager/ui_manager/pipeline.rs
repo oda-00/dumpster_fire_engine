@@ -14,7 +14,7 @@
 pub struct UiPushConstants {
     pub screen_w: f32,
     pub screen_h: f32,
-    pub _pad:     [f32; 2],
+    pub _pad: [f32; 2],
 }
 
 pub struct UiPipeline {

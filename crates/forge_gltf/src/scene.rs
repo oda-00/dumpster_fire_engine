@@ -14,24 +14,24 @@ pub type SceneIndex = u32;
 /// are stored as `Option<u32>`; root nodes have `parent: None`.
 #[derive(Debug, Clone)]
 pub struct Node {
-    pub name:        Option<String>,
-    pub parent:      Option<NodeIndex>,
-    pub children:    ThinVec<NodeIndex>,
+    pub name: Option<String>,
+    pub parent: Option<NodeIndex>,
+    pub children: ThinVec<NodeIndex>,
     /// Local TRS, decomposed. Translation, rotation (xyzw quaternion), scale.
     pub translation: [f32; 3],
-    pub rotation:    [f32; 4],
-    pub scale:       [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
     /// Local matrix already composed from TRS (column-major, 16 floats).
-    pub local_matrix:[f32; 16],
-    pub mesh:        Option<u32>,
-    pub camera:      Option<u32>,
-    pub skin:        Option<u32>,
-    pub light:       Option<u32>,
+    pub local_matrix: [f32; 16],
+    pub mesh: Option<u32>,
+    pub camera: Option<u32>,
+    pub skin: Option<u32>,
+    pub light: Option<u32>,
     /// Indices into morph-target weights of the referenced mesh (if any).
-    pub weights:     ThinVec<f32>,
+    pub weights: ThinVec<f32>,
     /// EXT_mesh_gpu_instancing — when populated, this node fans the
     /// referenced mesh into N draws with per-instance TRS overrides.
-    pub instances:   Option<NodeInstances>,
+    pub instances: Option<NodeInstances>,
 }
 
 /// Per-instance transform overrides for an `EXT_mesh_gpu_instancing` node.
@@ -44,9 +44,9 @@ pub struct NodeInstances {
     pub translation: ThinVec<[f32; 3]>,
     /// Per-instance rotation quaternions (x, y, z, w). Empty → fill with
     /// `[0, 0, 0, 1]`.
-    pub rotation:    ThinVec<[f32; 4]>,
+    pub rotation: ThinVec<[f32; 4]>,
     /// Per-instance scales. Empty → fill with `[1, 1, 1]`.
-    pub scale:       ThinVec<[f32; 3]>,
+    pub scale: ThinVec<[f32; 3]>,
 }
 
 impl NodeInstances {
@@ -54,16 +54,19 @@ impl NodeInstances {
     /// longest populated stream so a partial spec (e.g. translation-only)
     /// still drives a correct draw count.
     pub fn len(&self) -> usize {
-        self.translation.len()
+        self.translation
+            .len()
             .max(self.rotation.len())
             .max(self.scale.len())
     }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Scene {
-    pub name:  Option<String>,
+    pub name: Option<String>,
     pub roots: ThinVec<NodeIndex>,
 }
 
@@ -77,9 +80,13 @@ pub struct Scene {
 #[inline]
 pub fn compose_trs(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32; 16] {
     #[cfg(target_arch = "x86_64")]
-    unsafe { return compose_trs_sse2(t, r, s); }
+    unsafe {
+        compose_trs_sse2(t, r, s)
+    }
     #[cfg(target_arch = "aarch64")]
-    unsafe { return compose_trs_neon(t, r, s); }
+    unsafe {
+        return compose_trs_neon(t, r, s);
+    }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     compose_trs_scalar(t, r, s)
 }
@@ -114,10 +121,22 @@ pub(crate) fn compose_trs_scalar(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32;
     let r22 = 1.0 - 2.0 * (xx + yy);
 
     [
-        s[0] * r00, s[0] * r10, s[0] * r20, 0.0,
-        s[1] * r01, s[1] * r11, s[1] * r21, 0.0,
-        s[2] * r02, s[2] * r12, s[2] * r22, 0.0,
-        t[0],       t[1],       t[2],       1.0,
+        s[0] * r00,
+        s[0] * r10,
+        s[0] * r20,
+        0.0,
+        s[1] * r01,
+        s[1] * r11,
+        s[1] * r21,
+        0.0,
+        s[2] * r02,
+        s[2] * r12,
+        s[2] * r22,
+        0.0,
+        t[0],
+        t[1],
+        t[2],
+        1.0,
     ]
 }
 
@@ -176,12 +195,12 @@ unsafe fn compose_trs_sse2(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32; 16] {
         let b1_c0 = _mm_setr_ps(qz_s(q), qz_s(q), qy_s(q), 0.0);
         let term0_c0 = _mm_mul_ps(a0_c0, b0_c0);
         let term1_c0 = _mm_mul_ps(a1_c0, b1_c0);
-        let sign_c0  = _mm_setr_ps(1.0, 1.0, -1.0, 0.0);
-        let sum_c0   = _mm_add_ps(term0_c0, _mm_mul_ps(term1_c0, sign_c0));
+        let sign_c0 = _mm_setr_ps(1.0, 1.0, -1.0, 0.0);
+        let sum_c0 = _mm_add_ps(term0_c0, _mm_mul_ps(term1_c0, sign_c0));
         // Sum is (yy+zz, xy+wz, xz-wy, 0). Now: col0 = (1 - 2*yy_zz, 2*xy_wz, 2*xz_wy, 0).
         // Shape it: diagonal entry takes the (1 - 2*x) form, the rest take (2*x).
-        let twos_c0  = _mm_mul_ps(sum_c0, two);
-        let diag_c0  = _mm_sub_ps(one, twos_c0);
+        let twos_c0 = _mm_mul_ps(sum_c0, two);
+        let diag_c0 = _mm_sub_ps(one, twos_c0);
         // diag_c0[0] = 1 - 2*(yy+zz) ← the col0.x we want.
         // twos_c0[1] = 2*(xy+wz)     ← col0.y.
         // twos_c0[2] = 2*(xz-wy)     ← col0.z.
@@ -206,11 +225,11 @@ unsafe fn compose_trs_sse2(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32; 16] {
         let b1_c1 = _mm_setr_ps(qz_s(q), qz_s(q), qx_s(q), 0.0);
         let term0_c1 = _mm_mul_ps(a0_c1, b0_c1);
         let term1_c1 = _mm_mul_ps(a1_c1, b1_c1);
-        let sign_c1  = _mm_setr_ps(-1.0, 1.0, 1.0, 0.0); // sub for col1.x
-        let sum_c1   = _mm_add_ps(term0_c1, _mm_mul_ps(term1_c1, sign_c1));
+        let sign_c1 = _mm_setr_ps(-1.0, 1.0, 1.0, 0.0); // sub for col1.x
+        let sum_c1 = _mm_add_ps(term0_c1, _mm_mul_ps(term1_c1, sign_c1));
         // sum_c1 = (xy-wz, xx+zz, yz+wx, 0)
-        let twos_c1  = _mm_mul_ps(sum_c1, two);
-        let diag_c1  = _mm_sub_ps(one, twos_c1);
+        let twos_c1 = _mm_mul_ps(sum_c1, two);
+        let diag_c1 = _mm_sub_ps(one, twos_c1);
         _mm_storeu_ps(tmp.as_mut_ptr(), twos_c1);
         let c1_x = tmp[0];
         _mm_storeu_ps(tmp.as_mut_ptr(), diag_c1);
@@ -226,11 +245,11 @@ unsafe fn compose_trs_sse2(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32; 16] {
         let b1_c2 = _mm_setr_ps(qy_s(q), qx_s(q), qy_s(q), 0.0);
         let term0_c2 = _mm_mul_ps(a0_c2, b0_c2);
         let term1_c2 = _mm_mul_ps(a1_c2, b1_c2);
-        let sign_c2  = _mm_setr_ps(1.0, -1.0, 1.0, 0.0);
-        let sum_c2   = _mm_add_ps(term0_c2, _mm_mul_ps(term1_c2, sign_c2));
+        let sign_c2 = _mm_setr_ps(1.0, -1.0, 1.0, 0.0);
+        let sum_c2 = _mm_add_ps(term0_c2, _mm_mul_ps(term1_c2, sign_c2));
         // sum_c2 = (xz+wy, yz-wx, xx+yy, 0)
-        let twos_c2  = _mm_mul_ps(sum_c2, two);
-        let diag_c2  = _mm_sub_ps(one, twos_c2);
+        let twos_c2 = _mm_mul_ps(sum_c2, two);
+        let diag_c2 = _mm_sub_ps(one, twos_c2);
         _mm_storeu_ps(tmp.as_mut_ptr(), twos_c2);
         let c2_x = tmp[0];
         let c2_y = tmp[1];
@@ -247,9 +266,9 @@ unsafe fn compose_trs_sse2(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32; 16] {
         let _ = (qx, qy, qz, qw);
 
         let mut out = [0f32; 16];
-        _mm_storeu_ps(out.as_mut_ptr().add(0),  col0);
-        _mm_storeu_ps(out.as_mut_ptr().add(4),  col1);
-        _mm_storeu_ps(out.as_mut_ptr().add(8),  col2);
+        _mm_storeu_ps(out.as_mut_ptr().add(0), col0);
+        _mm_storeu_ps(out.as_mut_ptr().add(4), col1);
+        _mm_storeu_ps(out.as_mut_ptr().add(8), col2);
         _mm_storeu_ps(out.as_mut_ptr().add(12), col3);
         out
     }
@@ -295,9 +314,15 @@ unsafe fn compose_trs_neon(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32; 16] {
         let qw = vgetq_lane_f32(q, 3);
         // Same math as scalar — relying on autovectorisation of the FMA
         // chain plus four explicit vst1q_f32 stores for the column writes.
-        let xx = qx * qx; let yy = qy * qy; let zz = qz * qz;
-        let xy = qx * qy; let xz = qx * qz; let yz = qy * qz;
-        let wx = qw * qx; let wy = qw * qy; let wz = qw * qz;
+        let xx = qx * qx;
+        let yy = qy * qy;
+        let zz = qz * qz;
+        let xy = qx * qy;
+        let xz = qx * qz;
+        let yz = qy * qz;
+        let wx = qw * qx;
+        let wy = qw * qy;
+        let wz = qw * qz;
 
         let r00 = 1.0 - 2.0 * (yy + zz);
         let r01 = 2.0 * (xy - wz);
@@ -313,10 +338,10 @@ unsafe fn compose_trs_neon(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32; 16] {
         let c0: float32x4_t = [s[0] * r00, s[0] * r10, s[0] * r20, 0.0].into();
         let c1: float32x4_t = [s[1] * r01, s[1] * r11, s[1] * r21, 0.0].into();
         let c2: float32x4_t = [s[2] * r02, s[2] * r12, s[2] * r22, 0.0].into();
-        let c3: float32x4_t = [t[0],       t[1],       t[2],       1.0].into();
-        vst1q_f32(out.as_mut_ptr().add(0),  c0);
-        vst1q_f32(out.as_mut_ptr().add(4),  c1);
-        vst1q_f32(out.as_mut_ptr().add(8),  c2);
+        let c3: float32x4_t = [t[0], t[1], t[2], 1.0].into();
+        vst1q_f32(out.as_mut_ptr().add(0), c0);
+        vst1q_f32(out.as_mut_ptr().add(4), c1);
+        vst1q_f32(out.as_mut_ptr().add(8), c2);
         vst1q_f32(out.as_mut_ptr().add(12), c3);
         out
     }
@@ -328,15 +353,19 @@ unsafe fn compose_trs_neon(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f32; 16] {
 /// SSE2-vectorised on x86_64, NEON-vectorised on aarch64. Each output
 /// column = a_col[0] * b[c][0] + a_col[1] * b[c][1] + a_col[2] * b[c][2]
 /// + a_col[3] * b[c][3]. The four `a` columns are loaded once and reused
-/// for every output column. AVX2 FMA path picked up automatically by the
-/// compiler when the target supports it (`mul_ps` + `add_ps` fuses to
-/// `fmadd_ps` under `-C target-cpu=native`).
+///   for every output column. AVX2 FMA path picked up automatically by the
+///   compiler when the target supports it (`mul_ps` + `add_ps` fuses to
+///   `fmadd_ps` under `-C target-cpu=native`).
 #[inline]
 pub fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     #[cfg(target_arch = "x86_64")]
-    unsafe { return mat4_mul_sse2(a, b); }
+    unsafe {
+        return mat4_mul_sse2(a, b);
+    }
     #[cfg(target_arch = "aarch64")]
-    unsafe { return mat4_mul_neon(a, b); }
+    unsafe {
+        return mat4_mul_neon(a, b);
+    }
     #[allow(unreachable_code)]
     mat4_mul_scalar(a, b)
 }
@@ -386,9 +415,9 @@ unsafe fn mat4_mul_sse2(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
         let c2 = col_mul!(2);
         let c3 = col_mul!(3);
         let mut out = [0f32; 16];
-        _mm_storeu_ps(out.as_mut_ptr().add(0),  c0);
-        _mm_storeu_ps(out.as_mut_ptr().add(4),  c1);
-        _mm_storeu_ps(out.as_mut_ptr().add(8),  c2);
+        _mm_storeu_ps(out.as_mut_ptr().add(0), c0);
+        _mm_storeu_ps(out.as_mut_ptr().add(4), c1);
+        _mm_storeu_ps(out.as_mut_ptr().add(8), c2);
         _mm_storeu_ps(out.as_mut_ptr().add(12), c3);
         out
     }
@@ -427,10 +456,7 @@ unsafe fn mat4_mul_neon(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 /// vector of world matrices indexed by node index. Nodes not visited by the
 /// scene keep an identity entry — convenient for pipelines that index all
 /// nodes regardless of scene membership.
-pub fn compose_world_matrices(
-    scene_roots: &[NodeIndex],
-    nodes:       &[Node],
-) -> ThinVec<[f32; 16]> {
+pub fn compose_world_matrices(scene_roots: &[NodeIndex], nodes: &[Node]) -> ThinVec<[f32; 16]> {
     let locals: ThinVec<[f32; 16]> = nodes.iter().map(|n| n.local_matrix).collect();
     compose_world_matrices_from(scene_roots, nodes, &locals)
 }
@@ -440,8 +466,8 @@ pub fn compose_world_matrices(
 /// the world transform without mutating the node tree.
 pub fn compose_world_matrices_from(
     scene_roots: &[NodeIndex],
-    nodes:       &[Node],
-    locals:      &[[f32; 16]],
+    nodes: &[Node],
+    locals: &[[f32; 16]],
 ) -> ThinVec<[f32; 16]> {
     let mut out: ThinVec<[f32; 16]> = (0..nodes.len())
         .map(|_| crate::pipeline::IDENTITY_M4)
@@ -476,14 +502,26 @@ mod tests {
         let t = [1.0_f32, 2.0, -3.0];
         let s = [2.0_f32, 0.5, 1.5];
         // Unit quaternion for 45° around Y: (0, sin(22.5°), 0, cos(22.5°)).
-        let r = [0.0_f32, (22.5_f32.to_radians()).sin(), 0.0, (22.5_f32.to_radians()).cos()];
+        let r = [
+            0.0_f32,
+            (22.5_f32.to_radians()).sin(),
+            0.0,
+            (22.5_f32.to_radians()).cos(),
+        ];
 
         let simd = compose_trs(t, r, s);
         let scalar = compose_trs_scalar(t, r, s);
 
         for i in 0..16 {
             let d = (simd[i] - scalar[i]).abs();
-            assert!(d < 1e-5, "row {} differs by {}: simd={} scalar={}", i, d, simd[i], scalar[i]);
+            assert!(
+                d < 1e-5,
+                "row {} differs by {}: simd={} scalar={}",
+                i,
+                d,
+                simd[i],
+                scalar[i]
+            );
         }
     }
 }

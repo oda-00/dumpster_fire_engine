@@ -1,14 +1,14 @@
+pub mod object_loader;
+pub mod play;
 pub mod scene;
 pub mod script;
 pub mod script_abi;
-pub mod script_ipc;
 pub mod script_client;
-pub mod play;
-pub mod object_loader;
+pub mod script_ipc;
 
+pub use play::*;
 pub use scene::*;
 pub use script::*;
-pub use play::*;
 
 use thin_vec::ThinVec;
 
@@ -26,11 +26,33 @@ pub struct EffectArena {
 }
 
 impl EffectArena {
-    pub fn with_capacity(cap: usize) -> Self { Self { buf: ThinVec::with_capacity(cap) } }
-    #[inline] pub fn push(&mut self, e: Effect)                          { self.buf.push(e); }
-    #[inline] pub fn drain(&mut self) -> thin_vec::Drain<'_, Effect>     { self.buf.drain(..) }
-    #[inline] pub fn clear(&mut self)                                    { self.buf.clear(); }
-    #[inline] pub fn as_thin_vec_mut(&mut self) -> &mut ThinVec<Effect>  { &mut self.buf }
-    #[inline] pub fn len(&self) -> usize                                 { self.buf.len() }
-    #[inline] pub fn is_empty(&self) -> bool                             { self.buf.is_empty() }
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: ThinVec::with_capacity(cap),
+        }
+    }
+    #[inline]
+    pub fn push(&mut self, e: Effect) {
+        self.buf.push(e);
+    }
+    #[inline]
+    pub fn drain(&mut self) -> thin_vec::Drain<'_, Effect> {
+        self.buf.drain(..)
+    }
+    #[inline]
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+    #[inline]
+    pub fn as_thin_vec_mut(&mut self) -> &mut ThinVec<Effect> {
+        &mut self.buf
+    }
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
 }

@@ -14,18 +14,20 @@
 
 use std::sync::Arc;
 
-use divan::{black_box, Bencher};
-use langc::{codegen, OptimizationLevel};
+use divan::{Bencher, black_box};
 use lang_frontend::{hir::HirScript, lexer::Lexer, parser::Parser, sema};
+use langc::{OptimizationLevel, codegen};
 
 use dumpster_fire_engine::resource_manager::event_manager::script::{
     ActiveScript, ScriptEntryPoints, ScriptManager, tick_batch,
 };
 use dumpster_fire_engine::resource_manager::event_manager::script_abi::{
-    EffectSink, EngineAPI, engine_api_for_sink, effect_kind,
+    EffectSink, EngineAPI, effect_kind, engine_api_for_sink,
 };
 
-fn main() { divan::main(); }
+fn main() {
+    divan::main();
+}
 
 const SRC: &str = r#"
 script "bench_runtime" {
@@ -50,18 +52,18 @@ fn compile_to_o(src: &str) -> Arc<str> {
     std::fs::create_dir_all(&dir).unwrap();
     let obj = dir.join("rt.o");
     let toks = Lexer::new(src).tokenise().unwrap();
-    let ast  = Parser::new(toks).parse_script().unwrap();
+    let ast = Parser::new(toks).parse_script().unwrap();
     let hir: HirScript = sema::lower(ast).unwrap();
     codegen::compile_to_object(&hir, OptimizationLevel::Aggressive, &obj).unwrap();
     Arc::<str>::from(obj.to_string_lossy().as_ref())
 }
 
 struct Fixture {
-    _mgr:    ScriptManager,
-    script:  ActiveScript,
-    entry:   *const dumpster_fire_engine::resource_manager::event_manager::script::ScriptEntryPoints,
-    _sink:   Box<EffectSink>,
-    api:     EngineAPI,
+    _mgr: ScriptManager,
+    script: ActiveScript,
+    entry: *const dumpster_fire_engine::resource_manager::event_manager::script::ScriptEntryPoints,
+    _sink: Box<EffectSink>,
+    api: EngineAPI,
 }
 
 unsafe impl Send for Fixture {}
@@ -78,7 +80,13 @@ fn build_fixture() -> Fixture {
     let script = ActiveScript::from_entry(id, entry_ref);
     let mut sink = Box::new(EffectSink::new());
     let api = engine_api_for_sink(&mut sink);
-    Fixture { _mgr: mgr, script, entry: entry_ptr, _sink: sink, api }
+    Fixture {
+        _mgr: mgr,
+        script,
+        entry: entry_ptr,
+        _sink: sink,
+        api,
+    }
 }
 
 // ── Benches ───────────────────────────────────────────────────────────────────
@@ -122,7 +130,9 @@ fn on_enter(bencher: Bencher) {
 fn init_state(bencher: Bencher) {
     bencher.with_inputs(build_fixture).bench_local_refs(|fx| {
         let entry = unsafe { &*fx.entry };
-        unsafe { (entry.init_state)(fx.script.state_buffer.as_mut_ptr()); }
+        unsafe {
+            (entry.init_state)(fx.script.state_buffer.as_mut_ptr());
+        }
     });
 }
 
@@ -134,28 +144,44 @@ fn init_state(bencher: Bencher) {
 fn native_bt_tick(actor_count: u32, sink: &mut EffectSink) {
     let enemy_in_range = actor_count > 0; // matches IntrinsicPredicate::EnemyInRange stub
     if enemy_in_range {
-        sink.entries.push(dumpster_fire_engine::resource_manager::event_manager::script_abi::EffectAbi {
-            kind: effect_kind::ATTACK, _pad: [0;7], arg0: 0, arg1: 0,
-        });
+        sink.entries.push(
+            dumpster_fire_engine::resource_manager::event_manager::script_abi::EffectAbi {
+                kind: effect_kind::ATTACK,
+                _pad: [0; 7],
+                arg0: 0,
+                arg1: 0,
+            },
+        );
     } else {
-        sink.entries.push(dumpster_fire_engine::resource_manager::event_manager::script_abi::EffectAbi {
-            kind: effect_kind::PATROL_PATH, _pad: [0;7], arg0: 0, arg1: 0,
-        });
+        sink.entries.push(
+            dumpster_fire_engine::resource_manager::event_manager::script_abi::EffectAbi {
+                kind: effect_kind::PATROL_PATH,
+                _pad: [0; 7],
+                arg0: 0,
+                arg1: 0,
+            },
+        );
     }
 }
 
 #[divan::bench]
 fn native_tick_single(bencher: Bencher) {
-    bencher.with_inputs(|| EffectSink::new()).bench_local_refs(|sink| {
-        native_bt_tick(black_box(0), sink);
-    });
+    bencher
+        .with_inputs(EffectSink::new)
+        .bench_local_refs(|sink| {
+            native_bt_tick(black_box(0), sink);
+        });
 }
 
 #[divan::bench]
 fn native_tick_1k(bencher: Bencher) {
-    bencher.with_inputs(|| EffectSink::new()).bench_local_refs(|sink| {
-        for _ in 0..1000 { native_bt_tick(0, sink); }
-    });
+    bencher
+        .with_inputs(EffectSink::new)
+        .bench_local_refs(|sink| {
+            for _ in 0..1000 {
+                native_bt_tick(0, sink);
+            }
+        });
 }
 
 // ── Batch ticks: 4-way unrolled sequential vs rayon-parallel ─────────────────
@@ -164,16 +190,18 @@ fn native_tick_1k(bencher: Bencher) {
 // is independent, so we group them.  The 16- and 32-script benches exercise
 // the sequential 4-way unrolled path; 128 and 1024 exercise the rayon path.
 
+#[allow(clippy::vec_box)]
 struct BatchFixture {
-    _mgr:    ScriptManager,
+    _mgr: ScriptManager,
     scripts: Vec<ActiveScript>,
-    apis:    Vec<EngineAPI>,
+    apis: Vec<EngineAPI>,
     /// Pre-materialised entry slice; same `&ScriptEntryPoints` repeated N
     /// times (all scripts share the same compiled object).  Held in the
     /// fixture so the per-iter `run_batch` only measures `tick_batch`
     /// itself — not a Vec allocation that would dominate the parallel path.
     entries: Vec<&'static ScriptEntryPoints>,
-    _sinks:  Vec<Box<EffectSink>>,
+    /// Boxed to guarantee stable addresses — `apis` holds raw pointers into these.
+    _sinks: Vec<Box<EffectSink>>,
 }
 
 unsafe impl Send for BatchFixture {}
@@ -201,7 +229,13 @@ fn build_batch(n: usize) -> BatchFixture {
         apis.push(api);
     }
     let entries: Vec<&'static ScriptEntryPoints> = (0..n).map(|_| entry_static).collect();
-    BatchFixture { _mgr: mgr, scripts, apis, entries, _sinks: sinks }
+    BatchFixture {
+        _mgr: mgr,
+        scripts,
+        apis,
+        entries,
+        _sinks: sinks,
+    }
 }
 
 fn run_batch(fx: &mut BatchFixture) {
@@ -210,30 +244,35 @@ fn run_batch(fx: &mut BatchFixture) {
 
 #[divan::bench]
 fn tick_batch_16(bencher: Bencher) {
-    bencher.with_inputs(|| build_batch(16))
-        .bench_local_refs(|fx| run_batch(fx));
+    bencher
+        .with_inputs(|| build_batch(16))
+        .bench_local_refs(run_batch);
 }
 
 #[divan::bench]
 fn tick_batch_32(bencher: Bencher) {
-    bencher.with_inputs(|| build_batch(32))
-        .bench_local_refs(|fx| run_batch(fx));
+    bencher
+        .with_inputs(|| build_batch(32))
+        .bench_local_refs(run_batch);
 }
 
 #[divan::bench]
 fn tick_batch_128(bencher: Bencher) {
-    bencher.with_inputs(|| build_batch(128))
-        .bench_local_refs(|fx| run_batch(fx));
+    bencher
+        .with_inputs(|| build_batch(128))
+        .bench_local_refs(run_batch);
 }
 
 #[divan::bench]
 fn tick_batch_1024(bencher: Bencher) {
-    bencher.with_inputs(|| build_batch(1024))
-        .bench_local_refs(|fx| run_batch(fx));
+    bencher
+        .with_inputs(|| build_batch(1024))
+        .bench_local_refs(run_batch);
 }
 
 #[divan::bench]
 fn tick_batch_4096(bencher: Bencher) {
-    bencher.with_inputs(|| build_batch(4096))
-        .bench_local_refs(|fx| run_batch(fx));
+    bencher
+        .with_inputs(|| build_batch(4096))
+        .bench_local_refs(run_batch);
 }

@@ -21,8 +21,10 @@ fn load_triangle_has_one_mesh_one_primitive() {
 #[test]
 fn load_quad_with_explicit_indices() {
     let pos = vec![
-        [-1.0_f32, -1.0, 0.0], [1.0, -1.0, 0.0],
-        [1.0, 1.0, 0.0],       [-1.0, 1.0, 0.0],
+        [-1.0_f32, -1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0],
     ];
     let glb = build_test_glb(&pos, None, None, Some(&[0, 1, 2, 2, 3, 0]));
     let asset = GltfAsset::load_slice(&glb).unwrap();
@@ -50,8 +52,10 @@ fn aabb_from_positions_matches_bounds() {
 #[test]
 fn all_pipeline_adapters_produce_consistent_sizes() {
     let pos = vec![
-        [-1.0_f32, -1.0, 0.0], [1.0, -1.0, 0.0],
-        [1.0, 1.0, 0.0],       [-1.0, 1.0, 0.0],
+        [-1.0_f32, -1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0],
     ];
     let glb = build_test_glb(&pos, None, None, Some(&[0, 1, 2, 2, 3, 0]));
     let asset = GltfAsset::load_slice(&glb).unwrap();
@@ -114,10 +118,16 @@ fn pipeline_kind_build_dispatches_correctly() {
         GltfPipelineKind::AmbientOcclusion,
         GltfPipelineKind::VisibilityPass,
     ] {
-        let up = kind.build(&asset, params).expect("compute pipelines return Some");
+        let up = kind
+            .build(&asset, params)
+            .expect("compute pipelines return Some");
         assert_eq!(up.kind, kind);
     }
-    assert!(GltfPipelineKind::Graphics(GltfGraphicsKind::ForwardLit).build(&asset, params).is_none());
+    assert!(
+        GltfPipelineKind::Graphics(GltfGraphicsKind::ForwardLit)
+            .build(&asset, params)
+            .is_none()
+    );
 }
 
 #[test]

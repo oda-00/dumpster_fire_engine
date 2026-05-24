@@ -1,0 +1,907 @@
+
+running 38 tests
+test render::render_world::lights_ubo_tests::pack_ambient_writes_only_color ... ignored
+test render::render_world::lights_ubo_tests::pack_analytic_sky_sets_sky_present ... ignored
+test render::render_world::lights_ubo_tests::pack_directional_unbounded_range_encoded_zero ... ignored
+test render::render_world::lights_ubo_tests::pack_environment_header_shortcut ... ignored
+test render::render_world::lights_ubo_tests::pack_ies_passes_handle_through ... ignored
+test render::render_world::lights_ubo_tests::pack_point_basic ... ignored
+test render::render_world::lights_ubo_tests::pack_spot_cosines ... ignored
+test render::render_world::lights_ubo_tests::pack_truncates_above_max_lights ... ignored
+test render::render_world::lights_ubo_tests::pack_two_sided_flag ... ignored
+test render::sky_hw::tests::hosek_wilkie_horizon_nonnegative ... ignored
+test render::sky_hw::tests::preetham_nonnegative ... ignored
+test render::sky_hw::tests::sh9_basis_orthonormality_l0_l1 ... ignored
+test render::sky_hw::tests::sh9_project_consistent ... ignored
+test resource_manager::asset_manager::env_loader::tests::invalid_header_rejected ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::all_meshes_from_slice_returns_empty_for_no_meshes ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::compute_asset_aabb_simd_matches_scalar ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::compute_ores_produced_for_every_kind ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::empty_document_returns_no_primitives_error ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::explicit_indices_preserved ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::explicit_normals_preserved ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::explicit_uvs_preserved ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::load_asset_exposes_full_document ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::missing_normals_compute_spec_flat_normal ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::missing_uvs_default_to_zero ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::no_index_accessor_generates_sequential_indices ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::pack_skin_attrs_simd_matches_scalar ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::positions_loaded_correctly ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::quad_vertex_and_index_counts ... ignored
+test resource_manager::asset_manager::gltf_loader::tests::texture_ores_decode_from_asset ... ignored
+test resource_manager::asset_manager::ies_loader::tests::parses_minimal_ies ... ignored
+test resource_manager::asset_manager::ies_loader::tests::rejects_tilt_include ... ignored
+test resource_manager::asset_manager::tests::fetch_and_evict_keep_type_cache_consistent ... ignored
+test resource_manager::asset_manager::tests::queue_entries_resolve_against_their_declared_source ... ignored
+test resource_manager::asset_manager::tests::replace_kind_moves_handle_between_type_buckets ... ignored
+test resource_manager::asset_manager::tests::stale_handles_do_not_resolve_after_evict ... ignored
+test resource_manager::event_manager::script::active_script_tests::from_entry_runs_init_state ... ignored
+test resource_manager::event_manager::script::active_script_tests::migrate_into_is_noop_when_layout_matches ... ignored
+test resource_manager::event_manager::script::active_script_tests::migrate_into_runs_migrate_state_when_layout_changes ... ignored
+
+test result: ok. 0 passed; 0 failed; 38 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+arena_micro                  fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ get_hit                   8.174 µs      │ 24 µs         │ 8.255 µs      │ 8.431 µs      │ 100     │ 100
+├─ get_miss                  6.211 µs      │ 19.5 µs       │ 6.251 µs      │ 6.395 µs      │ 100     │ 100
+├─ insert_freelist           9.015 µs      │ 49.62 µs      │ 9.257 µs      │ 9.669 µs      │ 100     │ 100
+├─ insert_fresh              12.52 µs      │ 28.44 µs      │ 12.58 µs      │ 12.74 µs      │ 100     │ 100
+├─ remove_live               55.31 µs      │ 79.07 µs      │ 60.96 µs      │ 61.7 µs       │ 100     │ 100
+├─ remove_stale              26.91 µs      │ 65.68 µs      │ 26.98 µs      │ 28.57 µs      │ 100     │ 100
+├─ values_iter_full          6.19 µs       │ 7.744 µs      │ 6.201 µs      │ 6.218 µs      │ 100     │ 100
+╰─ values_iter_sparse_50pct  5.089 µs      │ 26.13 µs      │ 5.249 µs      │ 5.498 µs      │ 100     │ 100
+
+asset_fetch/64          time:   [3.6006 µs 3.6027 µs 3.6052 µs]
+                        thrpt:  [17.752 Melem/s 17.764 Melem/s 17.775 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+asset_fetch/1024        time:   [66.468 µs 66.515 µs 66.571 µs]
+                        thrpt:  [15.382 Melem/s 15.395 Melem/s 15.406 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+asset_fetch/10000       time:   [850.27 µs 851.61 µs 853.23 µs]
+                        thrpt:  [11.720 Melem/s 11.742 Melem/s 11.761 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+
+asset_evict/mid_list_1024
+                        time:   [78.839 µs 78.928 µs 79.044 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+asset_evict/tail_1024   time:   [80.669 µs 80.822 µs 81.042 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+
+asset_of_type/64        time:   [879.03 ps 880.03 ps 881.23 ps]
+                        thrpt:  [14.752 Gelem/s 14.772 Gelem/s 14.789 Gelem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  6 (6.00%) high severe
+asset_of_type/1024      time:   [878.07 ps 878.53 ps 879.36 ps]
+                        thrpt:  [233.12 Gelem/s 233.34 Gelem/s 233.47 Gelem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  1 (1.00%) low severe
+  3 (3.00%) low mild
+  7 (7.00%) high mild
+  1 (1.00%) high severe
+asset_of_type/10000     time:   [878.43 ps 883.22 ps 891.13 ps]
+                        thrpt:  [2245.5 Gelem/s 2265.6 Gelem/s 2277.9 Gelem/s]
+Found 15 outliers among 100 measurements (15.00%)
+  5 (5.00%) high mild
+  10 (10.00%) high severe
+
+pipeline_queue/priority_order_correctness
+                        time:   [151.07 ns 151.38 ns 151.75 ns]
+Found 11 outliers among 100 measurements (11.00%)
+  4 (4.00%) high mild
+  7 (7.00%) high severe
+pipeline_queue/push_n_pop_all/16
+                        time:   [272.44 ns 272.84 ns 273.32 ns]
+                        thrpt:  [58.540 Melem/s 58.643 Melem/s 58.729 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+pipeline_queue/push_n_pop_all/256
+                        time:   [6.3468 µs 6.3839 µs 6.4194 µs]
+                        thrpt:  [39.879 Melem/s 40.101 Melem/s 40.336 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) low severe
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+pipeline_queue/push_n_pop_all/4096
+                        time:   [191.65 µs 192.13 µs 192.65 µs]
+                        thrpt:  [21.261 Melem/s 21.319 Melem/s 21.372 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+control_sorted_vec_vs_heap/binary_heap/256
+                        time:   [4.8413 µs 4.8504 µs 4.8579 µs]
+                        thrpt:  [52.698 Melem/s 52.779 Melem/s 52.878 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) low severe
+  5 (5.00%) low mild
+control_sorted_vec_vs_heap/min_heap_via_reverse/256
+                        time:   [4.7824 µs 4.7931 µs 4.8041 µs]
+                        thrpt:  [53.288 Melem/s 53.410 Melem/s 53.530 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low severe
+  4 (4.00%) low mild
+  3 (3.00%) high severe
+control_sorted_vec_vs_heap/sorted_thin_vec_drain/256
+                        time:   [1.9268 µs 1.9312 µs 1.9368 µs]
+                        thrpt:  [132.18 Melem/s 132.56 Melem/s 132.86 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+control_sorted_vec_vs_heap/binary_heap/4096
+                        time:   [124.67 µs 125.01 µs 125.48 µs]
+                        thrpt:  [32.642 Melem/s 32.766 Melem/s 32.854 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) low severe
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+control_sorted_vec_vs_heap/min_heap_via_reverse/4096
+                        time:   [122.52 µs 123.00 µs 123.43 µs]
+                        thrpt:  [33.186 Melem/s 33.302 Melem/s 33.430 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) low severe
+  3 (3.00%) low mild
+control_sorted_vec_vs_heap/sorted_thin_vec_drain/4096
+                        time:   [42.595 µs 42.612 µs 42.639 µs]
+                        thrpt:  [96.063 Melem/s 96.124 Melem/s 96.162 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+
+bt_nodes                      fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ decorator_cooldown_active  7.592 ns      │ 7.908 ns      │ 7.635 ns      │ 7.648 ns      │ 100     │ 25600
+├─ decorator_cooldown_ready   19.56 ns      │ 20.43 ns      │ 19.72 ns      │ 19.78 ns      │ 100     │ 12800
+├─ decorator_guard_fail       9.158 ns      │ 64.85 ns      │ 9.24 ns       │ 10.14 ns      │ 100     │ 25600
+├─ decorator_guard_pass       18.39 ns      │ 19.17 ns      │ 18.63 ns      │ 18.67 ns      │ 100     │ 12800
+├─ decorator_inverter         11.93 ns      │ 12.36 ns      │ 12.09 ns      │ 12.09 ns      │ 100     │ 25600
+├─ decorator_until_success    12.09 ns      │ 12.4 ns       │ 12.17 ns      │ 12.16 ns      │ 100     │ 25600
+├─ leaf_fail                  9.041 ns      │ 9.397 ns      │ 9.119 ns      │ 9.125 ns      │ 100     │ 25600
+├─ leaf_once_fired_skip       7.066 ns      │ 30.21 ns      │ 7.272 ns      │ 7.465 ns      │ 100     │ 51200
+├─ leaf_pass                  15.11 ns      │ 15.54 ns      │ 15.22 ns      │ 15.27 ns      │ 100     │ 25600
+├─ parallel_all_complete      79.81 ns      │ 565.1 ns      │ 80.15 ns      │ 90.09 ns      │ 100     │ 3200
+├─ parallel_all_succeed       79.81 ns      │ 164 ns        │ 80.15 ns      │ 81 ns         │ 100     │ 3200
+├─ parallel_any_succeed       79.81 ns      │ 82.03 ns      │ 80.15 ns      │ 80.11 ns      │ 100     │ 3200
+├─ repeat_finite              18.86 ns      │ 118.6 ns      │ 18.98 ns      │ 20.05 ns      │ 100     │ 12800
+├─ repeat_unbounded           18.78 ns      │ 19.49 ns      │ 18.86 ns      │ 18.89 ns      │ 100     │ 12800
+├─ reset_full_tree            31.61 ns      │ 31.78 ns      │ 31.76 ns      │ 31.7 ns       │ 100     │ 6400
+├─ selector_all_fail                        │               │               │               │         │
+│  ├─ 1                       13.3 ns       │ 53.19 ns      │ 13.34 ns      │ 13.75 ns      │ 100     │ 25600
+│  ├─ 4                       13.3 ns       │ 13.58 ns      │ 13.35 ns      │ 13.35 ns      │ 100     │ 25600
+│  ├─ 16                      13.3 ns       │ 57.33 ns      │ 13.34 ns      │ 13.82 ns      │ 100     │ 25600
+│  ╰─ 64                      13.3 ns       │ 13.58 ns      │ 13.34 ns      │ 13.35 ns      │ 100     │ 25600
+├─ selector_first_succeeds                  │               │               │               │         │
+│  ├─ 1                       18.86 ns      │ 19.57 ns      │ 19.02 ns      │ 19.06 ns      │ 100     │ 12800
+│  ├─ 4                       18.63 ns      │ 94.71 ns      │ 18.86 ns      │ 19.68 ns      │ 100     │ 12800
+│  ├─ 16                      19.72 ns      │ 20.58 ns      │ 19.96 ns      │ 19.98 ns      │ 100     │ 12800
+│  ╰─ 64                      18.7 ns       │ 19.33 ns      │ 18.86 ns      │ 18.84 ns      │ 100     │ 12800
+╰─ sequence_n_success                       │               │               │               │         │
+   ├─ 1                       18.7 ns       │ 111.6 ns      │ 18.79 ns      │ 19.76 ns      │ 100     │ 12800
+   ├─ 4                       52.9 ns       │ 54.33 ns      │ 53.22 ns      │ 53.26 ns      │ 100     │ 6400
+   ├─ 16                      191.9 ns      │ 196.9 ns      │ 192.5 ns      │ 192.9 ns      │ 100     │ 1600
+   ╰─ 64                      776.1 ns      │ 5.206 µs      │ 793.6 ns      │ 838 ns        │ 100     │ 400
+
+cache_ops                                 fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ level_despawn_actor_with_cache                       │               │               │               │         │
+│  ├─ 64                                  48.48 µs      │ 64.76 µs      │ 49.74 µs      │ 50.41 µs      │ 100     │ 100
+│  ├─ 1024                                765.6 µs      │ 787.1 µs      │ 777.3 µs      │ 775.7 µs      │ 100     │ 100
+│  ╰─ 10000                               9.543 ms      │ 10.5 ms       │ 9.749 ms      │ 9.821 ms      │ 100     │ 100
+├─ stage_add_component_first_time         6.27 µs       │ 16.13 µs      │ 6.391 µs      │ 6.604 µs      │ 100     │ 100
+├─ stage_add_component_idempotent         4.057 µs      │ 5.379 µs      │ 4.147 µs      │ 4.17 µs       │ 100     │ 100
+├─ stage_cache_scan                                     │               │               │               │         │
+│  ├─ 64                                  11.74 ns      │ 12.79 ns      │ 12.48 ns      │ 12.24 ns      │ 100     │ 25600
+│  ├─ 1024                                166.2 ns      │ 171.8 ns      │ 166.8 ns      │ 167.1 ns      │ 100     │ 1600
+│  ╰─ 10000                               1.572 µs      │ 2.384 µs      │ 1.582 µs      │ 1.594 µs      │ 100     │ 100
+├─ stage_despawn_subentity_partial_evict  320.3 ns      │ 520.6 ns      │ 334 ns        │ 338.2 ns      │ 100     │ 800
+├─ subentity_component_lookup_hit         6.471 µs      │ 20.99 µs      │ 6.707 µs      │ 6.873 µs      │ 100     │ 100
+├─ subentity_component_lookup_miss        6.842 µs      │ 20.63 µs      │ 7.023 µs      │ 7.892 µs      │ 100     │ 100
+╰─ subentity_has_component                6.732 µs      │ 18.18 µs      │ 6.952 µs      │ 7.415 µs      │ 100     │ 100
+
+lookup_single_entity/hashmap/get
+                        time:   [14.973 ns 15.134 ns 15.340 ns]
+Found 14 outliers among 100 measurements (14.00%)
+  14 (14.00%) high severe
+lookup_single_entity/array/get
+                        time:   [1.4490 ns 1.4532 ns 1.4589 ns]
+Found 24 outliers among 100 measurements (24.00%)
+  6 (6.00%) low severe
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  13 (13.00%) high severe
+lookup_single_entity/hashmap/has
+                        time:   [14.295 ns 14.303 ns 14.312 ns]
+Found 12 outliers among 100 measurements (12.00%)
+  2 (2.00%) low severe
+  6 (6.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+lookup_single_entity/array/has
+                        time:   [1.4608 ns 1.4825 ns 1.5072 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+
+scan_10k_for_physics/hashmap
+                        time:   [147.13 µs 147.40 µs 147.70 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+scan_10k_for_physics/array
+                        time:   [8.9561 µs 8.9665 µs 8.9777 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+
+condition_eval               fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ actor_has_component_hit   12.72 ns      │ 13.07 ns      │ 12.8 ns       │ 12.8 ns       │ 100     │ 25600
+├─ actor_has_component_miss  13.54 ns      │ 67.47 ns      │ 13.66 ns      │ 14.19 ns      │ 100     │ 25600
+├─ actor_moved_this_tick     9.472 ns      │ 9.827 ns      │ 9.593 ns      │ 9.603 ns      │ 100     │ 25600
+├─ actor_near                24.57 ns      │ 121 ns        │ 24.58 ns      │ 25.59 ns      │ 100     │ 12800
+├─ after_seconds             5.403 ns      │ 5.581 ns      │ 5.442 ns      │ 5.442 ns      │ 100     │ 51200
+├─ all_n_full_walk                         │               │               │               │         │
+│  ├─ 2                      13.3 ns       │ 59.09 ns      │ 13.34 ns      │ 13.8 ns       │ 100     │ 25600
+│  ├─ 8                      37.4 ns       │ 38.36 ns      │ 37.58 ns      │ 37.6 ns       │ 100     │ 6400
+│  ╰─ 32                     135.5 ns      │ 138 ns        │ 135.5 ns      │ 135.8 ns      │ 100     │ 1600
+├─ all_n_short_circuit                     │               │               │               │         │
+│  ├─ 2                      8.378 ns      │ 11.46 ns      │ 8.378 ns      │ 8.433 ns      │ 100     │ 25600
+│  ├─ 8                      8.339 ns      │ 8.651 ns      │ 8.378 ns      │ 8.395 ns      │ 100     │ 25600
+│  ╰─ 32                     8.378 ns      │ 18.71 ns      │ 8.378 ns      │ 8.5 ns        │ 100     │ 25600
+├─ always                    5.052 ns      │ 28.96 ns      │ 5.071 ns      │ 5.328 ns      │ 100     │ 51200
+├─ any_n_full_walk                         │               │               │               │         │
+│  ├─ 2                      12.05 ns      │ 12.37 ns      │ 12.09 ns      │ 12.1 ns       │ 100     │ 25600
+│  ├─ 8                      34.44 ns      │ 35.06 ns      │ 34.44 ns      │ 34.5 ns       │ 100     │ 6400
+│  ╰─ 32                     124.5 ns      │ 476.2 ns      │ 124.9 ns      │ 128.3 ns      │ 100     │ 3200
+├─ custom_fnptr              5.874 ns      │ 5.991 ns      │ 5.894 ns      │ 5.896 ns      │ 100     │ 51200
+├─ event_fired_hit_at_end                  │               │               │               │         │
+│  ├─ 1                      5.618 ns      │ 27.08 ns      │ 5.659 ns      │ 5.886 ns      │ 100     │ 51200
+│  ├─ 16                     13.58 ns      │ 14.01 ns      │ 13.74 ns      │ 13.74 ns      │ 100     │ 25600
+│  ╰─ 256                    170 ns        │ 176.2 ns      │ 170.6 ns      │ 170.7 ns      │ 100     │ 1600
+├─ event_fired_miss                        │               │               │               │         │
+│  ├─ 1                      5.542 ns      │ 5.737 ns      │ 5.581 ns      │ 5.588 ns      │ 100     │ 51200
+│  ├─ 16                     14.32 ns      │ 14.64 ns      │ 14.4 ns       │ 14.41 ns      │ 100     │ 25600
+│  ╰─ 256                    168.7 ns      │ 997.8 ns      │ 169.3 ns      │ 177.6 ns      │ 100     │ 1600
+├─ never                     4.974 ns      │ 5.151 ns      │ 4.993 ns      │ 5 ns          │ 100     │ 51200
+├─ not_inv                   5.483 ns      │ 28.2 ns       │ 5.62 ns       │ 5.827 ns      │ 100     │ 51200
+├─ on_enter                  5.208 ns      │ 5.403 ns      │ 5.248 ns      │ 5.26 ns       │ 100     │ 51200
+├─ on_tick                   5.149 ns      │ 5.345 ns      │ 5.191 ns      │ 5.199 ns      │ 100     │ 51200
+├─ troupe_all                              │               │               │               │         │
+│  ├─ 8                      74.19 ns      │ 76.09 ns      │ 74.83 ns      │ 74.82 ns      │ 100     │ 3200
+│  ├─ 64                     1.692 µs      │ 2.213 µs      │ 1.702 µs      │ 1.716 µs      │ 100     │ 100
+│  ╰─ 256                    18.94 µs      │ 34.98 µs      │ 19.02 µs      │ 20.89 µs      │ 100     │ 100
+╰─ troupe_any                              │               │               │               │         │
+   ├─ 8                      12.44 ns      │ 12.8 ns       │ 12.52 ns      │ 12.54 ns      │ 100     │ 25600
+   ├─ 64                     12.4 ns       │ 52.52 ns      │ 12.52 ns      │ 12.97 ns      │ 100     │ 25600
+   ╰─ 256                    12.48 ns      │ 12.8 ns       │ 12.56 ns      │ 12.56 ns      │ 100     │ 25600
+
+apply_effect/set_actor_local
+                        time:   [9.9309 ns 9.9438 ns 9.9642 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+apply_effect/set_sub_entity_local
+                        time:   [10.451 ns 10.469 ns 10.490 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+apply_effect/add_component_unique_owner
+                        time:   [63.542 ns 63.579 ns 63.617 ns]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+apply_effect/add_component_shared_clone
+                        time:   [71.430 ns 71.467 ns 71.508 ns]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high mild
+apply_effect/remove_component
+                        time:   [74.158 ns 74.214 ns 74.268 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+apply_effect/spawn_actor
+                        time:   [976.80 ns 982.65 ns 989.70 ns]
+Found 11 outliers among 100 measurements (11.00%)
+  3 (3.00%) low severe
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+apply_effect/despawn_actor_spawn_pair
+                        time:   [572.64 ns 572.80 ns 572.99 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+apply_effect/despawn_sub_entity_spawn_pair
+                        time:   [141.27 ns 141.54 ns 141.91 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+apply_effect/cue_troupe time:   [22.867 ns 22.915 ns 22.978 ns]
+Found 11 outliers among 100 measurements (11.00%)
+  3 (3.00%) high mild
+  8 (8.00%) high severe
+apply_effect/emit_play  time:   [13.656 ns 13.685 ns 13.718 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  7 (7.00%) low severe
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+apply_effect/emit_current_scene
+                        time:   [16.528 ns 16.557 ns 16.589 ns]
+Found 13 outliers among 100 measurements (13.00%)
+  7 (7.00%) low severe
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+apply_effect/emit_specific_scene
+                        time:   [16.780 ns 16.809 ns 16.840 ns]
+Found 11 outliers among 100 measurements (11.00%)
+  8 (8.00%) low severe
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+apply_effect/schedule_transition
+                        time:   [24.437 ns 24.510 ns 24.594 ns]
+Found 26 outliers among 100 measurements (26.00%)
+  24 (24.00%) low severe
+  2 (2.00%) high mild
+
+effect_clone/set_actor_local
+                        time:   [111.45 ns 111.92 ns 112.51 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high severe
+effect_clone/add_component_arc_bump
+                        time:   [130.09 ns 130.21 ns 130.34 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+effect_clone/schedule_transition_arc_slice_bump
+                        time:   [109.85 ns 110.02 ns 110.20 ns]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+effect_clone/emit       time:   [113.25 ns 113.39 ns 113.54 ns]
+
+effect_clone_batch/16   time:   [194.24 ns 194.40 ns 194.58 ns]
+Found 12 outliers among 100 measurements (12.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  7 (7.00%) high severe
+effect_clone_batch/256  time:   [2.8216 µs 2.8362 µs 2.8590 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  4 (4.00%) high mild
+  8 (8.00%) high severe
+effect_clone_batch/4096 time:   [45.932 µs 45.991 µs 46.059 µs]
+Found 17 outliers among 100 measurements (17.00%)
+  2 (2.00%) low mild
+  6 (6.00%) high mild
+  9 (9.00%) high severe
+
+event_dispatch                         fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ handler_dispatch                                  │               │               │               │         │
+│  ├─ (1, 1)                           5.461 ns      │ 5.58 ns       │ 5.5 ns        │ 5.496 ns      │ 100     │ 51200
+│  ├─ (4, 4)                           31.29 ns      │ 367.7 ns      │ 31.47 ns      │ 34.79 ns      │ 100     │ 6400
+│  ╰─ (16, 16)                         479.1 ns      │ 490.6 ns      │ 480.5 ns      │ 481.2 ns      │ 100     │ 800
+├─ matcher_actor_moved                 1.509 ns      │ 7.703 ns      │ 1.539 ns      │ 1.593 ns      │ 100     │ 204800
+├─ matcher_any_against_tick            1.524 ns      │ 6.749 ns      │ 1.534 ns      │ 1.59 ns       │ 100     │ 204800
+├─ matcher_custom_id_match             1.949 ns      │ 1.98 ns       │ 1.96 ns       │ 1.963 ns      │ 100     │ 102400
+├─ matcher_custom_id_miss              2.027 ns      │ 2.077 ns      │ 2.057 ns      │ 2.053 ns      │ 100     │ 102400
+├─ matcher_tick_against_scene_entered  1.851 ns      │ 11.69 ns      │ 1.861 ns      │ 1.963 ns      │ 100     │ 102400
+├─ matcher_tick_against_tick           1.851 ns      │ 1.871 ns      │ 1.861 ns      │ 1.86 ns       │ 100     │ 102400
+├─ troupe_group_lookup                               │               │               │               │         │
+│  ├─ 8                                1.548 ns      │ 6.949 ns      │ 1.568 ns      │ 1.62 ns       │ 100     │ 204800
+│  ├─ 64                               1.544 ns      │ 6.763 ns      │ 1.564 ns      │ 1.617 ns      │ 100     │ 204800
+│  ╰─ 256                              1.455 ns      │ 2.527 ns      │ 1.554 ns      │ 1.563 ns      │ 100     │ 204800
+╰─ troupe_iter_all                                   │               │               │               │         │
+   ├─ 8                                6.205 ns      │ 6.303 ns      │ 6.227 ns      │ 6.233 ns      │ 100     │ 51200
+   ├─ 64                               42.89 ns      │ 43.22 ns      │ 43.04 ns      │ 43.05 ns      │ 100     │ 6400
+   ╰─ 256                              180.6 ns      │ 181.8 ns      │ 181.2 ns      │ 181 ns        │ 100     │ 1600
+
+full_system                     fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ despawn_all_with_components                │               │               │               │         │
+│  ├─ 100                       71.48 µs      │ 87 µs         │ 72.01 µs      │ 72.83 µs      │ 100     │ 100
+│  ├─ 500                       351.2 µs      │ 383 µs        │ 353 µs        │ 356.6 µs      │ 100     │ 100
+│  ├─ 1000                      704.4 µs      │ 991.9 µs      │ 715 µs        │ 725.3 µs      │ 100     │ 100
+│  ╰─ 5000                      3.82 ms       │ 4.382 ms      │ 3.919 ms      │ 3.941 ms      │ 100     │ 100
+├─ despawn_half_replace                       │               │               │               │         │
+│  ├─ 100                       35.78 µs      │ 66.2 µs       │ 36.2 µs       │ 38.09 µs      │ 100     │ 100
+│  ├─ 500                       169.3 µs      │ 191.4 µs      │ 170.4 µs      │ 172.4 µs      │ 100     │ 100
+│  ├─ 1000                      338.5 µs      │ 369.9 µs      │ 341.5 µs      │ 346.7 µs      │ 100     │ 100
+│  ╰─ 5000                      2.354 ms      │ 2.821 ms      │ 2.427 ms      │ 2.438 ms      │ 100     │ 100
+├─ fragmentation_recovery                     │               │               │               │         │
+│  ├─ 500                       153.2 µs      │ 211.8 µs      │ 154.4 µs      │ 157.9 µs      │ 100     │ 100
+│  ╰─ 2000                      611.9 µs      │ 736.9 µs      │ 622.3 µs      │ 624.8 µs      │ 100     │ 100
+├─ scripts_drive_world                        │               │               │               │         │
+│  ├─ 50                        9.407 µs      │ 19.14 µs      │ 9.592 µs      │ 9.69 µs       │ 100     │ 100
+│  ╰─ 500                       210.7 µs      │ 261.3 µs      │ 212.2 µs      │ 219.3 µs      │ 100     │ 100
+├─ spawn_tick_despawn_cycle                   │               │               │               │         │
+│  ├─ 50                        3.762 ms      │ 4.637 ms      │ 3.782 ms      │ 3.809 ms      │ 100     │ 100
+│  ├─ 200                       15.83 ms      │ 17.79 ms      │ 15.91 ms      │ 16.01 ms      │ 100     │ 100
+│  ╰─ 1000                      80.26 ms      │ 83.31 ms      │ 80.53 ms      │ 80.78 ms      │ 100     │ 100
+├─ ui_tick_1p_10w               37.25 ns      │ 76.39 ns      │ 37.87 ns      │ 41.73 ns      │ 100     │ 6400
+├─ ui_tick_5p_20w               196.8 ns      │ 1.171 µs      │ 198.7 ns      │ 215.1 ns      │ 100     │ 1600
+├─ ui_tick_10p_50w              856.1 ns      │ 881.1 ns      │ 866.1 ns      │ 866.2 ns      │ 100     │ 400
+├─ ui_tick_20p_100w             3.175 µs      │ 3.766 µs      │ 3.205 µs      │ 3.219 µs      │ 100     │ 100
+╰─ world_full_tick                            │               │               │               │         │
+   ├─ 50                        1.647 µs      │ 7.072 µs      │ 1.677 µs      │ 1.733 µs      │ 100     │ 200
+   │                            30.34 Mitem/s │ 7.069 Mitem/s │ 29.8 Mitem/s  │ 28.84 Mitem/s │         │
+   ├─ 500                       17.72 µs      │ 29.26 µs      │ 18 µs         │ 18.26 µs      │ 100     │ 100
+   │                            28.21 Mitem/s │ 17.08 Mitem/s │ 27.76 Mitem/s │ 27.36 Mitem/s │         │
+   ├─ 2000                      62.56 µs      │ 91.14 µs      │ 67.74 µs      │ 69.36 µs      │ 100     │ 100
+   │                            31.96 Mitem/s │ 21.94 Mitem/s │ 29.52 Mitem/s │ 28.83 Mitem/s │         │
+   ╰─ 10000                     263.2 µs      │ 338.9 µs      │ 283.3 µs      │ 286.1 µs      │ 100     │ 100
+                                37.99 Mitem/s │ 29.49 Mitem/s │ 35.29 Mitem/s │ 34.94 Mitem/s │         │
+
+world_build/1L×1S×50A(50t)
+                        time:   [48.848 µs 48.959 µs 49.096 µs]
+                        thrpt:  [1.0184 Melem/s 1.0213 Melem/s 1.0236 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) high mild
+  11 (11.00%) high severe
+world_build/2L×2S×500A(2000t)
+                        time:   [1.0826 ms 1.0896 ms 1.0988 ms]
+                        thrpt:  [1.8202 Melem/s 1.8355 Melem/s 1.8474 Melem/s]
+Found 17 outliers among 100 measurements (17.00%)
+  5 (5.00%) high mild
+  12 (12.00%) high severe
+world_build/2L×4S×1000A(8000t)
+                        time:   [6.5912 ms 6.6141 ms 6.6392 ms]
+                        thrpt:  [1.2050 Melem/s 1.2095 Melem/s 1.2137 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+
+tick_steady_state/2L×2S×500A(2000t)
+                        time:   [44.719 µs 44.873 µs 45.067 µs]
+                        thrpt:  [44.378 Melem/s 44.571 Melem/s 44.724 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  4 (4.00%) low severe
+  2 (2.00%) low mild
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+
+tick_scaling/1L×1S×50A(50t)
+                        time:   [1.0490 µs 1.0510 µs 1.0538 µs]
+                        thrpt:  [47.449 Melem/s 47.574 Melem/s 47.663 Melem/s]
+Found 16 outliers among 100 measurements (16.00%)
+  1 (1.00%) low severe
+  10 (10.00%) high mild
+  5 (5.00%) high severe
+tick_scaling/2L×2S×500A(2000t)
+                        time:   [40.482 µs 40.572 µs 40.662 µs]
+                        thrpt:  [49.186 Melem/s 49.295 Melem/s 49.405 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low severe
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+tick_scaling/2L×4S×1000A(8000t)
+                        time:   [177.01 µs 177.91 µs 178.87 µs]
+                        thrpt:  [44.725 Melem/s 44.966 Melem/s 45.196 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  6 (6.00%) low severe
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+tick_scaling/4L×4S×10000A(160000t)
+                        time:   [2.9431 ms 3.1256 ms 3.3170 ms]
+                        thrpt:  [48.236 Melem/s 51.191 Melem/s 54.364 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+tick_phases/collect_effects
+                        time:   [407.60 ns 408.05 ns 408.64 ns]
+                        thrpt:  [4.8943 Gelem/s 4.9014 Gelem/s 4.9067 Gelem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+tick_phases/post_tick   time:   [1.6689 µs 1.6705 µs 1.6723 µs]
+                        thrpt:  [1.1960 Gelem/s 1.1973 Gelem/s 1.1984 Gelem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+tick_phases/propagate_transforms
+                        time:   [8.4184 ns 8.5085 ns 8.5983 ns]
+                        thrpt:  [232.60 Gelem/s 235.06 Gelem/s 237.58 Gelem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) low mild
+  3 (3.00%) high mild
+tick_phases/full_tick   time:   [43.483 µs 44.283 µs 45.117 µs]
+                        thrpt:  [44.329 Melem/s 45.164 Melem/s 45.995 Melem/s]
+Found 20 outliers among 100 measurements (20.00%)
+  12 (12.00%) low severe
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+
+transition_storm/2L×2S×500A(2000t)
+                        time:   [2.6961 µs 2.7028 µs 2.7139 µs]
+                        thrpt:  [736.96 Melem/s 739.98 Melem/s 741.82 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+
+deep_hsm/depth=16       time:   [512.45 ns 517.30 ns 523.88 ns]
+                        thrpt:  [30.542 Melem/s 30.930 Melem/s 31.222 Melem/s]
+Found 17 outliers among 100 measurements (17.00%)
+  4 (4.00%) high mild
+  13 (13.00%) high severe
+deep_hsm/depth=64       time:   [2.8345 µs 2.8638 µs 2.9015 µs]
+                        thrpt:  [22.057 Melem/s 22.348 Melem/s 22.579 Melem/s]
+Found 16 outliers among 100 measurements (16.00%)
+  4 (4.00%) low mild
+  1 (1.00%) high mild
+  11 (11.00%) high severe
+deep_hsm/depth=256      time:   [26.560 µs 26.658 µs 26.833 µs]
+                        thrpt:  [9.5406 Melem/s 9.6030 Melem/s 9.6386 Melem/s]
+Found 16 outliers among 100 measurements (16.00%)
+  2 (2.00%) high mild
+  14 (14.00%) high severe
+
+iai_critical::critical::propagate_dirty_1024
+  Instructions:                     9118678|N/A                  (*********)
+  L1 Hits:                         26277930|N/A                  (*********)
+  LL Hits:                            19365|N/A                  (*********)
+  RAM Hits:                          137217|N/A                  (*********)
+  Total read+write:                26434512|N/A                  (*********)
+  Estimated Cycles:                31177350|N/A                  (*********)
+iai_critical::critical::cue_troupe_delta_1024
+  Instructions:                     9274480|N/A                  (*********)
+  L1 Hits:                         26498990|N/A                  (*********)
+  LL Hits:                            16587|N/A                  (*********)
+  RAM Hits:                          139740|N/A                  (*********)
+  Total read+write:                26655317|N/A                  (*********)
+  Estimated Cycles:                31472825|N/A                  (*********)
+iai_critical::critical::condition_always
+  Instructions:                      315509|N/A                  (*********)
+  L1 Hits:                           648850|N/A                  (*********)
+  LL Hits:                              272|N/A                  (*********)
+  RAM Hits:                            2665|N/A                  (*********)
+  Total read+write:                  651787|N/A                  (*********)
+  Estimated Cycles:                  743485|N/A                  (*********)
+iai_critical::critical::condition_actor_near
+  Instructions:                      354781|N/A                  (*********)
+  L1 Hits:                           616255|N/A                  (*********)
+  LL Hits:                              200|N/A                  (*********)
+  RAM Hits:                            1752|N/A                  (*********)
+  Total read+write:                  618207|N/A                  (*********)
+  Estimated Cycles:                  678575|N/A                  (*********)
+iai_critical::critical::bt_leaf_pass
+  Instructions:                      314930|N/A                  (*********)
+  L1 Hits:                           467512|N/A                  (*********)
+  LL Hits:                              120|N/A                  (*********)
+  RAM Hits:                             691|N/A                  (*********)
+  Total read+write:                  468323|N/A                  (*********)
+  Estimated Cycles:                  492297|N/A                  (*********)
+iai_critical::critical::arena_get_hit_10k
+  Instructions:                      315850|N/A                  (*********)
+  L1 Hits:                           446101|N/A                  (*********)
+  LL Hits:                             5027|N/A                  (*********)
+  RAM Hits:                            5039|N/A                  (*********)
+  Total read+write:                  456167|N/A                  (*********)
+  Estimated Cycles:                  647601|N/A                  (*********)
+iai_critical::critical::play_handle_for_lookup
+  Instructions:                      314234|N/A                  (*********)
+  L1 Hits:                           455486|N/A                  (*********)
+  LL Hits:                             3538|N/A                  (*********)
+  RAM Hits:                            2343|N/A                  (*********)
+  Total read+write:                  461367|N/A                  (*********)
+  Estimated Cycles:                  555181|N/A                  (*********)
+iai_critical::critical::world_full_tick_xlarge
+  Instructions:                   104339635|N/A                  (*********)
+  L1 Hits:                        278096987|N/A                  (*********)
+  LL Hits:                           912481|N/A                  (*********)
+  RAM Hits:                         1443516|N/A                  (*********)
+  Total read+write:               280452984|N/A                  (*********)
+  Estimated Cycles:               333182452|N/A                  (*********)
+
+Iai-Callgrind result: Ok. 8 without regressions; 0 regressed; 8 benchmarks finished in 6.93801s
+gltf_parse/triangles/1  time:   [13.429 µs 13.438 µs 13.448 µs]
+                        thrpt:  [223.08 Kelem/s 223.25 Kelem/s 223.39 Kelem/s]
+Found 16 outliers among 100 measurements (16.00%)
+  3 (3.00%) high mild
+  13 (13.00%) high severe
+gltf_parse/triangles/64 time:   [29.584 µs 29.674 µs 29.796 µs]
+                        thrpt:  [6.4438 Melem/s 6.4703 Melem/s 6.4900 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  2 (2.00%) high mild
+  12 (12.00%) high severe
+gltf_parse/triangles/1024
+                        time:   [289.80 µs 290.68 µs 291.96 µs]
+                        thrpt:  [10.522 Melem/s 10.568 Melem/s 10.600 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  6 (6.00%) high mild
+  8 (8.00%) high severe
+gltf_parse/triangles/16384
+                        time:   [7.4478 ms 7.4638 ms 7.4823 ms]
+                        thrpt:  [6.5691 Melem/s 6.5854 Melem/s 6.5995 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+
+mesh_ore_build/triangles/64
+                        time:   [319.58 ns 319.67 ns 319.77 ns]
+                        thrpt:  [600.43 Melem/s 600.61 Melem/s 600.79 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+mesh_ore_build/triangles/1024
+                        time:   [4.2820 µs 4.2853 µs 4.2893 µs]
+                        thrpt:  [716.20 Melem/s 716.87 Melem/s 717.42 Melem/s]
+Found 15 outliers among 100 measurements (15.00%)
+  4 (4.00%) high mild
+  11 (11.00%) high severe
+mesh_ore_build/triangles/16384
+                        time:   [67.675 µs 67.898 µs 68.195 µs]
+                        thrpt:  [720.75 Melem/s 723.90 Melem/s 726.29 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+mesh_ore_build/triangles/131072
+                        time:   [544.53 µs 547.41 µs 551.38 µs]
+                        thrpt:  [713.15 Melem/s 718.32 Melem/s 722.12 Melem/s]
+Found 16 outliers among 100 measurements (16.00%)
+  9 (9.00%) high mild
+  7 (7.00%) high severe
+
+draw_call_collect/factories_1/1
+                        time:   [30.548 ns 30.665 ns 30.786 ns]
+                        thrpt:  [32.482 Melem/s 32.610 Melem/s 32.735 Melem/s]
+Found 18 outliers among 100 measurements (18.00%)
+  13 (13.00%) low severe
+  4 (4.00%) low mild
+  1 (1.00%) high severe
+draw_call_collect/factories_1/16
+                        time:   [283.87 ns 284.02 ns 284.18 ns]
+                        thrpt:  [56.302 Melem/s 56.334 Melem/s 56.363 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+draw_call_collect/factories_8/1
+                        time:   [149.88 ns 150.28 ns 150.74 ns]
+                        thrpt:  [53.071 Melem/s 53.235 Melem/s 53.378 Melem/s]
+Found 20 outliers among 100 measurements (20.00%)
+  9 (9.00%) low severe
+  3 (3.00%) low mild
+  8 (8.00%) high severe
+draw_call_collect/factories_8/16
+                        time:   [2.0547 µs 2.0569 µs 2.0602 µs]
+                        thrpt:  [62.130 Melem/s 62.228 Melem/s 62.297 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  3 (3.00%) high mild
+  8 (8.00%) high severe
+draw_call_collect/factories_64/1
+                        time:   [1.0037 µs 1.0043 µs 1.0050 µs]
+                        thrpt:  [63.684 Melem/s 63.727 Melem/s 63.763 Melem/s]
+Found 16 outliers among 100 measurements (16.00%)
+  4 (4.00%) high mild
+  12 (12.00%) high severe
+draw_call_collect/factories_64/16
+                        time:   [14.834 µs 14.845 µs 14.858 µs]
+                        thrpt:  [68.921 Melem/s 68.980 Melem/s 69.029 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+
+instantiate/flat/5      time:   [894.51 ns 896.56 ns 899.15 ns]
+                        thrpt:  [6.6730 Melem/s 6.6922 Melem/s 6.7076 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  3 (3.00%) high mild
+  9 (9.00%) high severe
+instantiate/flat/64     time:   [9.2172 µs 9.2269 µs 9.2398 µs]
+                        thrpt:  [7.0348 Melem/s 7.0446 Melem/s 7.0520 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) high mild
+  11 (11.00%) high severe
+instantiate/flat/256    time:   [36.195 µs 36.239 µs 36.292 µs]
+                        thrpt:  [7.0814 Melem/s 7.0917 Melem/s 7.1003 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  4 (4.00%) high mild
+  8 (8.00%) high severe
+instantiate/deep/16     time:   [2.1286 µs 2.1333 µs 2.1400 µs]
+                        thrpt:  [7.4766 Melem/s 7.5002 Melem/s 7.5166 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  8 (8.00%) high mild
+  6 (6.00%) high severe
+instantiate/deep/64     time:   [8.7804 µs 8.7901 µs 8.8014 µs]
+                        thrpt:  [7.2716 Melem/s 7.2809 Melem/s 7.2889 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+instantiate/deep/256    time:   [43.759 µs 44.125 µs 44.489 µs]
+                        thrpt:  [5.7542 Melem/s 5.8018 Melem/s 5.8502 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high severe
+
+handle_for/range_compressed/16
+                        time:   [11.520 ns 11.566 ns 11.632 ns]
+                        thrpt:  [1.4615 Gelem/s 1.4698 Gelem/s 1.4757 Gelem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  4 (4.00%) high mild
+  10 (10.00%) high severe
+handle_for/hashmap_control/16
+                        time:   [150.25 ns 150.99 ns 152.48 ns]
+                        thrpt:  [111.49 Melem/s 112.59 Melem/s 113.14 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low mild
+  9 (9.00%) high severe
+handle_for/range_compressed/256
+                        time:   [165.83 ns 165.95 ns 166.10 ns]
+                        thrpt:  [1.5473 Gelem/s 1.5487 Gelem/s 1.5497 Gelem/s]
+Found 15 outliers among 100 measurements (15.00%)
+  5 (5.00%) high mild
+  10 (10.00%) high severe
+handle_for/hashmap_control/256
+                        time:   [2.2717 µs 2.2780 µs 2.2865 µs]
+                        thrpt:  [112.40 Melem/s 112.82 Melem/s 113.13 Melem/s]
+Found 18 outliers among 100 measurements (18.00%)
+  2 (2.00%) high mild
+  16 (16.00%) high severe
+handle_for/range_compressed/4096
+                        time:   [2.5692 µs 2.5719 µs 2.5750 µs]
+                        thrpt:  [1.5910 Gelem/s 1.5930 Gelem/s 1.5947 Gelem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+handle_for/hashmap_control/4096
+                        time:   [39.490 µs 39.567 µs 39.661 µs]
+                        thrpt:  [103.30 Melem/s 103.55 Melem/s 103.75 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+
+collect_effects/depth_8 time:   [76.657 ns 77.411 ns 78.419 ns]
+                        thrpt:  [102.02 Melem/s 103.34 Melem/s 104.36 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) high mild
+  11 (11.00%) high severe
+collect_effects/depth_64
+                        time:   [534.06 ns 534.63 ns 535.26 ns]
+                        thrpt:  [119.57 Melem/s 119.71 Melem/s 119.84 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+collect_effects/depth_256
+                        time:   [2.2663 µs 2.2716 µs 2.2778 µs]
+                        thrpt:  [112.39 Melem/s 112.70 Melem/s 112.96 Melem/s]
+Found 18 outliers among 100 measurements (18.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  16 (16.00%) high severe
+
+apply_transition_via_tick/sibling_swap_every_tick
+                        time:   [173.67 ns 174.26 ns 174.84 ns]
+
+compute_static_troupes_via_instantiate/8
+                        time:   [1.8022 µs 1.8215 µs 1.8488 µs]
+                        thrpt:  [4.3270 Melem/s 4.3920 Melem/s 4.4391 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  3 (3.00%) high mild
+  9 (9.00%) high severe
+compute_static_troupes_via_instantiate/64
+                        time:   [13.385 µs 13.523 µs 13.697 µs]
+                        thrpt:  [4.6726 Melem/s 4.7325 Melem/s 4.7814 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  6 (6.00%) high mild
+  7 (7.00%) high severe
+compute_static_troupes_via_instantiate/256
+                        time:   [52.012 µs 52.082 µs 52.176 µs]
+                        thrpt:  [4.9065 Melem/s 4.9154 Melem/s 4.9220 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+
+script_hot_reload           fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ concurrent_round_trip_4  6.748 ms      │ 8.323 ms      │ 8.052 ms      │ 7.711 ms      │ 8       │ 8
+├─ concurrent_round_trip_8  9.647 ms      │ 14.05 ms      │ 11.66 ms      │ 11.68 ms      │ 8       │ 8
+╰─ round_trip               5.199 ms      │ 5.995 ms      │ 5.953 ms      │ 5.847 ms      │ 8       │ 8
+
+script_pipeline       fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ codegen_to_object                │               │               │               │         │
+│  ├─ large_O0        3.919 ms      │ 5.401 ms      │ 3.966 ms      │ 3.984 ms      │ 100     │ 100
+│  ├─ large_O3        14.88 ms      │ 16.04 ms      │ 15.07 ms      │ 15.1 ms       │ 100     │ 100
+│  ├─ small_O0        2.449 ms      │ 2.53 ms       │ 2.482 ms      │ 2.482 ms      │ 100     │ 100
+│  ╰─ small_O3        8.156 ms      │ 8.962 ms      │ 8.209 ms      │ 8.255 ms      │ 100     │ 100
+├─ full_compile                     │               │               │               │         │
+│  ├─ large           14.92 ms      │ 17.05 ms      │ 15.05 ms      │ 15.14 ms      │ 100     │ 100
+│  ╰─ small           8.226 ms      │ 8.495 ms      │ 8.277 ms      │ 8.289 ms      │ 100     │ 100
+├─ lex                              │               │               │               │         │
+│  ├─ large           7.143 µs      │ 25.35 µs      │ 7.383 µs      │ 7.825 µs      │ 100     │ 100
+│  ╰─ small           2.183 µs      │ 5.209 µs      │ 2.283 µs      │ 2.343 µs      │ 100     │ 100
+├─ load_object                      │               │               │               │         │
+│  ├─ large           20.07 µs      │ 49.39 µs      │ 20.37 µs      │ 21.35 µs      │ 100     │ 100
+│  ╰─ small           19.22 µs      │ 48.68 µs      │ 19.64 µs      │ 20.62 µs      │ 100     │ 100
+├─ lower                            │               │               │               │         │
+│  ├─ large           3.575 µs      │ 14 µs         │ 3.731 µs      │ 3.938 µs      │ 100     │ 100
+│  ╰─ small           820.6 ns      │ 3.005 µs      │ 961.6 ns      │ 994.5 ns      │ 100     │ 100
+╰─ parse                            │               │               │               │         │
+   ├─ large           8.344 µs      │ 13.11 µs      │ 8.4 µs        │ 8.465 µs      │ 100     │ 100
+   ╰─ small           2.002 µs      │ 4.006 µs      │ 2.013 µs      │ 2.088 µs      │ 100     │ 100
+
+script_runtime         fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ init_state          46.97 ns      │ 152.6 ns      │ 64.81 ns      │ 75.59 ns      │ 100     │ 6400
+├─ native_tick_1k      6.932 µs      │ 30.69 µs      │ 6.962 µs      │ 7.42 µs       │ 100     │ 100
+├─ native_tick_single  20.9 ns       │ 187.6 ns      │ 23.17 ns      │ 24.95 ns      │ 100     │ 12800
+├─ on_enter            93.62 ns      │ 660.3 ns      │ 111.1 ns      │ 217.9 ns      │ 100     │ 1600
+├─ tick_1k             11.54 µs      │ 43.15 µs      │ 12.43 µs      │ 13.87 µs      │ 100     │ 100
+├─ tick_batch_16       553.4 ns      │ 2.772 µs      │ 586.9 ns      │ 659.3 ns      │ 100     │ 400
+├─ tick_batch_32       818.6 ns      │ 5.452 µs      │ 982.8 ns      │ 1.22 µs       │ 100     │ 400
+├─ tick_batch_128      2.393 µs      │ 6.471 µs      │ 3.21 µs       │ 3.411 µs      │ 100     │ 100
+├─ tick_batch_1024     16.78 µs      │ 73.33 µs      │ 17.6 µs       │ 26.51 µs      │ 100     │ 100
+├─ tick_batch_4096     150.4 µs      │ 1.244 ms      │ 245 µs        │ 260.9 µs      │ 100     │ 100
+╰─ tick_single         108 ns        │ 646.5 ns      │ 124.2 ns      │ 213.7 ns      │ 100     │ 1600
+
+transform_kernels                    fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ cue_troupe_delta_block                          │               │               │               │         │
+│  ├─ 64                             427.9 ns      │ 439.3 ns      │ 429.3 ns      │ 430 ns        │ 100     │ 800
+│  ├─ 1024                           6.911 µs      │ 27.36 µs      │ 6.932 µs      │ 7.195 µs      │ 100     │ 100
+│  ╰─ 10000                          67.92 µs      │ 124.1 µs      │ 68.25 µs      │ 70.06 µs      │ 100     │ 100
+├─ cue_troupe_identity_block                       │               │               │               │         │
+│  ├─ 64                             230.1 ns      │ 1.483 µs      │ 231.3 ns      │ 244 ns        │ 100     │ 1600
+│  ├─ 1024                           3.736 µs      │ 22.45 µs      │ 3.746 µs      │ 3.991 µs      │ 100     │ 100
+│  ╰─ 10000                          36.41 µs      │ 74.69 µs      │ 36.56 µs      │ 37.63 µs      │ 100     │ 100
+├─ cue_troupe_static_skip                          │               │               │               │         │
+│  ├─ 64                             6.93 ns       │ 8.514 ns      │ 6.969 ns      │ 6.989 ns      │ 100     │ 51200
+│  ├─ 1024                           6.891 ns      │ 7.066 ns      │ 6.91 ns       │ 6.923 ns      │ 100     │ 51200
+│  ╰─ 10000                          7.008 ns      │ 8.613 ns      │ 7.066 ns      │ 7.077 ns      │ 100     │ 51200
+├─ propagate_dirty_dense                           │               │               │               │         │
+│  ├─ 1                              78.9 ns       │ 188.5 ns      │ 90.31 ns      │ 97.19 ns      │ 100     │ 3200
+│  ├─ 4                              95.5 ns       │ 930.1 ns      │ 103 ns        │ 113.5 ns      │ 100     │ 1600
+│  ├─ 16                             201.3 ns      │ 1.447 µs      │ 246.4 ns      │ 253.2 ns      │ 100     │ 800
+│  ├─ 64                             665.9 ns      │ 3.178 µs      │ 856.3 ns      │ 825.9 ns      │ 100     │ 400
+│  ├─ 256                            1.883 µs      │ 7.027 µs      │ 2.476 µs      │ 2.483 µs      │ 100     │ 200
+│  ├─ 1024                           6.351 µs      │ 10.45 µs      │ 9.015 µs      │ 8.649 µs      │ 100     │ 100
+│  ╰─ 10000                          194.2 µs      │ 356.6 µs      │ 222.3 µs      │ 229.1 µs      │ 100     │ 100
+├─ propagate_dirty_sparse_10pct                    │               │               │               │         │
+│  ├─ 1                              100.5 ns      │ 735.5 ns      │ 105.8 ns      │ 121.5 ns      │ 100     │ 1600
+│  ├─ 4                              136.2 ns      │ 1.766 µs      │ 155.2 ns      │ 188.5 ns      │ 100     │ 1600
+│  ├─ 16                             228.8 ns      │ 1.845 µs      │ 274.5 ns      │ 289.7 ns      │ 100     │ 800
+│  ├─ 64                             620.6 ns      │ 3.125 µs      │ 818.6 ns      │ 840.3 ns      │ 100     │ 400
+│  ├─ 256                            1.952 µs      │ 14.67 µs      │ 2.484 µs      │ 2.698 µs      │ 100     │ 100
+│  ├─ 1024                           13.38 µs      │ 47.42 µs      │ 26.45 µs      │ 26.39 µs      │ 100     │ 100
+│  ╰─ 10000                          245.8 µs      │ 454.8 µs      │ 260.2 µs      │ 266.5 µs      │ 100     │ 100
+├─ set_actor_local_already_dirty     5.529 µs      │ 5.759 µs      │ 5.6 µs        │ 5.609 µs      │ 100     │ 100
+├─ set_actor_local_first_dirty       13.42 µs      │ 25.76 µs      │ 13.7 µs       │ 14.03 µs      │ 100     │ 100
+╰─ set_sub_entity_local_first_dirty  20.57 µs      │ 34.09 µs      │ 21.14 µs      │ 21.77 µs      │ 100     │ 100
+

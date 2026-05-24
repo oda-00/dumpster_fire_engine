@@ -24,9 +24,9 @@ use thin_vec::ThinVec;
 /// `block_w × block_h` footprint comes from the vkFormat dispatch in
 /// `asset.rs::decode_ktx2_uncompressed`.
 pub fn decode_astc(
-    blocks:  &[u8],
-    width:   u32,
-    height:  u32,
+    blocks: &[u8],
+    width: u32,
+    height: u32,
     block_w: u32,
     block_h: u32,
 ) -> ThinVec<u8> {
@@ -42,8 +42,8 @@ pub fn decode_astc(
         core::ptr::write_bytes(out.as_mut_ptr(), 0, out_len);
     }
 
-    let blocks_x = (w + bw - 1) / bw;
-    let blocks_y = (h + bh - 1) / bh;
+    let blocks_x = w.div_ceil(bw);
+    let blocks_y = h.div_ceil(bh);
     let block_count = (blocks.len() / 16).min(blocks_x * blocks_y);
 
     let mut texel_buf = vec![0u8; bw * bh * 4];
@@ -51,22 +51,24 @@ pub fn decode_astc(
     for bi in 0..block_count {
         let bx = bi % blocks_x;
         let by = bi / blocks_x;
-        let block: &[u8; 16] = unsafe {
-            &*(blocks.as_ptr().add(bi * 16) as *const [u8; 16])
-        };
+        let block: &[u8; 16] = unsafe { &*(blocks.as_ptr().add(bi * 16) as *const [u8; 16]) };
         decode_block(block, bw, bh, &mut texel_buf);
 
         // Scatter the texel tile into the output image with right/bottom
         // clipping for partial-coverage block tiles.
         for ty in 0..bh {
             let img_y = by * bh + ty;
-            if img_y >= h { break; }
+            if img_y >= h {
+                break;
+            }
             for tx in 0..bw {
                 let img_x = bx * bw + tx;
-                if img_x >= w { break; }
+                if img_x >= w {
+                    break;
+                }
                 let src = (ty * bw + tx) * 4;
                 let dst = (img_y * w + img_x) * 4;
-                out[dst]     = texel_buf[src];
+                out[dst] = texel_buf[src];
                 out[dst + 1] = texel_buf[src + 1];
                 out[dst + 2] = texel_buf[src + 2];
                 out[dst + 3] = texel_buf[src + 3];
@@ -94,7 +96,10 @@ fn decode_block(block: &[u8; 16], bw: usize, bh: usize, out: &mut [u8]) {
     // bits encode weight-grid size + weight range + dual-plane bit.
     let mode = match decode_block_mode(data, bw, bh) {
         Some(m) => m,
-        None => { fill_magenta_block(bw, bh, out); return; }
+        None => {
+            fill_magenta_block(bw, bh, out);
+            return;
+        }
     };
 
     // Partition count (1..=4).
@@ -152,24 +157,35 @@ fn decode_block(block: &[u8; 16], bw: usize, bh: usize, out: &mut [u8]) {
         return;
     }
     let mut endpoint_vals = [0u8; 32];
-    for ep_i in 0..total_endpoints as usize {
+    for (ep_i, slot) in endpoint_vals[..total_endpoints as usize]
+        .iter_mut()
+        .enumerate()
+    {
         let bit = cem_data_start_bit + ep_i * 8;
-        endpoint_vals[ep_i] = ((data >> bit) & 0xFF) as u8;
+        *slot = ((data >> bit) & 0xFF) as u8;
     }
 
     // Decode weights: take the top `weight_bits` of the block, reversed
     // (ASTC stores them MSB-first from the top).
     let weight_data = reverse_top_bits(data, weight_bits);
-    let weights = decode_weights(weight_data, mode.weight_w, mode.weight_h, bw, bh, mode.weight_range, texels);
+    let weights = decode_weights(
+        weight_data,
+        mode.weight_w,
+        mode.weight_h,
+        bw,
+        bh,
+        mode.weight_range,
+        texels,
+    );
 
     // Apply per-CEM endpoint expansion + interpolation per texel.
-    for ti in 0..texels {
-        let w = weights[ti] as u32; // 0..=64 inclusive
+    for (ti, &wt) in weights[..texels].iter().enumerate() {
+        let w = wt as u32; // 0..=64 inclusive
         // Partition assignment: for 1-partition blocks always 0; for
         // multi-partition we'd run the procedural partition function.
         let rgba = decode_texel_cem(cem, &endpoint_vals, w);
         let dst = ti * 4;
-        out[dst]     = rgba[0];
+        out[dst] = rgba[0];
         out[dst + 1] = rgba[1];
         out[dst + 2] = rgba[2];
         out[dst + 3] = rgba[3];
@@ -188,7 +204,7 @@ fn decode_void_extent(data: u128, bw: usize, bh: usize, out: &mut [u8]) {
     let a = (a16 >> 8) as u8;
     for ti in 0..(bw * bh) {
         let d = ti * 4;
-        out[d]     = r;
+        out[d] = r;
         out[d + 1] = g;
         out[d + 2] = b;
         out[d + 3] = a;
@@ -198,7 +214,7 @@ fn decode_void_extent(data: u128, bw: usize, bh: usize, out: &mut [u8]) {
 fn fill_magenta_block(bw: usize, bh: usize, out: &mut [u8]) {
     for ti in 0..(bw * bh) {
         let d = ti * 4;
-        out[d]     = 255;
+        out[d] = 255;
         out[d + 1] = 0;
         out[d + 2] = 255;
         out[d + 3] = 255;
@@ -208,8 +224,8 @@ fn fill_magenta_block(bw: usize, bh: usize, out: &mut [u8]) {
 // ─── Block-mode decoding ────────────────────────────────────────────────────
 
 struct BlockMode {
-    weight_w:    u32,
-    weight_h:    u32,
+    weight_w: u32,
+    weight_h: u32,
     weight_range: u32, // 1..=31 — packed weight quantization level
 }
 
@@ -224,8 +240,14 @@ fn decode_block_mode(data: u128, bw: usize, bh: usize) -> Option<BlockMode> {
         let r = ((m >> 4) & 0x1) | (((m >> 5) & 0x3) << 1);
         let weight_w = ((m >> 7) & 0x3) + 4;
         let weight_h = ((m >> 5) & 0x3) + 2;
-        if weight_w as usize > bw || weight_h as usize > bh { return None; }
-        return Some(BlockMode { weight_w, weight_h, weight_range: r });
+        if weight_w as usize > bw || weight_h as usize > bh {
+            return None;
+        }
+        return Some(BlockMode {
+            weight_w,
+            weight_h,
+            weight_range: r,
+        });
     }
     None
 }
@@ -257,12 +279,12 @@ fn reverse_top_bits(data: u128, n_bits: usize) -> u128 {
 
 fn decode_weights(
     weight_data: u128,
-    weight_w:    u32,
-    weight_h:    u32,
-    block_w:     usize,
-    block_h:     usize,
+    weight_w: u32,
+    weight_h: u32,
+    block_w: usize,
+    block_h: usize,
     weight_range: u32,
-    texels:      usize,
+    texels: usize,
 ) -> Vec<u8> {
     let mut grid = vec![0u8; (weight_w * weight_h) as usize];
     let bits_per_weight = match weight_range {
@@ -275,17 +297,25 @@ fn decode_weights(
         _ => 8,
     } as u32;
     let max_w = (1u32 << bits_per_weight) - 1;
-    for i in 0..grid.len() {
+    for (i, slot) in grid.iter_mut().enumerate() {
         let bit_off = i * bits_per_weight as usize;
         let raw = ((weight_data >> bit_off) & ((1u128 << bits_per_weight) - 1)) as u32;
         // Renormalise raw 0..max into 0..=64 per ASTC's standard mapping.
-        grid[i] = ((raw * 64 + max_w / 2) / max_w) as u8;
+        *slot = ((raw * 64 + max_w / 2) / max_w) as u8;
     }
 
     // Bilinear infill from the weight grid to the per-texel weight.
     let mut out = vec![0u8; texels];
-    let sx = if weight_w > 1 { ((weight_w - 1) << 16) / block_w as u32 } else { 0 };
-    let sy = if weight_h > 1 { ((weight_h - 1) << 16) / block_h as u32 } else { 0 };
+    let sx = if weight_w > 1 {
+        ((weight_w - 1) << 16) / block_w as u32
+    } else {
+        0
+    };
+    let sy = if weight_h > 1 {
+        ((weight_h - 1) << 16) / block_h as u32
+    } else {
+        0
+    };
     for ty in 0..block_h {
         for tx in 0..block_w {
             let gx = (tx as u32 * sx) >> 16;
@@ -304,12 +334,12 @@ fn endpoint_count_for_cem(cem: u8) -> u8 {
     // endpoint values. The full table has 16 modes; we only need the LDR
     // ones the simplified decoder supports.
     match cem {
-        0 | 1 => 2,    // LDR luminance, LDR luminance + delta
-        4 | 5 => 4,    // LDR luminance + alpha (with / without delta)
-        6 | 7 => 4,    // LDR RGB scale (single channel scale + alpha)
-        8 | 9 => 6,    // LDR RGB / LDR RGB + delta
-        10        => 6, // LDR RGB scale + alpha
-        12 | 13 => 8,  // LDR RGBA / LDR RGBA + delta
+        0 | 1 => 2,   // LDR luminance, LDR luminance + delta
+        4 | 5 => 4,   // LDR luminance + alpha (with / without delta)
+        6 | 7 => 4,   // LDR RGB scale (single channel scale + alpha)
+        8 | 9 => 6,   // LDR RGB / LDR RGB + delta
+        10 => 6,      // LDR RGB scale + alpha
+        12 | 13 => 8, // LDR RGBA / LDR RGBA + delta
         _ => 8,
     }
 }
@@ -366,15 +396,17 @@ mod tests {
         block[0] = 0xFC; // void-extent low byte
         block[1] = 0x01; // padding to set bits 9..16 (any value)
         // Set R16 = 0xFFFF (lane 64..80).
-        block[8]  = 0xFF; block[9]  = 0xFF;
+        block[8] = 0xFF;
+        block[9] = 0xFF;
         // G16 = 0; B16 = 0; A16 = 0xFFFF.
-        block[14] = 0xFF; block[15] = 0xFF;
+        block[14] = 0xFF;
+        block[15] = 0xFF;
         let mut out = vec![0u8; 4 * 4 * 4];
         decode_block(&block, 4, 4, &mut out);
         for i in 0..16 {
-            assert_eq!(out[i * 4],     255, "R lane");
-            assert_eq!(out[i * 4 + 1], 0,   "G lane");
-            assert_eq!(out[i * 4 + 2], 0,   "B lane");
+            assert_eq!(out[i * 4], 255, "R lane");
+            assert_eq!(out[i * 4 + 1], 0, "G lane");
+            assert_eq!(out[i * 4 + 2], 0, "B lane");
             assert_eq!(out[i * 4 + 3], 255, "A lane");
         }
     }

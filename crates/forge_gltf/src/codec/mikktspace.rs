@@ -8,10 +8,10 @@ use thin_vec::ThinVec;
 
 struct MikkMesh<'a> {
     positions: &'a [[f32; 3]],
-    normals:   &'a [[f32; 3]],
-    uvs:       &'a [[f32; 2]],
-    indices:   &'a [u32],
-    tangents:  &'a mut Vec<[f32; 4]>,
+    normals: &'a [[f32; 3]],
+    uvs: &'a [[f32; 2]],
+    indices: &'a [u32],
+    tangents: &'a mut Vec<[f32; 4]>,
 }
 
 impl<'a> mikktspace::Geometry for MikkMesh<'a> {
@@ -51,9 +51,9 @@ impl<'a> mikktspace::Geometry for MikkMesh<'a> {
 /// `positions`.
 pub fn generate_tangents(
     positions: &[[f32; 3]],
-    normals:   &[[f32; 3]],
-    uvs:       &[[f32; 2]],
-    indices:   &[u32],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    indices: &[u32],
 ) -> ThinVec<[f32; 4]> {
     let n = positions.len();
     let mut tans: Vec<[f32; 4]> = vec![[1.0, 0.0, 0.0, 1.0]; n];

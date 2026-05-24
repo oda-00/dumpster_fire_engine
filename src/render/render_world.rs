@@ -14,58 +14,55 @@ use crate::render::gltf_assets::{GltfAssetCache, transform_aabb};
 use crate::render::vulkan::VulkanContext;
 use crate::render::{Renderer, WindowHandle};
 use crate::resource_manager::asset_manager::{
-    SkinningFrame,
-    build_graphics_plans_maximal_with_meshes_vp,
-    build_skin_morph_proto,
-    collect_morph_output_buffers,
-    collect_skin_palette_buffers,
-    forge_gltf::Pose,
+    SkinningFrame, build_graphics_plans_maximal_with_meshes_vp, build_skin_morph_proto,
+    collect_morph_output_buffers, collect_skin_palette_buffers, forge_gltf::Pose,
 };
-use crate::resource_manager::component::{Component, ComponentType, GltfHandle, LightKind, SkyModel};
+use crate::resource_manager::component::{
+    Component, ComponentType, GltfHandle, LightKind, SkyModel,
+};
 use crate::resource_manager::gltf_driver::{
-    allocate_skin_palette_set,
-    LightGpu, LightsUBO, MAX_LIGHTS,
+    LightGpu, LightsUBO, MAX_LIGHTS, allocate_skin_palette_set,
 };
 use crate::resource_manager::world_manager::World;
 
 // ── View structs ──────────────────────────────────────────────────────────────
 
 pub struct CameraView {
-    pub frustum:   [Vec4; 6],
+    pub frustum: [Vec4; 6],
     pub vp_matrix: [f32; 16],
 }
 
 pub struct LightView {
-    pub position:  [f32; 3],
-    pub color:     [f32; 3],
+    pub position: [f32; 3],
+    pub color: [f32; 3],
     pub intensity: f32,
-    pub range:     f32,
-    pub kind:      LightKind,
+    pub range: f32,
+    pub kind: LightKind,
 }
 
 // ── Renderable (per-frame scratch) ────────────────────────────────────────────
 
 struct Renderable {
     asset_handle: GltfHandle,
-    actor_world:  [f32; 16],
-    aabb_world:   ([f32; 3], [f32; 3]),
-    anim_index:   Option<usize>,
-    anim_time:    f32,
+    actor_world: [f32; 16],
+    aabb_world: ([f32; 3], [f32; 3]),
+    anim_index: Option<usize>,
+    anim_time: f32,
 }
 
 // ── collect_and_submit ────────────────────────────────────────────────────────
 
 pub fn collect_and_submit(
-    world:        &World,
-    asset_cache:  &GltfAssetCache,
-    renderer:     &mut Renderer,
-    window_h:     WindowHandle,
-    _vulkan:      &VulkanContext,
+    world: &World,
+    asset_cache: &GltfAssetCache,
+    renderer: &mut Renderer,
+    window_h: WindowHandle,
+    _vulkan: &VulkanContext,
     camera_views: &[CameraView],
-    elapsed:      f32,
+    elapsed: f32,
 ) -> ForgeResult<Option<vk::Semaphore>> {
     let mut renderables: ThinVec<Renderable> = ThinVec::new();
-    let mut lights:      ThinVec<LightView>  = ThinVec::new();
+    let mut lights: ThinVec<LightView> = ThinVec::new();
 
     // Step 1 — collect renderables and lights from the World.
     for level in world.levels.values() {
@@ -76,47 +73,48 @@ pub fn collect_and_submit(
 
                 for sub_entity in actor.sub_entities.iter().flatten() {
                     let (visible, mesh_opt) = sub_entity.actor_type.visibility_and_mesh();
-                    if !visible { continue; }
+                    if !visible {
+                        continue;
+                    }
 
-                    if let Some(mesh_ref) = mesh_opt {
-                        if let Some(loaded) = asset_cache.get(mesh_ref.asset) {
-                            let aabb_world = transform_aabb(&loaded.rest_aabb, &world_affine);
-                            let (anim_index, anim_time) =
-                                if let Some(Component::Utility(uc)) =
-                                    sub_entity.component(ComponentType::Utility)
-                                {
-                                    uc.render.as_ref()
-                                        .map(|rs| (rs.anim_index, rs.anim_time))
-                                        .unwrap_or((None, 0.0))
-                                } else {
-                                    (None, 0.0)
-                                };
-                            renderables.push(Renderable {
-                                asset_handle: mesh_ref.asset,
-                                actor_world,
-                                aabb_world,
-                                anim_index,
-                                anim_time,
-                            });
-                        }
+                    if let Some(mesh_ref) = mesh_opt
+                        && let Some(loaded) = asset_cache.get(mesh_ref.asset)
+                    {
+                        let aabb_world = transform_aabb(&loaded.rest_aabb, &world_affine);
+                        let (anim_index, anim_time) = if let Some(Component::Utility(uc)) =
+                            sub_entity.component(ComponentType::Utility)
+                        {
+                            uc.render
+                                .as_ref()
+                                .map(|rs| (rs.anim_index, rs.anim_time))
+                                .unwrap_or((None, 0.0))
+                        } else {
+                            (None, 0.0)
+                        };
+                        renderables.push(Renderable {
+                            asset_handle: mesh_ref.asset,
+                            actor_world,
+                            aabb_world,
+                            anim_index,
+                            anim_time,
+                        });
                     }
 
                     // Collect lights from Utility sub-entities.
                     if let Some(Component::Utility(uc)) =
                         sub_entity.component(ComponentType::Utility)
+                        && let Some(ld) = &uc.light
                     {
-                        if let Some(ld) = &uc.light {
-                            let pos = world_affine.translation;
-                            lights.push(LightView {
-                                position:  [pos.x, pos.y, pos.z],
-                                color:     ld.color,
-                                // Phase 1 note: LightKind now carries non-Copy data
-                                // (Polygon.vertices is a ThinVec) — explicit clone.
-                                intensity: ld.intensity,
-                                range:     ld.range,
-                                kind:      ld.kind.clone(),
-                            });
-                        }
+                        let pos = world_affine.translation;
+                        lights.push(LightView {
+                            position: [pos.x, pos.y, pos.z],
+                            color: ld.color,
+                            // Phase 1 note: LightKind now carries non-Copy data
+                            // (Polygon.vertices is a ThinVec) — explicit clone.
+                            intensity: ld.intensity,
+                            range: ld.range,
+                            kind: ld.kind.clone(),
+                        });
                     }
                 }
             }
@@ -146,7 +144,9 @@ pub fn collect_and_submit(
 
     // Step 4-6 — per-renderable: animate, compute, build plans.
     for (r_idx, r) in renderables.iter().enumerate() {
-        let Some(loaded) = asset_cache.get(r.asset_handle) else { continue };
+        let Some(loaded) = asset_cache.get(r.asset_handle) else {
+            continue;
+        };
 
         // Sample animation or use rest pose.
         let mut pose = Pose::rest(&loaded.asset);
@@ -161,7 +161,7 @@ pub fn collect_and_submit(
         }
 
         // Async compute: skin palette + morph blend.
-        let morph_buffers:   ThinVec<(u32, u32, vk::Buffer)>;
+        let morph_buffers: ThinVec<(u32, u32, vk::Buffer)>;
         let palette_buffers: ThinVec<(u32, vk::Buffer)>;
 
         let proto_id = ProtoId::new(100 + r_idx as i64);
@@ -169,27 +169,28 @@ pub fn collect_and_submit(
             match renderer.build_compute_factory_async(window_h, cp) {
                 Ok((handle, sem)) => {
                     compute_signal = Some(sem);
-                    let factory = renderer.window(window_h)
+                    let factory = renderer
+                        .window(window_h)
                         .and_then(|w| w.factory_master.get(handle));
                     match factory {
                         Some(f) => {
-                            morph_buffers   = collect_morph_output_buffers(&loaded.asset, f);
+                            morph_buffers = collect_morph_output_buffers(&loaded.asset, f);
                             palette_buffers = collect_skin_palette_buffers(&loaded.asset, f);
                         }
                         None => {
-                            morph_buffers   = ThinVec::new();
+                            morph_buffers = ThinVec::new();
                             palette_buffers = ThinVec::new();
                         }
                     }
                 }
                 Err(e) => {
                     eprintln!("render_world: compute dispatch: {e:?}");
-                    morph_buffers   = ThinVec::new();
+                    morph_buffers = ThinVec::new();
                     palette_buffers = ThinVec::new();
                 }
             }
         } else {
-            morph_buffers   = ThinVec::new();
+            morph_buffers = ThinVec::new();
             palette_buffers = ThinVec::new();
         }
 
@@ -198,14 +199,17 @@ pub fn collect_and_submit(
         for (mi, mesh) in loaded.asset.meshes.iter().enumerate() {
             for pi in 0..mesh.primitives.len() {
                 if let Some(svb) = loaded.skin_vb(mi, pi) {
-                    skinning.skin_vertex_buffers.push((mi as u32, pi as u32, svb.buffer.handle));
+                    skinning
+                        .skin_vertex_buffers
+                        .push((mi as u32, pi as u32, svb.buffer.handle));
                 }
             }
         }
         for (node_idx, node) in loaded.asset.nodes.iter().enumerate() {
             let Some(skin_idx) = node.skin else { continue };
-            let Some(&(_, buf)) = palette_buffers.iter()
-                .find(|(idx, _)| *idx == skin_idx) else { continue };
+            let Some(&(_, buf)) = palette_buffers.iter().find(|(idx, _)| *idx == skin_idx) else {
+                continue;
+            };
             let range = (loaded.asset.skins[skin_idx as usize].joints.len() as vk::DeviceSize) * 64;
             match allocate_skin_palette_set(
                 &loaded.device,
@@ -215,7 +219,7 @@ pub fn collect_and_submit(
                 range.max(64),
             ) {
                 Ok(set) => skinning.palette_sets_by_node.push((node_idx as u32, set)),
-                Err(e)  => eprintln!("render_world: skin palette alloc: {e:?}"),
+                Err(e) => eprintln!("render_world: skin palette alloc: {e:?}"),
             }
         }
 
@@ -236,7 +240,9 @@ pub fn collect_and_submit(
 
     // Step 7 — submit combined graphics proto.
     let mut proto = Proto::<GraphicsTag>::new(ProtoId::new(2), "render_world");
-    for plan in all_plans { proto.push_call(plan); }
+    for plan in all_plans {
+        proto.push_call(plan);
+    }
     renderer.build_graphics_factory(window_h, proto);
 
     Ok(compute_signal)
@@ -245,7 +251,7 @@ pub fn collect_and_submit(
 // ── Culling helpers ───────────────────────────────────────────────────────────
 
 pub fn extract_frustum_planes(vp: &[f32; 16]) -> [Vec4; 6] {
-    let m  = Mat4::from_cols_array(vp);
+    let m = Mat4::from_cols_array(vp);
     let r0 = m.row(0);
     let r1 = m.row(1);
     let r2 = m.row(2);
@@ -274,7 +280,9 @@ fn aabb_inside_frustum(aabb: &([f32; 3], [f32; 3]), planes: &[Vec4; 6]) -> bool 
 }
 
 fn visible_to_any_camera(aabb: &([f32; 3], [f32; 3]), cameras: &[CameraView]) -> bool {
-    cameras.iter().any(|c| aabb_inside_frustum(aabb, &c.frustum))
+    cameras
+        .iter()
+        .any(|c| aabb_inside_frustum(aabb, &c.frustum))
 }
 
 fn light_overlaps_aabb(light: &LightView, aabb: &([f32; 3], [f32; 3])) -> bool {
@@ -303,7 +311,9 @@ fn light_overlaps_aabb(light: &LightView, aabb: &([f32; 3], [f32; 3])) -> bool {
         | LightKind::VolumeCylinder { .. }
         | LightKind::VolumeMesh { .. }
         | LightKind::Ies { .. } => {
-            if light.range <= 0.0 { return true; }
+            if light.range <= 0.0 {
+                return true;
+            }
             let (mn, mx) = aabb;
             let mut dist_sq = 0.0f32;
             for i in 0..3 {
@@ -341,17 +351,27 @@ fn lit_by_any_light(aabb: &([f32; 3], [f32; 3]), lights: &[LightView]) -> bool {
 fn inv_range_sq(range: f32) -> f32 {
     // Per glTF KHR_lights_punctual: range == 0 means unbounded; encoded as 0
     // (the shader checks `inv_r2 == 0` for the unbounded branch).
-    if range > 0.0 { 1.0 / (range * range) } else { 0.0 }
+    if range > 0.0 {
+        1.0 / (range * range)
+    } else {
+        0.0
+    }
 }
 
 #[inline]
 fn norm3(v: [f32; 3]) -> [f32; 3] {
     let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len > 1.0e-6 { [v[0] / len, v[1] / len, v[2] / len] } else { v }
+    if len > 1.0e-6 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        v
+    }
 }
 
 #[inline]
-fn vec4_xyz_w(xyz: [f32; 3], w: f32) -> [f32; 4] { [xyz[0], xyz[1], xyz[2], w] }
+fn vec4_xyz_w(xyz: [f32; 3], w: f32) -> [f32; 4] {
+    [xyz[0], xyz[1], xyz[2], w]
+}
 
 /// Build the GPU-ready uniform-buffer payload from a slice of `LightView`s.
 ///
@@ -360,15 +380,17 @@ fn vec4_xyz_w(xyz: [f32; 3], w: f32) -> [f32; 4] { [xyz[0], xyz[1], xyz[2], w] }
 /// and `sky_present` is `1` when any AnalyticSky light is in the list — both
 /// shortcuts the RT miss shader uses to skip a linear scan.
 pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
-    let mut ubo = LightsUBO::default();
-    ubo.count = (lights.len().min(MAX_LIGHTS)) as u32;
-    ubo.env_idx = u32::MAX;
-    ubo.sky_present = 0;
+    let mut ubo = LightsUBO {
+        count: (lights.len().min(MAX_LIGHTS)) as u32,
+        env_idx: u32::MAX,
+        sky_present: 0,
+        ..LightsUBO::default()
+    };
 
     for (i, lv) in lights.iter().take(MAX_LIGHTS).enumerate() {
-        let pos      = lv.position;
-        let ir2      = inv_range_sq(lv.range);
-        let mut gpu  = LightGpu::default();
+        let pos = lv.position;
+        let ir2 = inv_range_sq(lv.range);
+        let mut gpu = LightGpu::default();
         let mut flags: u32 = 0;
         gpu.color_intensity = [lv.color[0], lv.color[1], lv.color[2], lv.intensity];
         gpu.kind = lv.kind.tag();
@@ -380,7 +402,11 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
             }
             // 1 Spot — d[0] = (pos.xyz, inv_range²); d[1] = (dir.xyz, cos_outer);
             //          d[2].x = cos_inner
-            LightKind::Spot { cone_inner, cone_outer, direction } => {
+            LightKind::Spot {
+                cone_inner,
+                cone_outer,
+                direction,
+            } => {
                 let d = norm3(*direction);
                 gpu.data[0] = vec4_xyz_w(pos, ir2);
                 gpu.data[1] = vec4_xyz_w(d, cone_outer.cos());
@@ -392,7 +418,10 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
                 gpu.data[0] = vec4_xyz_w(d, 0.0);
             }
             // 3 Sun — d[0] = (dir.xyz, angular_radius_rad)
-            LightKind::Sun { direction, angular_radius } => {
+            LightKind::Sun {
+                direction,
+                angular_radius,
+            } => {
                 let d = norm3(*direction);
                 gpu.data[0] = vec4_xyz_w(d, *angular_radius);
             }
@@ -402,15 +431,26 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
                 gpu.data[1] = [ir2, 0.0, 0.0, 0.0];
             }
             // 5 Disk — d[0] = (center.xyz, radius); d[1] = (normal.xyz, inv_range²)
-            LightKind::Disk { normal, radius, two_sided } => {
+            LightKind::Disk {
+                normal,
+                radius,
+                two_sided,
+            } => {
                 let n = norm3(*normal);
                 gpu.data[0] = vec4_xyz_w(pos, *radius);
                 gpu.data[1] = vec4_xyz_w(n, ir2);
-                if *two_sided { flags |= 1; }
+                if *two_sided {
+                    flags |= 1;
+                }
             }
             // 6 Rectangle — d[0]=(center.xyz, w); d[1]=(tangent.xyz, h);
             //               d[2]=(bitangent.xyz, inv_range²); d[3]=(normal.xyz, 0)
-            LightKind::Rectangle { normal, tangent, size, two_sided } => {
+            LightKind::Rectangle {
+                normal,
+                tangent,
+                size,
+                two_sided,
+            } => {
                 let n = norm3(*normal);
                 let t = norm3(*tangent);
                 // bitangent = normal × tangent (right-handed)
@@ -420,10 +460,12 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
                     n[0] * t[1] - n[1] * t[0],
                 ]);
                 gpu.data[0] = vec4_xyz_w(pos, size[0]);
-                gpu.data[1] = vec4_xyz_w(t,   size[1]);
-                gpu.data[2] = vec4_xyz_w(b,   ir2);
-                gpu.data[3] = vec4_xyz_w(n,   0.0);
-                if *two_sided { flags |= 1; }
+                gpu.data[1] = vec4_xyz_w(t, size[1]);
+                gpu.data[2] = vec4_xyz_w(b, ir2);
+                gpu.data[3] = vec4_xyz_w(n, 0.0);
+                if *two_sided {
+                    flags |= 1;
+                }
             }
             // 7 Polygon — d[0]=(center.xyz, vertex_count_f);
             //             d[1]=(tangent.xyz, side_ssbo_idx_f);
@@ -434,7 +476,12 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
             // the polygon-verts SSBO (Phase 5 wires the side buffer; for
             // now we encode side_ssbo_idx_f = u32::MAX as f32, meaning
             // "no side buffer — only inline verts are valid").
-            LightKind::Polygon { normal, tangent, vertices, two_sided } => {
+            LightKind::Polygon {
+                normal,
+                tangent,
+                vertices,
+                two_sided,
+            } => {
                 let n = norm3(*normal);
                 let t = norm3(*tangent);
                 let b = norm3([
@@ -444,16 +491,19 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
                 ]);
                 let vc = vertices.len();
                 gpu.data[0] = vec4_xyz_w(pos, vc as f32);
-                gpu.data[1] = vec4_xyz_w(t,   f32::from_bits(u32::MAX));
-                gpu.data[2] = vec4_xyz_w(b,   ir2);
-                gpu.data[3] = vec4_xyz_w(n,   0.0);
-                let g = |i: usize| -> [f32; 2] {
-                    vertices.get(i).copied().unwrap_or([0.0, 0.0])
-                };
-                let v0 = g(0); let v1 = g(1); let v2 = g(2); let v3 = g(3);
+                gpu.data[1] = vec4_xyz_w(t, f32::from_bits(u32::MAX));
+                gpu.data[2] = vec4_xyz_w(b, ir2);
+                gpu.data[3] = vec4_xyz_w(n, 0.0);
+                let g = |i: usize| -> [f32; 2] { vertices.get(i).copied().unwrap_or([0.0, 0.0]) };
+                let v0 = g(0);
+                let v1 = g(1);
+                let v2 = g(2);
+                let v3 = g(3);
                 gpu.data[4] = [v0[0], v0[1], v1[0], v1[1]];
                 gpu.data[5] = [v2[0], v2[1], v3[0], v3[1]];
-                if *two_sided { flags |= 1; }
+                if *two_sided {
+                    flags |= 1;
+                }
             }
             // 8 Linear — d[0]=(pt_a.xyz, radius); d[1]=(pt_b.xyz, inv_range²)
             LightKind::Linear { point_b, radius } => {
@@ -462,27 +512,47 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
             }
             // 9 Tube — d[0]=(pt_a.xyz, radius); d[1]=(pt_b.xyz, inv_range²);
             //          d[2]=(capped_flag, 0, 0, 0); flags bit1 mirrors capped.
-            LightKind::Tube { point_b, radius, capped } => {
+            LightKind::Tube {
+                point_b,
+                radius,
+                capped,
+            } => {
                 gpu.data[0] = vec4_xyz_w(pos, *radius);
                 gpu.data[1] = vec4_xyz_w(*point_b, ir2);
                 gpu.data[2] = [if *capped { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
-                if *capped { flags |= 2; }
+                if *capped {
+                    flags |= 2;
+                }
             }
             // 10 Volumetric — d[0]=(center.xyz, radius); d[1]=(ext, g, 0, 0)
-            LightKind::Volumetric { radius, extinction, anisotropy_g } => {
+            LightKind::Volumetric {
+                radius,
+                extinction,
+                anisotropy_g,
+            } => {
                 gpu.data[0] = vec4_xyz_w(pos, *radius);
                 gpu.data[1] = [*extinction, *anisotropy_g, 0.0, 0.0];
             }
             // 11 VolumeBox — d[0]=(center.xyz, 0); d[1]=(half_ext.xyz, ext);
             //                d[2]=(g, 0, 0, 0)
-            LightKind::VolumeBox { half_extents, extinction, anisotropy_g } => {
+            LightKind::VolumeBox {
+                half_extents,
+                extinction,
+                anisotropy_g,
+            } => {
                 gpu.data[0] = vec4_xyz_w(pos, 0.0);
                 gpu.data[1] = vec4_xyz_w(*half_extents, *extinction);
                 gpu.data[2] = [*anisotropy_g, 0.0, 0.0, 0.0];
             }
             // 12 VolumeCone — d[0]=(apex.xyz, half_angle); d[1]=(dir.xyz, height);
             //                 d[2]=(ext, g, 0, 0)
-            LightKind::VolumeCone { direction, half_angle, height, extinction, anisotropy_g } => {
+            LightKind::VolumeCone {
+                direction,
+                half_angle,
+                height,
+                extinction,
+                anisotropy_g,
+            } => {
                 let d = norm3(*direction);
                 gpu.data[0] = vec4_xyz_w(pos, *half_angle);
                 gpu.data[1] = vec4_xyz_w(d, *height);
@@ -490,7 +560,13 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
             }
             // 13 VolumeCylinder — d[0]=(base.xyz, radius); d[1]=(dir.xyz, height);
             //                     d[2]=(ext, g, 0, 0)
-            LightKind::VolumeCylinder { direction, height, radius, extinction, anisotropy_g } => {
+            LightKind::VolumeCylinder {
+                direction,
+                height,
+                radius,
+                extinction,
+                anisotropy_g,
+            } => {
                 let d = norm3(*direction);
                 gpu.data[0] = vec4_xyz_w(pos, *radius);
                 gpu.data[1] = vec4_xyz_w(d, *height);
@@ -501,11 +577,14 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
             //                 d[2]=(aabb_min.xyz, 0); d[3]=(aabb_max.xyz, 0)
             // mesh_record_idx is resolved during Phase 5 wiring; here we
             // encode the ActorHandle's slot index as a placeholder.
-            LightKind::VolumeMesh { mesh_actor, density_tex, extinction, anisotropy_g } => {
+            LightKind::VolumeMesh {
+                mesh_actor,
+                density_tex,
+                extinction,
+                anisotropy_g,
+            } => {
                 let mesh_idx_f = (mesh_actor.idx as f32).to_bits() as f32;
-                let dens_idx_f = density_tex
-                    .map(|h| h.0)
-                    .unwrap_or(u32::MAX) as f32;
+                let dens_idx_f = density_tex.map(|h| h.0).unwrap_or(u32::MAX) as f32;
                 gpu.data[0] = [mesh_idx_f, dens_idx_f, 0.0, 0.0];
                 gpu.data[1] = [*extinction, *anisotropy_g, 0.0, 0.0];
                 // aabb min/max filled by render_world from the actor's world AABB
@@ -526,13 +605,22 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
                 gpu.data[0] = [mesh_actor.idx as f32, 0.0, 0.0, 0.0];
             }
             // 17 Environment — d[0]=(hdri_idx_f, rotation, intensity_scale, 0)
-            LightKind::Environment { hdri, rotation_rad, intensity_scale } => {
+            LightKind::Environment {
+                hdri,
+                rotation_rad,
+                intensity_scale,
+            } => {
                 gpu.data[0] = [hdri.0 as f32, *rotation_rad, *intensity_scale, 0.0];
                 ubo.env_idx = hdri.0;
             }
             // 18 AnalyticSky — d[0]=(sun_dir.xyz, turbidity);
             //                  d[1]=(ground.xyz, model_id_f)
-            LightKind::AnalyticSky { sun_direction, turbidity, ground_albedo, model } => {
+            LightKind::AnalyticSky {
+                sun_direction,
+                turbidity,
+                ground_albedo,
+                model,
+            } => {
                 let s = norm3(*sun_direction);
                 gpu.data[0] = vec4_xyz_w(s, *turbidity);
                 gpu.data[1] = vec4_xyz_w(*ground_albedo, (*model as u8) as f32);
@@ -555,16 +643,14 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
 #[cfg(test)]
 mod lights_ubo_tests {
     use super::*;
-    use crate::resource_manager::component::{
-        HdriHandle, IesHandle, LightKind, SkyModel,
-    };
+    use crate::resource_manager::component::{HdriHandle, IesHandle, LightKind, SkyModel};
 
     fn lv(kind: LightKind) -> LightView {
         LightView {
-            position:  [1.0, 2.0, 3.0],
-            color:     [1.0, 1.0, 1.0],
+            position: [1.0, 2.0, 3.0],
+            color: [1.0, 1.0, 1.0],
             intensity: 100.0,
-            range:     10.0,
+            range: 10.0,
             kind,
         }
     }
@@ -584,7 +670,9 @@ mod lights_ubo_tests {
         let outer = 0.5_f32;
         let inner = 0.3_f32;
         let u = pack_lights_ubo(&[lv(LightKind::Spot {
-            cone_inner: inner, cone_outer: outer, direction: [0.0, -1.0, 0.0],
+            cone_inner: inner,
+            cone_outer: outer,
+            direction: [0.0, -1.0, 0.0],
         })]);
         assert_eq!(u.lights[0].kind, 1);
         assert!((u.lights[0].data[1][3] - outer.cos()).abs() < 1.0e-6);
@@ -593,7 +681,9 @@ mod lights_ubo_tests {
 
     #[test]
     fn pack_directional_unbounded_range_encoded_zero() {
-        let mut l = lv(LightKind::Directional { direction: [0.0, -1.0, 0.0] });
+        let mut l = lv(LightKind::Directional {
+            direction: [0.0, -1.0, 0.0],
+        });
         l.range = 0.0;
         let u = pack_lights_ubo(&[l]);
         assert_eq!(u.lights[0].kind, 2);
@@ -604,7 +694,9 @@ mod lights_ubo_tests {
     #[test]
     fn pack_environment_header_shortcut() {
         let u = pack_lights_ubo(&[lv(LightKind::Environment {
-            hdri: HdriHandle(7), rotation_rad: 1.5, intensity_scale: 2.0,
+            hdri: HdriHandle(7),
+            rotation_rad: 1.5,
+            intensity_scale: 2.0,
         })]);
         assert_eq!(u.env_idx, 7);
         assert_eq!(u.lights[0].kind, 17);
@@ -636,7 +728,8 @@ mod lights_ubo_tests {
     #[test]
     fn pack_ies_passes_handle_through() {
         let u = pack_lights_ubo(&[lv(LightKind::Ies {
-            direction: [0.0, -1.0, 0.0], profile: IesHandle(42),
+            direction: [0.0, -1.0, 0.0],
+            profile: IesHandle(42),
         })]);
         assert_eq!(u.lights[0].kind, 15);
         assert_eq!(u.lights[0].data[0][3] as u32, 42);
@@ -645,7 +738,9 @@ mod lights_ubo_tests {
     #[test]
     fn pack_two_sided_flag() {
         let u = pack_lights_ubo(&[lv(LightKind::Disk {
-            normal: [0.0, 1.0, 0.0], radius: 1.0, two_sided: true,
+            normal: [0.0, 1.0, 0.0],
+            radius: 1.0,
+            two_sided: true,
         })]);
         assert_eq!(u.lights[0].kind, 5);
         assert_eq!(u.lights[0].flags & 1, 1);
@@ -657,7 +752,9 @@ mod lights_ubo_tests {
         assert_eq!(u.lights[0].kind, 19);
         // Data slots stay zero; color/intensity is the carrier.
         for slot in u.lights[0].data.iter() {
-            for v in slot.iter() { assert_eq!(*v, 0.0); }
+            for v in slot.iter() {
+                assert_eq!(*v, 0.0);
+            }
         }
         assert_eq!(u.lights[0].color_intensity[3], 100.0);
     }

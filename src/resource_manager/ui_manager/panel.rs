@@ -1,15 +1,15 @@
-use thin_vec::ThinVec;
-pub use super::tag::{PanelTag, PanelHandle};
-use super::widget::WidgetHandle;
-use super::layout::{Rect, LayoutSpec};
 use super::input::UiInputState;
+use super::layout::{LayoutSpec, Rect};
+pub use super::tag::{PanelHandle, PanelTag};
+use super::widget::WidgetHandle;
+use thin_vec::ThinVec;
 
 pub struct Panel {
-    pub rect:     Rect,
-    pub layout:   LayoutSpec,
+    pub rect: Rect,
+    pub layout: LayoutSpec,
     pub children: ThinVec<WidgetHandle>,
-    pub scissor:  bool,
-    pub visible:  bool,
+    pub scissor: bool,
+    pub visible: bool,
 }
 
 impl Panel {
@@ -34,7 +34,9 @@ impl Panel {
         input: &UiInputState,
         dt: f32,
     ) {
-        if !self.visible { return; }
+        if !self.visible {
+            return;
+        }
         for &child_h in &self.children {
             if let Some(w) = widgets.get_mut(child_h) {
                 w.tick(input, dt);

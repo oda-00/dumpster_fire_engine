@@ -9,9 +9,10 @@
 use dumpster_fire_engine::ThinVec;
 use dumpster_fire_engine::resource_manager::*;
 use glam::{Affine3A, Vec3};
-use std::{io::{self, Write}, sync::Arc};
-
-
+use std::{
+    io::{self, Write},
+    sync::Arc,
+};
 
 const MAP: [&str; 10] = [
     "++++++++++++",
@@ -40,7 +41,7 @@ fn cell(world: &World, lh: LevelHandle, sh: StageHandle, ah: ActorHandle) -> (i3
 }
 
 // `UtilityComponent.name` is the actor's type tag in this game.
-fn tag<'a>(world: &'a World, lh: LevelHandle, sh: StageHandle, ah: ActorHandle) -> &'a str {
+fn tag(world: &World, lh: LevelHandle, sh: StageHandle, ah: ActorHandle) -> &str {
     let actor = &world.levels[lh].stages[sh].actors[ah];
     for sub in actor.sub_entities.iter().flatten() {
         if let Some(Component::Utility(u)) = sub.component(ComponentType::Utility) {
@@ -289,26 +290,26 @@ fn spawn_gold(
             sh,
             ah,
             ActorType::Item(Item {
-                id:          ItemId::new(next_id(id)),
-                name:        "gold".into(),
-                quantity:    (value as u32, value as u32, 0), // current/max/stack
+                id: ItemId::new(next_id(id)),
+                name: "gold".into(),
+                quantity: (value as u32, value as u32, 0), // current/max/stack
                 description: Arc::from("A pile of gold coins"),
-                stackable:   false,
-                visible:     true,
-                physical:    false,
-                mesh:        None,
-        }),
+                stackable: false,
+                visible: true,
+                physical: false,
+                mesh: None,
+            }),
             Affine3A::IDENTITY,
         )
         .unwrap();
-        
-        world.add_component(
+
+    world.add_component(
         lh,
         sh,
         ah,
         vi,
         UtilityComponent {
-            name:        "gold".into(),
+            name: "gold".into(),
             description: Arc::from(""),
             camera: None,
             light: None,
@@ -402,7 +403,13 @@ fn spawn_meta(world: &mut World, lh: LevelHandle, sh: StageHandle, id: &mut i64)
 
 // ── display ─────────────────────────────────────────────────────────────────
 
-fn display(world: &World, lh: LevelHandle, sh: StageHandle, player: ActorHandle, meta: ActorHandle) {
+fn display(
+    world: &World,
+    lh: LevelHandle,
+    sh: StageHandle,
+    player: ActorHandle,
+    meta: ActorHandle,
+) {
     let mut grid = [['.'; W]; H];
     let stage = &world.levels[lh].stages[sh];
 
@@ -424,7 +431,7 @@ fn display(world: &World, lh: LevelHandle, sh: StageHandle, player: ActorHandle,
             "exit" => '>',
             _ => continue,
         };
-        
+
         grid[y as usize][x as usize] = glyph;
     }
 

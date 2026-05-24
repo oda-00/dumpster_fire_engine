@@ -12,19 +12,15 @@
 //! that `langc` and `langcd` use, plus the new object-file load step that
 //! replaces the former 23 ms link step.
 
-use divan::{black_box, Bencher};
-use langc::{codegen, OptimizationLevel};
-use lang_frontend::{
-    hir::HirScript,
-    lexer::Lexer,
-    parser::Parser,
-    sema,
-    ast::LangScript,
-};
-use thin_vec::ThinVec;
+use divan::{Bencher, black_box};
 use dumpster_fire_engine::resource_manager::event_manager::object_loader::LoadedObject;
+use lang_frontend::{ast::LangScript, hir::HirScript, lexer::Lexer, parser::Parser, sema};
+use langc::{OptimizationLevel, codegen};
+use thin_vec::ThinVec;
 
-fn main() { divan::main(); }
+fn main() {
+    divan::main();
+}
 
 // ── Corpora ───────────────────────────────────────────────────────────────────
 
@@ -128,7 +124,7 @@ fn opt_of(label: &str) -> OptimizationLevel {
     match label {
         "O0" => OptimizationLevel::None,
         "O3" => OptimizationLevel::Aggressive,
-        _    => panic!("unknown opt {label}"),
+        _ => panic!("unknown opt {label}"),
     }
 }
 
@@ -145,9 +141,7 @@ fn parse(bencher: Bencher, label: &str) {
     let toks = tokens_of(corpus(label));
     bencher
         .with_inputs(|| toks.clone())
-        .bench_local_values(|toks| {
-            black_box(Parser::new(toks).parse_script().expect("parse"))
-        });
+        .bench_local_values(|toks| black_box(Parser::new(toks).parse_script().expect("parse")));
 }
 
 #[divan::bench(args = ["small", "large"])]
@@ -193,9 +187,9 @@ fn full_compile(bencher: Bencher, label: &str) {
     let dir = tempdir("script_pipeline_full");
     bencher.bench(|| {
         let toks = Lexer::new(black_box(src)).tokenise().expect("lex");
-        let ast  = Parser::new(toks).parse_script().expect("parse");
-        let hir  = sema::lower(ast).expect("sema");
-        let obj  = dir.join("full.o");
+        let ast = Parser::new(toks).parse_script().expect("parse");
+        let hir = sema::lower(ast).expect("sema");
+        let obj = dir.join("full.o");
         codegen::compile_to_object(&hir, OptimizationLevel::Aggressive, &obj).expect("codegen");
         black_box(LoadedObject::from_file(&obj).expect("load"));
     });

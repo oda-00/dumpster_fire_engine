@@ -14,20 +14,20 @@ use ash::vk;
 use thin_vec::ThinVec;
 
 use forge_gltf::{
-    GltfAsset, PipelineParams, PipelineUpload, Pose,
-    build_all_compute_uploads, build_graphics_draws, build_graphics_draws_with_matrices,
-    build_morph_blend_input, build_skin_palette_input, build_ui_draws,
+    GltfAsset, PipelineParams, PipelineUpload, Pose, build_all_compute_uploads,
+    build_graphics_draws, build_graphics_draws_with_matrices, build_morph_blend_input,
+    build_skin_palette_input, build_ui_draws,
 };
 
 use crate::forge_master::forge::ForgeId;
 use crate::forge_master::frame::{FrameId, FramePlan, GraphicsFramePlan};
 use crate::forge_master::ingot::Ingot;
 use crate::forge_master::master::{ForgeMaster, ForgeResult};
-use crate::render::factory_master::proto::{ComputeTag, Proto, ProtoId};
 use crate::forge_master::ore::{
     ForgeVertex, GpuMesh, GraphicsOreKind, IngotSpec, MeshOre, MeshUploadCtx, Ore, OreInput,
     OreKind, TextureOre,
 };
+use crate::render::factory_master::proto::{ComputeTag, Proto, ProtoId};
 
 // Pre-compiled SPIR-V for the two skinning/morph compute shaders.
 const SKIN_PALETTE_SPV: &[u8] = include_bytes!(concat!(
@@ -55,10 +55,10 @@ pub enum GltfError {
 impl std::fmt::Display for GltfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GltfError::Io(e)        => write!(f, "gltf I/O error: {e}"),
+            GltfError::Io(e) => write!(f, "gltf I/O error: {e}"),
             GltfError::NoPrimitives => write!(f, "glTF file has no mesh primitives"),
-            GltfError::NoPositions  => write!(f, "glTF primitive has no POSITION accessor"),
-            GltfError::Other(s)     => write!(f, "gltf error: {s}"),
+            GltfError::NoPositions => write!(f, "glTF primitive has no POSITION accessor"),
+            GltfError::Other(s) => write!(f, "gltf error: {s}"),
         }
     }
 }
@@ -73,21 +73,35 @@ impl std::error::Error for GltfError {
 }
 
 impl From<gltf::Error> for GltfError {
-    fn from(e: gltf::Error) -> Self { GltfError::Io(e) }
+    fn from(e: gltf::Error) -> Self {
+        GltfError::Io(e)
+    }
 }
 
 impl From<forge_gltf::GltfError> for GltfError {
     fn from(e: forge_gltf::GltfError) -> Self {
         match e {
-            forge_gltf::GltfError::Io(inner)              => GltfError::Io(inner),
-            forge_gltf::GltfError::NoPrimitives           => GltfError::NoPrimitives,
-            forge_gltf::GltfError::NoPositions            => GltfError::NoPositions,
-            forge_gltf::GltfError::InvalidAccessor(s)     => GltfError::Other(format!("invalid accessor: {s}")),
-            forge_gltf::GltfError::UnsupportedComponent(s) => GltfError::Other(format!("unsupported component: {s}")),
-            forge_gltf::GltfError::UnsupportedVersion(s)  => GltfError::Other(format!("unsupported version: {s}")),
-            forge_gltf::GltfError::UnsupportedExtension(s) => GltfError::Other(format!("unsupported extension: {s}")),
-            forge_gltf::GltfError::SpecViolation(s)       => GltfError::Other(format!("spec violation: {s}")),
-            forge_gltf::GltfError::UnsupportedFeature(s)  => GltfError::Other(format!("unsupported feature: {s}")),
+            forge_gltf::GltfError::Io(inner) => GltfError::Io(inner),
+            forge_gltf::GltfError::NoPrimitives => GltfError::NoPrimitives,
+            forge_gltf::GltfError::NoPositions => GltfError::NoPositions,
+            forge_gltf::GltfError::InvalidAccessor(s) => {
+                GltfError::Other(format!("invalid accessor: {s}"))
+            }
+            forge_gltf::GltfError::UnsupportedComponent(s) => {
+                GltfError::Other(format!("unsupported component: {s}"))
+            }
+            forge_gltf::GltfError::UnsupportedVersion(s) => {
+                GltfError::Other(format!("unsupported version: {s}"))
+            }
+            forge_gltf::GltfError::UnsupportedExtension(s) => {
+                GltfError::Other(format!("unsupported extension: {s}"))
+            }
+            forge_gltf::GltfError::SpecViolation(s) => {
+                GltfError::Other(format!("spec violation: {s}"))
+            }
+            forge_gltf::GltfError::UnsupportedFeature(s) => {
+                GltfError::Other(format!("unsupported feature: {s}"))
+            }
         }
     }
 }
@@ -115,8 +129,32 @@ pub fn load_all_meshes_from_slice(bytes: &[u8]) -> Result<ThinVec<MeshOre>, Gltf
 }
 
 fn first_mesh_from_asset(asset: &GltfAsset) -> Result<MeshOre, GltfError> {
-    let mut meshes = all_meshes_from_asset(asset);
-    if meshes.is_empty() { Err(GltfError::NoPrimitives) } else { Ok(meshes.swap_remove(0)) }
+    for mesh in &asset.meshes {
+        for prim in &mesh.primitives {
+            let n = prim.streams.positions.len();
+            let uv0 = prim.streams.uv_sets.first();
+            let vertices: ThinVec<ForgeVertex> = (0..n)
+                .map(|i| {
+                    ForgeVertex::new(
+                        prim.streams.positions[i],
+                        prim.streams
+                            .normals
+                            .get(i)
+                            .copied()
+                            .unwrap_or([0.0, 1.0, 0.0]),
+                        prim.streams
+                            .tangents
+                            .get(i)
+                            .copied()
+                            .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                        uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]),
+                    )
+                })
+                .collect();
+            return Ok(MeshOre::new(vertices, prim.indices.clone()));
+        }
+    }
+    Err(GltfError::NoPrimitives)
 }
 
 fn all_meshes_from_asset(asset: &GltfAsset) -> ThinVec<MeshOre> {
@@ -126,12 +164,22 @@ fn all_meshes_from_asset(asset: &GltfAsset) -> ThinVec<MeshOre> {
             let n = prim.streams.positions.len();
             let uv0 = prim.streams.uv_sets.first();
             let vertices: ThinVec<ForgeVertex> = (0..n)
-                .map(|i| ForgeVertex::new(
-                    prim.streams.positions[i],
-                    prim.streams.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
-                    prim.streams.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
-                    uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]),
-                ))
+                .map(|i| {
+                    ForgeVertex::new(
+                        prim.streams.positions[i],
+                        prim.streams
+                            .normals
+                            .get(i)
+                            .copied()
+                            .unwrap_or([0.0, 1.0, 0.0]),
+                        prim.streams
+                            .tangents
+                            .get(i)
+                            .copied()
+                            .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                        uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]),
+                    )
+                })
                 .collect();
             out.push(MeshOre::new(vertices, prim.indices.clone()));
         }
@@ -172,7 +220,7 @@ pub fn asset_to_texture_ores(asset: &GltfAsset) -> ThinVec<TextureOre> {
         .iter()
         .map(|img| {
             let format = match img.format {
-                forge_gltf::ImageFormatHint::Srgb   => vk::Format::R8G8B8A8_SRGB,
+                forge_gltf::ImageFormatHint::Srgb => vk::Format::R8G8B8A8_SRGB,
                 forge_gltf::ImageFormatHint::Linear => vk::Format::R8G8B8A8_UNORM,
             };
             TextureOre::new(img.width, img.height, format, img.rgba.clone())
@@ -195,9 +243,9 @@ pub fn upload_to_ore(up: &PipelineUpload, output_size: vk::DeviceSize) -> Ore {
     //   SkinPalette → joint-palette SSBO  → STORAGE_BUFFER (already default;
     //                  redundant flag is a no-op but documents intent)
     let extra_usage = match kind {
-        OreKind::MorphBlend  => vk::BufferUsageFlags::VERTEX_BUFFER,
+        OreKind::MorphBlend => vk::BufferUsageFlags::VERTEX_BUFFER,
         OreKind::SkinPalette => vk::BufferUsageFlags::STORAGE_BUFFER,
-        _                    => vk::BufferUsageFlags::empty(),
+        _ => vk::BufferUsageFlags::empty(),
     };
 
     // Build the input variant carefully so we don't drop either buffer:
@@ -222,7 +270,11 @@ pub fn upload_to_ore(up: &PipelineUpload, output_size: vk::DeviceSize) -> Ore {
         };
         OreInput::Mesh(MeshOre::new(
             unpack_forge_vertices(&up.primary_bytes, n_vertices as usize),
-            if secondary.is_empty() { ThinVec::new() } else { unpack_u32(&secondary) },
+            if secondary.is_empty() {
+                ThinVec::new()
+            } else {
+                unpack_u32(&secondary)
+            },
         ))
     } else if !secondary.is_empty() {
         OreInput::DualBytes { primary, secondary }
@@ -248,18 +300,28 @@ fn unpack_forge_vertices(bytes: &[u8], n: usize) -> ThinVec<ForgeVertex> {
     for i in 0..n {
         let s = i * stride;
         let position = [
-            f32_le(&bytes[s..]),         f32_le(&bytes[s+4..]),   f32_le(&bytes[s+8..]),
+            f32_le(&bytes[s..]),
+            f32_le(&bytes[s + 4..]),
+            f32_le(&bytes[s + 8..]),
         ];
         let normal = [
-            f32_le(&bytes[s+12..]),      f32_le(&bytes[s+16..]),  f32_le(&bytes[s+20..]),
+            f32_le(&bytes[s + 12..]),
+            f32_le(&bytes[s + 16..]),
+            f32_le(&bytes[s + 20..]),
         ];
         let tangent = [
-            f32_le(&bytes[s+24..]),      f32_le(&bytes[s+28..]),  f32_le(&bytes[s+32..]),  f32_le(&bytes[s+36..]),
+            f32_le(&bytes[s + 24..]),
+            f32_le(&bytes[s + 28..]),
+            f32_le(&bytes[s + 32..]),
+            f32_le(&bytes[s + 36..]),
         ];
-        let uv = [
-            f32_le(&bytes[s+40..]),      f32_le(&bytes[s+44..]),
-        ];
-        out.push(ForgeVertex { position, normal, tangent, uv });
+        let uv = [f32_le(&bytes[s + 40..]), f32_le(&bytes[s + 44..])];
+        out.push(ForgeVertex {
+            position,
+            normal,
+            tangent,
+            uv,
+        });
     }
     out
 }
@@ -269,47 +331,54 @@ fn unpack_u32(bytes: &[u8]) -> ThinVec<u32> {
     let mut out = ThinVec::with_capacity(n);
     for i in 0..n {
         out.push(u32::from_le_bytes([
-            bytes[i*4], bytes[i*4+1], bytes[i*4+2], bytes[i*4+3],
+            bytes[i * 4],
+            bytes[i * 4 + 1],
+            bytes[i * 4 + 2],
+            bytes[i * 4 + 3],
         ]));
     }
     out
 }
 
-fn f32_le(b: &[u8]) -> f32 { f32::from_le_bytes([b[0], b[1], b[2], b[3]]) }
+fn f32_le(b: &[u8]) -> f32 {
+    f32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
 
-fn non_zero_size(size: vk::DeviceSize) -> vk::DeviceSize { size.max(1) }
+fn non_zero_size(size: vk::DeviceSize) -> vk::DeviceSize {
+    size.max(1)
+}
 
 fn pipeline_kind_to_ore(kind: forge_gltf::GltfPipelineKind) -> OreKind {
     use forge_gltf::GltfGraphicsKind as G;
     use forge_gltf::GltfPipelineKind as K;
     match kind {
-        K::RayTrace            => OreKind::RayTrace,
-        K::Denoise             => OreKind::Denoise,
+        K::RayTrace => OreKind::RayTrace,
+        K::Denoise => OreKind::Denoise,
         K::SignedDistanceField => OreKind::SignedDistanceField,
-        K::SdfVoxelization     => OreKind::SdfVoxelization,
-        K::LightClustering     => OreKind::LightClustering,
-        K::OcclusionCulling    => OreKind::OcclusionCulling,
-        K::MaterialFlattening  => OreKind::MaterialFlattening,
-        K::AmbientOcclusion    => OreKind::AmbientOcclusion,
-        K::VisibilityPass      => OreKind::VisibilityPass,
-        K::SkinPalette         => OreKind::SkinPalette,
-        K::MorphBlend          => OreKind::MorphBlend,
-        K::SplatSort           => OreKind::SplatSort,
-        K::SplatBillboard      => OreKind::SplatBillboard,
-        K::InstanceTransforms  => OreKind::InstanceTransforms,
-        K::Graphics(G::ForwardLit)        => OreKind::Graphics(GraphicsOreKind::ForwardLit),
+        K::SdfVoxelization => OreKind::SdfVoxelization,
+        K::LightClustering => OreKind::LightClustering,
+        K::OcclusionCulling => OreKind::OcclusionCulling,
+        K::MaterialFlattening => OreKind::MaterialFlattening,
+        K::AmbientOcclusion => OreKind::AmbientOcclusion,
+        K::VisibilityPass => OreKind::VisibilityPass,
+        K::SkinPalette => OreKind::SkinPalette,
+        K::MorphBlend => OreKind::MorphBlend,
+        K::SplatSort => OreKind::SplatSort,
+        K::SplatBillboard => OreKind::SplatBillboard,
+        K::InstanceTransforms => OreKind::InstanceTransforms,
+        K::Graphics(G::ForwardLit) => OreKind::Graphics(GraphicsOreKind::ForwardLit),
         K::Graphics(G::SkinnedForwardLit) => OreKind::Graphics(GraphicsOreKind::SkinnedForwardLit),
-        K::Graphics(G::Ui)                => OreKind::Graphics(GraphicsOreKind::Ui),
-        K::Graphics(G::GaussianSplat)     => OreKind::Graphics(GraphicsOreKind::GaussianSplat),
+        K::Graphics(G::Ui) => OreKind::Graphics(GraphicsOreKind::Ui),
+        K::Graphics(G::GaussianSplat) => OreKind::Graphics(GraphicsOreKind::GaussianSplat),
     }
 }
 
 fn graphics_kind_to_ore(kind: forge_gltf::GltfGraphicsKind) -> GraphicsOreKind {
     match kind {
-        forge_gltf::GltfGraphicsKind::ForwardLit        => GraphicsOreKind::ForwardLit,
+        forge_gltf::GltfGraphicsKind::ForwardLit => GraphicsOreKind::ForwardLit,
         forge_gltf::GltfGraphicsKind::SkinnedForwardLit => GraphicsOreKind::SkinnedForwardLit,
-        forge_gltf::GltfGraphicsKind::Ui                => GraphicsOreKind::Ui,
-        forge_gltf::GltfGraphicsKind::GaussianSplat     => GraphicsOreKind::GaussianSplat,
+        forge_gltf::GltfGraphicsKind::Ui => GraphicsOreKind::Ui,
+        forge_gltf::GltfGraphicsKind::GaussianSplat => GraphicsOreKind::GaussianSplat,
     }
 }
 
@@ -333,14 +402,16 @@ pub fn build_compute_ores(
 /// the compute work for each kind. Returns one `Ingot` per pipeline kind, in
 /// the same order as `forge_gltf::build_all_compute_uploads`.
 pub fn refine_all_compute(
-    asset:       &GltfAsset,
-    params:      PipelineParams,
-    master:      &mut ForgeMaster,
+    asset: &GltfAsset,
+    params: PipelineParams,
+    master: &mut ForgeMaster,
     output_size: vk::DeviceSize,
 ) -> ForgeResult<ThinVec<Ingot>> {
     let ores = build_compute_ores(asset, params, output_size);
     let mut out = ThinVec::with_capacity(ores.len());
-    for ore in ores { out.push(master.refine(ore)?); }
+    for ore in ores {
+        out.push(master.refine(ore)?);
+    }
     Ok(out)
 }
 
@@ -364,19 +435,27 @@ pub fn register_skin_morph_forges(master: &mut ForgeMaster) -> ForgeResult<()> {
 /// `build_skin_morph_proto` function assigns these IDs in a deterministic
 /// order so callers can pull the right `vk::Buffer` out of the resulting
 /// `Factory`'s ingot list via `morph_output_frame_id(mesh_idx, prim_idx)`.
-pub fn morph_output_frame_id(asset: &GltfAsset, mesh_idx: usize, prim_idx: usize) -> Option<FrameId> {
+pub fn morph_output_frame_id(
+    asset: &GltfAsset,
+    mesh_idx: usize,
+    prim_idx: usize,
+) -> Option<FrameId> {
     // Mirror the iteration order of build_skin_morph_proto: skins first
     // (one frame id each), then morphed primitives.
     let mut next: i64 = 1;
     for skin_idx in 0..asset.skins.len() {
         // Only counts when the skin actually has joints; matches the proto.
-        if let Some(skin) = asset.skins.get(skin_idx) {
-            if !skin.joints.is_empty() { next += 1; }
+        if let Some(skin) = asset.skins.get(skin_idx)
+            && !skin.joints.is_empty()
+        {
+            next += 1;
         }
     }
     for (mi, mesh) in asset.meshes.iter().enumerate() {
         for (pi, prim) in mesh.primitives.iter().enumerate() {
-            if prim.morph_targets.is_empty() { continue; }
+            if prim.morph_targets.is_empty() {
+                continue;
+            }
             if mi == mesh_idx && pi == prim_idx {
                 return Some(FrameId::new(next));
             }
@@ -392,16 +471,24 @@ pub fn morph_output_frame_id(asset: &GltfAsset, mesh_idx: usize, prim_idx: usize
 /// `build_graphics_plans_with_pose_and_materials_morphs` (next function)
 /// so each draw binds the right compute output as its vertex source.
 pub fn collect_morph_output_buffers(
-    asset:   &GltfAsset,
+    asset: &GltfAsset,
     factory: &crate::render::factory_master::factory::Factory,
 ) -> ThinVec<(u32, u32, vk::Buffer)> {
     let mut out = ThinVec::new();
     for (mi, mesh) in asset.meshes.iter().enumerate() {
         for (pi, prim) in mesh.primitives.iter().enumerate() {
-            if prim.morph_targets.is_empty() { continue; }
-            let Some(id) = morph_output_frame_id(asset, mi, pi) else { continue };
-            let Some(frame) = factory.frame_by_id(id) else { continue };
-            let Some(ingot) = frame.ingots.first() else { continue };
+            if prim.morph_targets.is_empty() {
+                continue;
+            }
+            let Some(id) = morph_output_frame_id(asset, mi, pi) else {
+                continue;
+            };
+            let Some(frame) = factory.frame_by_id(id) else {
+                continue;
+            };
+            let Some(ingot) = frame.ingots.first() else {
+                continue;
+            };
             if let Some(buf) = ingot.result_buffer() {
                 out.push((mi as u32, pi as u32, buf.handle));
             }
@@ -420,9 +507,9 @@ pub fn collect_morph_output_buffers(
 /// `output_size` is the per-Ore output-buffer size in bytes (round up via
 /// `non_zero_size`); pass `0` to let the helper choose a 4-byte minimum.
 pub fn build_skin_morph_proto(
-    asset:       &GltfAsset,
-    pose:        &Pose,
-    proto_id:    ProtoId,
+    asset: &GltfAsset,
+    pose: &Pose,
+    proto_id: ProtoId,
     output_size: vk::DeviceSize,
 ) -> Option<Proto<ComputeTag>> {
     let mut proto = Proto::<ComputeTag>::new(proto_id, "skin_morph_frame");
@@ -433,10 +520,8 @@ pub fn build_skin_morph_proto(
         if let Some(upload) = build_skin_palette_input(asset, pose, skin_idx) {
             let palette_bytes = (upload.element_count as vk::DeviceSize) * 64;
             let ore = upload_to_ore(&upload, output_size.max(palette_bytes));
-            let mut plan = FramePlan::new(
-                FrameId::new(next_id),
-                format!("skin_palette_{skin_idx}"),
-            );
+            let mut plan =
+                FramePlan::new(FrameId::new(next_id), format!("skin_palette_{skin_idx}"));
             plan.push(ore);
             proto.push_plan(plan);
             next_id += 1;
@@ -448,12 +533,17 @@ pub fn build_skin_morph_proto(
     // references the mesh (every other node will share the same weights at
     // this granularity since the pose only stores per-node overrides).
     for (mesh_idx, mesh) in asset.meshes.iter().enumerate() {
-        let node_idx = asset.nodes.iter()
+        let node_idx = asset
+            .nodes
+            .iter()
             .position(|n| n.mesh == Some(mesh_idx as u32))
             .unwrap_or(0);
         for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
-            if prim.morph_targets.is_empty() { continue; }
-            if let Some(upload) = build_morph_blend_input(asset, mesh_idx, prim_idx, pose, node_idx) {
+            if prim.morph_targets.is_empty() {
+                continue;
+            }
+            if let Some(upload) = build_morph_blend_input(asset, mesh_idx, prim_idx, pose, node_idx)
+            {
                 let posed_bytes = (upload.primary_bytes.len()) as vk::DeviceSize;
                 let ore = upload_to_ore(&upload, output_size.max(posed_bytes));
                 let mut plan = FramePlan::new(
@@ -475,13 +565,17 @@ pub fn build_skin_morph_proto(
 /// borrowed only for the duration of the upload — meshes outlive it inside
 /// the returned `Arc<GpuMesh>` handles.
 pub fn build_graphics_plans(
-    asset:      &GltfAsset,
+    asset: &GltfAsset,
     upload_ctx: &MeshUploadCtx,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     // Cache one Arc<GpuMesh> per (mesh, primitive) pair so multiple draws
     // referencing the same primitive share GPU memory.
     let mut cache: Vec<Vec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
-        .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
+        .map(|i| {
+            (0..asset.meshes[i].primitives.len())
+                .map(|_| None)
+                .collect()
+        })
         .collect();
 
     let draws = build_graphics_draws(asset);
@@ -510,7 +604,7 @@ pub fn build_graphics_plans(
 /// Same as `build_graphics_plans` but tags every plan as the UI pipeline.
 /// Useful when the caller wants the glTF tree rendered as UI overlays.
 pub fn build_ui_plans(
-    asset:      &GltfAsset,
+    asset: &GltfAsset,
     upload_ctx: &MeshUploadCtx,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     let mut plans = build_graphics_plans(asset, upload_ctx)?;
@@ -528,8 +622,8 @@ pub fn build_ui_plans(
 /// and shared across draws; only the per-draw world matrix changes between
 /// frames. Call once after each `Pose::sample` to get the frame's draw list.
 pub fn build_graphics_plans_with_pose(
-    asset:      &GltfAsset,
-    pose:       &Pose,
+    asset: &GltfAsset,
+    pose: &Pose,
     upload_ctx: &MeshUploadCtx,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     build_graphics_plans_with_pose_and_materials(asset, pose, upload_ctx, &[])
@@ -540,9 +634,9 @@ pub fn build_graphics_plans_with_pose(
 /// asset's material index; entries that are `None` (or out of range) leave
 /// the plan's `material_set` unset (caller falls back to dummy bindings).
 pub fn build_graphics_plans_with_pose_and_materials(
-    asset:         &GltfAsset,
-    pose:          &Pose,
-    upload_ctx:    &MeshUploadCtx,
+    asset: &GltfAsset,
+    pose: &Pose,
+    upload_ctx: &MeshUploadCtx,
     material_sets: &[Option<vk::DescriptorSet>],
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     build_graphics_plans_full(asset, pose, upload_ctx, material_sets, &Default::default())
@@ -552,7 +646,7 @@ pub fn build_graphics_plans_with_pose_and_materials(
 /// time by `upload_all_primitive_meshes`. O(1) lookup via flat-index arithmetic.
 pub struct MeshTable {
     /// Flattened storage: mesh 0 prims first, then mesh 1, etc.
-    meshes:  ThinVec<Arc<GpuMesh>>,
+    meshes: ThinVec<Arc<GpuMesh>>,
     /// `offsets[mesh_idx]` is the index into `meshes` where that mesh starts.
     offsets: ThinVec<u32>,
 }
@@ -572,7 +666,7 @@ impl MeshTable {
 pub struct SkinningFrame {
     /// (mesh_idx, prim_idx, buffer) — per-vertex joints+weights buffer.
     /// Uploaded once per primitive at asset-load time. Linear scan; < 10 entries.
-    pub skin_vertex_buffers:  ThinVec<(u32, u32, vk::Buffer)>,
+    pub skin_vertex_buffers: ThinVec<(u32, u32, vk::Buffer)>,
     /// (node_idx, descriptor_set) — skin-palette set bound at set 2.
     /// Allocated per frame from a recyclable descriptor pool.
     pub palette_sets_by_node: ThinVec<(u32, vk::DescriptorSet)>,
@@ -581,13 +675,15 @@ pub struct SkinningFrame {
 impl SkinningFrame {
     #[inline]
     pub fn skin_vb(&self, mesh: u32, prim: u32) -> Option<vk::Buffer> {
-        self.skin_vertex_buffers.iter()
+        self.skin_vertex_buffers
+            .iter()
             .find(|(m, p, _)| *m == mesh && *p == prim)
             .map(|(_, _, b)| *b)
     }
     #[inline]
     pub fn palette_set(&self, node: u32) -> Option<vk::DescriptorSet> {
-        self.palette_sets_by_node.iter()
+        self.palette_sets_by_node
+            .iter()
             .find(|(n, _)| *n == node)
             .map(|(_, s)| *s)
     }
@@ -602,14 +698,19 @@ impl SkinningFrame {
 /// the draw is recorded with `vertex_buffer_override = Some(buf)` so the
 /// rasterizer fetches the posed vertices directly out of the compute output.
 pub fn build_graphics_plans_full(
-    asset:         &GltfAsset,
-    pose:          &Pose,
-    upload_ctx:    &MeshUploadCtx,
+    asset: &GltfAsset,
+    pose: &Pose,
+    upload_ctx: &MeshUploadCtx,
     material_sets: &[Option<vk::DescriptorSet>],
     morph_buffers: &ThinVec<(u32, u32, vk::Buffer)>,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     build_graphics_plans_maximal(
-        asset, pose, upload_ctx, material_sets, morph_buffers, &SkinningFrame::default(),
+        asset,
+        pose,
+        upload_ctx,
+        material_sets,
+        morph_buffers,
+        &SkinningFrame::default(),
     )
 }
 
@@ -619,10 +720,10 @@ pub fn build_graphics_plans_full(
 /// `build_graphics_plans_*_with_meshes` call so meshes survive across
 /// frames instead of churning every redraw.
 pub fn upload_all_primitive_meshes(
-    asset:      &GltfAsset,
+    asset: &GltfAsset,
     upload_ctx: &MeshUploadCtx,
 ) -> ForgeResult<MeshTable> {
-    let mut meshes  = ThinVec::with_capacity(64);
+    let mut meshes = ThinVec::with_capacity(64);
     let mut offsets = ThinVec::with_capacity(asset.meshes.len());
     for (mi, mesh) in asset.meshes.iter().enumerate() {
         offsets.push(meshes.len() as u32);
@@ -643,16 +744,20 @@ pub fn upload_all_primitive_meshes(
 /// Uploads new `GpuMesh` instances inline per call — for cross-frame
 /// reuse, see `build_graphics_plans_maximal_with_meshes`.
 pub fn build_graphics_plans_maximal(
-    asset:         &GltfAsset,
-    pose:          &Pose,
-    upload_ctx:    &MeshUploadCtx,
+    asset: &GltfAsset,
+    pose: &Pose,
+    upload_ctx: &MeshUploadCtx,
     material_sets: &[Option<vk::DescriptorSet>],
     morph_buffers: &ThinVec<(u32, u32, vk::Buffer)>,
-    skinning:      &SkinningFrame,
+    skinning: &SkinningFrame,
 ) -> ForgeResult<ThinVec<GraphicsFramePlan>> {
     // Per-call inline mesh cache: 2D ThinVec indexed by mesh then prim.
     let mut cache: ThinVec<ThinVec<Option<Arc<GpuMesh>>>> = (0..asset.meshes.len())
-        .map(|i| (0..asset.meshes[i].primitives.len()).map(|_| None).collect())
+        .map(|i| {
+            (0..asset.meshes[i].primitives.len())
+                .map(|_| None)
+                .collect()
+        })
         .collect();
 
     let draws = build_graphics_draws_with_matrices(asset, &pose.world);
@@ -668,8 +773,16 @@ pub fn build_graphics_plans_maximal(
 
         let node = &asset.nodes[d.node as usize];
         let is_skinned = node.skin.is_some() && primitive_is_skinned(asset, d.mesh, d.primitive);
-        let skin_vb    = if is_skinned { skinning.skin_vb(d.mesh, d.primitive) } else { None };
-        let palette_set = if is_skinned { skinning.palette_set(d.node) } else { None };
+        let skin_vb = if is_skinned {
+            skinning.skin_vb(d.mesh, d.primitive)
+        } else {
+            None
+        };
+        let palette_set = if is_skinned {
+            skinning.palette_set(d.node)
+        } else {
+            None
+        };
 
         let mut plan = GraphicsFramePlan::new_mesh(
             crate::forge_master::frame::FrameId::new((i + 1) as i64),
@@ -679,23 +792,28 @@ pub fn build_graphics_plans_maximal(
             mesh,
         )
         .with_mvp(d.world_matrix);
-        if let Some(mat_idx) = d.material {
-            if let Some(Some(set)) = material_sets.get(mat_idx as usize) {
-                plan = plan.with_material_set(*set);
-            }
+        if let Some(mat_idx) = d.material
+            && let Some(Some(set)) = material_sets.get(mat_idx as usize)
+        {
+            plan = plan.with_material_set(*set);
         }
-        if let Some(buf) = morph_buffers.iter()
+        if let Some(buf) = morph_buffers
+            .iter()
             .find(|(m, p, _)| *m == d.mesh && *p == d.primitive)
             .map(|(_, _, b)| *b)
         {
             plan = plan.with_vertex_buffer_override(buf);
         }
-        if is_skinned && skin_vb.is_some() && palette_set.is_some() {
-            plan = plan
-                .with_kind(GraphicsOreKind::SkinnedForwardLit)
-                .with_skin_vertex_buffer(skin_vb.unwrap())
-                .with_skin_palette_set(palette_set.unwrap());
-            plans.push(plan);
+        if is_skinned {
+            if let (Some(svb), Some(ps)) = (skin_vb, palette_set) {
+                plan = plan
+                    .with_kind(GraphicsOreKind::SkinnedForwardLit)
+                    .with_skin_vertex_buffer(svb)
+                    .with_skin_palette_set(ps);
+                plans.push(plan);
+            } else {
+                plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
+            }
         } else {
             plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
         }
@@ -713,14 +831,18 @@ pub fn build_graphics_plans_maximal(
 pub fn pack_primitive_skin_attrs(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> Vec<u8> {
     let prim = &asset.meshes[mesh_idx as usize].primitives[prim_idx as usize];
     let n = prim.streams.positions.len();
-    let joints0  = prim.streams.joints.first();
+    let joints0 = prim.streams.joints.first();
     let weights0 = prim.streams.weights.first();
-    if joints0.is_none() || weights0.is_none() { return Vec::new(); }
-    let joints  = joints0.unwrap();
+    if joints0.is_none() || weights0.is_none() {
+        return Vec::new();
+    }
+    let joints = joints0.unwrap();
     let weights = weights0.unwrap();
 
     #[cfg(target_arch = "x86_64")]
-    unsafe { return pack_skin_attrs_sse2(n, joints, weights); }
+    unsafe {
+        pack_skin_attrs_sse2(n, joints, weights)
+    }
     #[cfg(not(target_arch = "x86_64"))]
     pack_skin_attrs_scalar(n, joints, weights)
 }
@@ -735,7 +857,9 @@ fn pack_skin_attrs_scalar(n: usize, joints: &[[u16; 4]], weights: &[[f32; 4]]) -
         let xy1 = (j[2] as u32) | ((j[3] as u32) << 16);
         out.extend_from_slice(&xy0.to_le_bytes());
         out.extend_from_slice(&xy1.to_le_bytes());
-        for v in w { out.extend_from_slice(&v.to_le_bytes()); }
+        for v in w {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
     }
     out
 }
@@ -749,15 +873,10 @@ fn pack_skin_attrs_scalar(n: usize, joints: &[[u16; 4]], weights: &[[f32; 4]]) -
 /// wrapping). Weight stores are direct 16-byte writes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-unsafe fn pack_skin_attrs_sse2(
-    n:       usize,
-    joints:  &[[u16; 4]],
-    weights: &[[f32; 4]],
-) -> Vec<u8> {
+unsafe fn pack_skin_attrs_sse2(n: usize, joints: &[[u16; 4]], weights: &[[f32; 4]]) -> Vec<u8> {
     use std::arch::x86_64::*;
     unsafe {
-        let mut out = Vec::with_capacity(n * 24);
-        out.set_len(n * 24);
+        let mut out = vec![0u8; n * 24];
         let dst: *mut u8 = out.as_mut_ptr();
 
         for i in 0..n {
@@ -799,7 +918,9 @@ pub fn skin_palette_frame_id(asset: &GltfAsset, skin_idx: usize) -> Option<Frame
     let mut next: i64 = 1;
     for si in 0..asset.skins.len() {
         if asset.skins.get(si).is_some_and(|s| !s.joints.is_empty()) {
-            if si == skin_idx { return Some(FrameId::new(next)); }
+            if si == skin_idx {
+                return Some(FrameId::new(next));
+            }
             next += 1;
         }
     }
@@ -811,14 +932,20 @@ pub fn skin_palette_frame_id(asset: &GltfAsset, skin_idx: usize) -> Option<Frame
 /// just wrote, ready to be bound as set 2 binding 0 on the
 /// `SkinnedForwardLit` pipeline.
 pub fn collect_skin_palette_buffers(
-    asset:   &GltfAsset,
+    asset: &GltfAsset,
     factory: &crate::render::factory_master::factory::Factory,
 ) -> ThinVec<(u32, vk::Buffer)> {
     let mut out = ThinVec::new();
     for si in 0..asset.skins.len() {
-        let Some(id) = skin_palette_frame_id(asset, si) else { continue };
-        let Some(frame) = factory.frame_by_id(id) else { continue };
-        let Some(ingot) = frame.ingots.first() else { continue };
+        let Some(id) = skin_palette_frame_id(asset, si) else {
+            continue;
+        };
+        let Some(frame) = factory.frame_by_id(id) else {
+            continue;
+        };
+        let Some(ingot) = frame.ingots.first() else {
+            continue;
+        };
         if let Some(buf) = ingot.result_buffer() {
             out.push((si as u32, buf.handle));
         }
@@ -843,7 +970,7 @@ pub fn compute_asset_aabb(asset: &GltfAsset, pose: &Pose) -> ([f32; 3], [f32; 3]
     #[cfg(target_arch = "x86_64")]
     unsafe {
         let (mn, mx) = compute_asset_aabb_sse2(asset, &draws);
-        return finalize_aabb(mn, mx);
+        finalize_aabb(mn, mx)
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -871,12 +998,15 @@ fn compute_asset_aabb_scalar(
         let prim = &asset.meshes[d.mesh as usize].primitives[d.primitive as usize];
         let w = d.world_matrix;
         for p in prim.streams.positions.iter() {
-            let x = w[0] * p[0] + w[4] * p[1] + w[8]  * p[2] + w[12];
-            let y = w[1] * p[0] + w[5] * p[1] + w[9]  * p[2] + w[13];
+            let x = w[0] * p[0] + w[4] * p[1] + w[8] * p[2] + w[12];
+            let y = w[1] * p[0] + w[5] * p[1] + w[9] * p[2] + w[13];
             let z = w[2] * p[0] + w[6] * p[1] + w[10] * p[2] + w[14];
-            mn[0] = mn[0].min(x); mx[0] = mx[0].max(x);
-            mn[1] = mn[1].min(y); mx[1] = mx[1].max(y);
-            mn[2] = mn[2].min(z); mx[2] = mx[2].max(z);
+            mn[0] = mn[0].min(x);
+            mx[0] = mx[0].max(x);
+            mn[1] = mn[1].min(y);
+            mx[1] = mx[1].max(y);
+            mn[2] = mn[2].min(z);
+            mx[2] = mx[2].max(z);
         }
     }
     (mn, mx)
@@ -899,7 +1029,7 @@ unsafe fn compute_asset_aabb_sse2(
 ) -> ([f32; 3], [f32; 3]) {
     use std::arch::x86_64::*;
     unsafe {
-        let inf  = _mm_set1_ps(f32::INFINITY);
+        let inf = _mm_set1_ps(f32::INFINITY);
         let ninf = _mm_set1_ps(f32::NEG_INFINITY);
         let mut mn_v = inf;
         let mut mx_v = ninf;
@@ -933,8 +1063,10 @@ unsafe fn compute_asset_aabb_sse2(
         let mut mx_buf = [0f32; 4];
         _mm_storeu_ps(mn_buf.as_mut_ptr(), mn_v);
         _mm_storeu_ps(mx_buf.as_mut_ptr(), mx_v);
-        ([mn_buf[0], mn_buf[1], mn_buf[2]],
-         [mx_buf[0], mx_buf[1], mx_buf[2]])
+        (
+            [mn_buf[0], mn_buf[1], mn_buf[2]],
+            [mx_buf[0], mx_buf[1], mx_buf[2]],
+        )
     }
 }
 
@@ -944,18 +1076,14 @@ unsafe fn compute_asset_aabb_sse2(
 ///
 /// This walks every vertex via `compute_asset_aabb` — call once at load
 /// time and reuse the AABB across frames via `view_projection_from_aabb`.
-pub fn default_view_projection(
-    asset: &GltfAsset, pose: &Pose, viewport_aspect: f32,
-) -> [f32; 16] {
+pub fn default_view_projection(asset: &GltfAsset, pose: &Pose, viewport_aspect: f32) -> [f32; 16] {
     let aabb = compute_asset_aabb(asset, pose);
     view_projection_from_aabb(&aabb, viewport_aspect)
 }
 
 /// Same camera-fit math, but driven by a pre-computed AABB so per-frame
 /// callers avoid the O(vertices) walk.
-pub fn view_projection_from_aabb(
-    aabb: &([f32; 3], [f32; 3]), viewport_aspect: f32,
-) -> [f32; 16] {
+pub fn view_projection_from_aabb(aabb: &([f32; 3], [f32; 3]), viewport_aspect: f32) -> [f32; 16] {
     let (mn, mx) = aabb;
     let center = [
         0.5 * (mn[0] + mx[0]),
@@ -969,13 +1097,17 @@ pub fn view_projection_from_aabb(
     ];
     let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
     let dist = radius * 2.5;
-    let eye = [center[0] + dist * 0.6, center[1] + dist * 0.4, center[2] + dist * 1.0];
+    let eye = [
+        center[0] + dist * 0.6,
+        center[1] + dist * 0.4,
+        center[2] + dist * 1.0,
+    ];
 
     let view = look_at_rh(eye, center, [0.0, 1.0, 0.0]);
     let fov_y = 50.0_f32.to_radians();
-    let near  = (radius * 0.01).max(0.001);
-    let far   = (radius * 10.0).max(100.0);
-    let proj  = perspective_rh_zo_y_down(fov_y, viewport_aspect.max(1e-3), near, far);
+    let near = (radius * 0.01).max(0.001);
+    let far = (radius * 10.0).max(100.0);
+    let proj = perspective_rh_zo_y_down(fov_y, viewport_aspect.max(1e-3), near, far);
     mat4_mul_cm(&proj, &view)
 }
 
@@ -985,10 +1117,22 @@ fn look_at_rh(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [f32; 16] {
     let s = normalize_v3(cross_v3(f, up));
     let u = cross_v3(s, f);
     [
-         s[0],  u[0], -f[0], 0.0,
-         s[1],  u[1], -f[1], 0.0,
-         s[2],  u[2], -f[2], 0.0,
-        -dot_v3(s, eye), -dot_v3(u, eye), dot_v3(f, eye), 1.0,
+        s[0],
+        u[0],
+        -f[0],
+        0.0,
+        s[1],
+        u[1],
+        -f[1],
+        0.0,
+        s[2],
+        u[2],
+        -f[2],
+        0.0,
+        -dot_v3(s, eye),
+        -dot_v3(u, eye),
+        dot_v3(f, eye),
+        1.0,
     ]
 }
 
@@ -996,9 +1140,9 @@ fn look_at_rh(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [f32; 16] {
 fn perspective_rh_zo_y_down(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
     let f = 1.0 / (fov_y * 0.5).tan();
     let mut m = [0f32; 16];
-    m[0]  =  f / aspect;
-    m[5]  = -f;                       // y-flip for Vulkan NDC
-    m[10] =  far / (near - far);
+    m[0] = f / aspect;
+    m[5] = -f; // y-flip for Vulkan NDC
+    m[10] = far / (near - far);
     m[11] = -1.0;
     m[14] = (far * near) / (near - far);
     m
@@ -1006,14 +1150,19 @@ fn perspective_rh_zo_y_down(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f3
 
 #[inline]
 fn cross_v3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1],
-     a[2] * b[0] - a[0] * b[2],
-     a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
-#[inline] fn dot_v3(a: [f32; 3], b: [f32; 3]) -> f32 { a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }
+#[inline]
+fn dot_v3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
 #[inline]
 fn normalize_v3(v: [f32; 3]) -> [f32; 3] {
-    let l = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt().max(1e-30);
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-30);
     [v[0] / l, v[1] / l, v[2] / l]
 }
 #[inline]
@@ -1022,7 +1171,9 @@ fn mat4_mul_cm(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     for c in 0..4 {
         for row in 0..4 {
             let mut s = 0f32;
-            for k in 0..4 { s += a[k * 4 + row] * b[c * 4 + k]; }
+            for k in 0..4 {
+                s += a[k * 4 + row] * b[c * 4 + k];
+            }
             r[c * 4 + row] = s;
         }
     }
@@ -1030,24 +1181,29 @@ fn mat4_mul_cm(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 }
 
 pub fn build_graphics_plans_maximal_with_meshes(
-    asset:         &GltfAsset,
-    pose:          &Pose,
-    meshes:        &MeshTable,
+    asset: &GltfAsset,
+    pose: &Pose,
+    meshes: &MeshTable,
     material_sets: &[Option<vk::DescriptorSet>],
     morph_buffers: &ThinVec<(u32, u32, vk::Buffer)>,
-    skinning:      &SkinningFrame,
+    skinning: &SkinningFrame,
 ) -> ThinVec<GraphicsFramePlan> {
     build_graphics_plans_maximal_with_meshes_vp(
-        asset, pose, meshes, material_sets, morph_buffers, skinning,
-        &IDENTITY_MAT4, None, &ThinVec::new(), None,
+        asset,
+        pose,
+        meshes,
+        material_sets,
+        morph_buffers,
+        skinning,
+        &IDENTITY_MAT4,
+        None,
+        &ThinVec::new(),
+        None,
     )
 }
 
 const IDENTITY_MAT4: [f32; 16] = [
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 1.0, 0.0,
-    0.0, 0.0, 0.0, 1.0,
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
 /// Same as `build_graphics_plans_maximal_with_meshes`, but multiplies a
@@ -1061,28 +1217,38 @@ const IDENTITY_MAT4: [f32; 16] = [
 /// `cache.create_instance_matrices_set`. Draws without an entry fall back
 /// to `dummy_instance_set` (1×identity); callers must call
 /// `cache.ensure_dummy_instance_matrices` first to obtain it.
+#[allow(clippy::too_many_arguments)]
 pub fn build_graphics_plans_maximal_with_meshes_vp(
-    asset:              &GltfAsset,
-    pose:               &Pose,
-    meshes:             &MeshTable,
-    material_sets:      &[Option<vk::DescriptorSet>],
-    morph_buffers:      &ThinVec<(u32, u32, vk::Buffer)>,
-    skinning:           &SkinningFrame,
-    view_proj:          &[f32; 16],
-    fallback_material:  Option<vk::DescriptorSet>,
-    instance_sets:      &[(u32, u32, vk::DescriptorSet)],
+    asset: &GltfAsset,
+    pose: &Pose,
+    meshes: &MeshTable,
+    material_sets: &[Option<vk::DescriptorSet>],
+    morph_buffers: &ThinVec<(u32, u32, vk::Buffer)>,
+    skinning: &SkinningFrame,
+    view_proj: &[f32; 16],
+    fallback_material: Option<vk::DescriptorSet>,
+    instance_sets: &[(u32, u32, vk::DescriptorSet)],
     dummy_instance_set: Option<vk::DescriptorSet>,
 ) -> ThinVec<GraphicsFramePlan> {
     let draws = build_graphics_draws_with_matrices(asset, &pose.world);
     let mut plans = ThinVec::with_capacity(draws.len());
     for (i, d) in draws.iter().enumerate() {
-        let Some(mesh) = meshes.get(d.mesh as usize, d.primitive as usize) else { continue };
+        let Some(mesh) = meshes.get(d.mesh as usize, d.primitive as usize) else {
+            continue;
+        };
 
         let node = &asset.nodes[d.node as usize];
-        let is_skinned = node.skin.is_some()
-            && primitive_is_skinned(asset, d.mesh, d.primitive);
-        let skin_vb     = if is_skinned { skinning.skin_vb(d.mesh, d.primitive) }    else { None };
-        let palette_set = if is_skinned { skinning.palette_set(d.node) } else { None };
+        let is_skinned = node.skin.is_some() && primitive_is_skinned(asset, d.mesh, d.primitive);
+        let skin_vb = if is_skinned {
+            skinning.skin_vb(d.mesh, d.primitive)
+        } else {
+            None
+        };
+        let palette_set = if is_skinned {
+            skinning.palette_set(d.node)
+        } else {
+            None
+        };
 
         let mvp = mat4_mul_cm(view_proj, &d.world_matrix);
         let mut plan = GraphicsFramePlan::new_mesh(
@@ -1093,13 +1259,15 @@ pub fn build_graphics_plans_maximal_with_meshes_vp(
             mesh.clone(),
         )
         .with_mvp(mvp);
-        let resolved_set = d.material
+        let resolved_set = d
+            .material
             .and_then(|m| material_sets.get(m as usize).copied().flatten())
             .or(fallback_material);
         if let Some(set) = resolved_set {
             plan = plan.with_material_set(set);
         }
-        if let Some(buf) = morph_buffers.iter()
+        if let Some(buf) = morph_buffers
+            .iter()
             .find(|(m, p, _)| *m == d.mesh && *p == d.primitive)
             .map(|(_, _, b)| *b)
         {
@@ -1107,21 +1275,28 @@ pub fn build_graphics_plans_maximal_with_meshes_vp(
         }
         if !d.instance_matrices.is_empty() {
             plan = plan.with_instances(d.instance_matrices.len() as u32);
-            let inst_set = instance_sets.iter()
+            let inst_set = instance_sets
+                .iter()
                 .find(|(m, p, _)| *m == d.mesh && *p == d.primitive)
                 .map(|(_, _, s)| *s)
                 .or(dummy_instance_set);
-            if let Some(set) = inst_set { plan = plan.with_instance_set(set); }
+            if let Some(set) = inst_set {
+                plan = plan.with_instance_set(set);
+            }
         } else if let Some(set) = dummy_instance_set {
             plan = plan.with_instance_set(set);
         }
 
-        if is_skinned && skin_vb.is_some() && palette_set.is_some() {
-            plan = plan
-                .with_kind(GraphicsOreKind::SkinnedForwardLit)
-                .with_skin_vertex_buffer(skin_vb.unwrap())
-                .with_skin_palette_set(palette_set.unwrap());
-            plans.push(plan);
+        if is_skinned {
+            if let (Some(svb), Some(ps)) = (skin_vb, palette_set) {
+                plan = plan
+                    .with_kind(GraphicsOreKind::SkinnedForwardLit)
+                    .with_skin_vertex_buffer(svb)
+                    .with_skin_palette_set(ps);
+                plans.push(plan);
+            } else {
+                plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
+            }
         } else {
             plans.push(plan_with_kind(plan, graphics_kind_to_ore(d.kind)));
         }
@@ -1134,12 +1309,22 @@ fn primitive_to_mesh_ore(asset: &GltfAsset, mesh_idx: u32, prim_idx: u32) -> Mes
     let n = prim.streams.positions.len();
     let uv0 = prim.streams.uv_sets.first();
     let vertices: ThinVec<ForgeVertex> = (0..n)
-        .map(|i| ForgeVertex::new(
-            prim.streams.positions[i],
-            prim.streams.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
-            prim.streams.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
-            uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]),
-        ))
+        .map(|i| {
+            ForgeVertex::new(
+                prim.streams.positions[i],
+                prim.streams
+                    .normals
+                    .get(i)
+                    .copied()
+                    .unwrap_or([0.0, 1.0, 0.0]),
+                prim.streams
+                    .tangents
+                    .get(i)
+                    .copied()
+                    .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]),
+            )
+        })
         .collect();
     MeshOre::new(vertices, prim.indices.clone())
 }
@@ -1211,7 +1396,9 @@ mod tests {
     fn missing_uvs_default_to_zero() {
         let glb = build_test_glb(&triangle_pos(), None, None, None);
         let ore = load_first_mesh_from_slice(&glb).unwrap();
-        for v in &ore.vertices { assert_eq!(v.uv, [0.0, 0.0]); }
+        for v in &ore.vertices {
+            assert_eq!(v.uv, [0.0, 0.0]);
+        }
     }
 
     #[test]
@@ -1225,9 +1412,12 @@ mod tests {
     #[test]
     fn quad_vertex_and_index_counts() {
         let pos = vec![
-            [-1.0_f32,-1.0,0.0],[1.0,-1.0,0.0],[1.0,1.0,0.0],[-1.0,1.0,0.0],
+            [-1.0_f32, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
         ];
-        let glb = build_test_glb(&pos, None, None, Some(&[0,1,2, 2,3,0]));
+        let glb = build_test_glb(&pos, None, None, Some(&[0, 1, 2, 2, 3, 0]));
         let ore = load_first_mesh_from_slice(&glb).unwrap();
         assert_eq!(ore.vertices.len(), 4);
         assert_eq!(ore.indices.len(), 6);
@@ -1293,11 +1483,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn pack_skin_attrs_simd_matches_scalar() {
-        let joints = vec![
-            [0u16, 1, 2, 3],
-            [10, 20, 30, 40],
-            [u16::MAX, 0, 5, 7],
-        ];
+        let joints = vec![[0u16, 1, 2, 3], [10, 20, 30, 40], [u16::MAX, 0, 5, 7]];
         let weights = vec![
             [0.25_f32, 0.25, 0.25, 0.25],
             [0.7, 0.1, 0.15, 0.05],
@@ -1305,7 +1491,10 @@ mod tests {
         ];
         let scalar = pack_skin_attrs_scalar(joints.len(), &joints, &weights);
         let simd = unsafe { pack_skin_attrs_sse2(joints.len(), &joints, &weights) };
-        assert_eq!(scalar, simd, "SIMD packer must match scalar packer byte-for-byte");
+        assert_eq!(
+            scalar, simd,
+            "SIMD packer must match scalar packer byte-for-byte"
+        );
     }
 
     /// AABB SIMD path must match the scalar reference. Builds the draws
@@ -1323,30 +1512,40 @@ mod tests {
         // world matrix so the SIMD vs scalar paths get real work to do.
         if draws.is_empty() && !asset.meshes.is_empty() && !asset.meshes[0].primitives.is_empty() {
             draws.push(forge_gltf::GraphicsDraw {
-                kind:         forge_gltf::GltfGraphicsKind::ForwardLit,
-                mesh:         0,
-                primitive:    0,
-                node:         0,
+                kind: forge_gltf::GltfGraphicsKind::ForwardLit,
+                mesh: 0,
+                primitive: 0,
+                node: 0,
                 world_matrix: [
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    10.0, 20.0, 30.0, 1.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 10.0, 20.0, 30.0,
+                    1.0,
                 ],
-                topology:     forge_gltf::PrimitiveTopology::Triangles,
-                material:     None,
+                topology: forge_gltf::PrimitiveTopology::Triangles,
+                material: None,
                 vertex_count: asset.meshes[0].primitives[0].streams.positions.len() as u32,
-                index_count:  asset.meshes[0].primitives[0].indices.len() as u32,
+                index_count: asset.meshes[0].primitives[0].indices.len() as u32,
                 instance_matrices: thin_vec::ThinVec::new(),
             });
         }
         let (mn_s, mx_s) = compute_asset_aabb_scalar(&asset, &draws);
         let (mn_v, mx_v) = unsafe { compute_asset_aabb_sse2(&asset, &draws) };
         for i in 0..3 {
-            assert!(mn_s[i].is_finite() && mn_v[i].is_finite(),
-                    "AABB went to infinity — no draws executed");
-            assert!((mn_s[i] - mn_v[i]).abs() < 1e-5, "min[{i}]: scalar={} simd={}", mn_s[i], mn_v[i]);
-            assert!((mx_s[i] - mx_v[i]).abs() < 1e-5, "max[{i}]: scalar={} simd={}", mx_s[i], mx_v[i]);
+            assert!(
+                mn_s[i].is_finite() && mn_v[i].is_finite(),
+                "AABB went to infinity — no draws executed"
+            );
+            assert!(
+                (mn_s[i] - mn_v[i]).abs() < 1e-5,
+                "min[{i}]: scalar={} simd={}",
+                mn_s[i],
+                mn_v[i]
+            );
+            assert!(
+                (mx_s[i] - mx_v[i]).abs() < 1e-5,
+                "max[{i}]: scalar={} simd={}",
+                mx_s[i],
+                mx_v[i]
+            );
         }
     }
 }

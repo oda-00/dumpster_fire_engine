@@ -15,18 +15,18 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use dumpster_fire_engine::resource_manager::event_manager::script::{
-    ActiveScript, ScriptManager,
-};
+use dumpster_fire_engine::resource_manager::event_manager::script::{ActiveScript, ScriptManager};
 use dumpster_fire_engine::resource_manager::event_manager::script_abi::{
-    EffectSink, engine_api_for_sink, effect_kind,
+    EffectSink, effect_kind, engine_api_for_sink,
 };
 
 fn fnv1a(data: &[u8]) -> u64 {
     const OFFSET: u64 = 0xcbf29ce484222325;
-    const PRIME:  u64 = 0x100000001b3;
+    const PRIME: u64 = 0x100000001b3;
     let mut h = OFFSET;
-    for &b in data { h = (h ^ b as u64).wrapping_mul(PRIME); }
+    for &b in data {
+        h = (h ^ b as u64).wrapping_mul(PRIME);
+    }
     h
 }
 
@@ -94,12 +94,13 @@ fn write_temp(name: &str, body: &str) -> std::path::PathBuf {
 #[test]
 fn compile_load_and_tick_guard_script() {
     let langc = locate_langc();
-    let src   = write_temp("guard.lang", GUARD_LANG);
-    let out   = src.with_extension("so");
+    let src = write_temp("guard.lang", GUARD_LANG);
+    let out = src.with_extension("so");
 
     let status = Command::new(&langc)
         .arg(&src)
-        .arg("-o").arg(&out)
+        .arg("-o")
+        .arg(&out)
         .status()
         .expect("spawn langc");
     assert!(status.success(), "langc failed");
@@ -115,12 +116,17 @@ fn compile_load_and_tick_guard_script() {
     // State size = i32(4) + 4 pad + f64(8) = 16 bytes (alignment 8).
     assert_eq!(entry.state_size(), 16, "state_size from compiled .so");
     let v = entry.state_version();
-    assert_ne!(v, 0, "state_version is hashed, non-zero for non-empty layout");
+    assert_ne!(
+        v, 0,
+        "state_version is hashed, non-zero for non-empty layout"
+    );
 
     // df_init_state should zero+default-init.  Patrol_index = 0, alert_time = 0.0.
     let mut state: thin_vec::ThinVec<u8> = thin_vec::ThinVec::with_capacity(16);
     state.resize(16, 0xAAu8);
-    unsafe { (entry.init_state)(state.as_mut_ptr()); }
+    unsafe {
+        (entry.init_state)(state.as_mut_ptr());
+    }
     // patrol_index at offset 0 → i32 zero
     assert_eq!(i32::from_ne_bytes(state[0..4].try_into().unwrap()), 0);
     // last_alert_time at offset 8 → f64 zero
@@ -135,7 +141,9 @@ fn compile_load_and_tick_guard_script() {
     let api = engine_api_for_sink(&mut sink);
 
     // on_enter fires "cue_troupe(\"walk\")" → cb_cue_troupe with the FNV hash.
-    unsafe { (patrol.on_enter)(&api, state.as_mut_ptr()); }
+    unsafe {
+        (patrol.on_enter)(&api, state.as_mut_ptr());
+    }
     assert_eq!(sink.cues.len(), 1, "cue_troupe should fire once on_enter");
     // FNV-1a 64-bit of "walk":
     assert_eq!(sink.cues[0] as u64, fnv1a(b"walk"));
@@ -147,7 +155,10 @@ fn compile_load_and_tick_guard_script() {
     // patrol_path → push_effect with kind = PATROL_PATH.
     // (api built above already has actor_count = 0)
     let next = unsafe { (patrol.tick)(&api, state.as_mut_ptr()) };
-    assert_eq!(next, 0, "transition (after_seconds 1.5) shouldn't fire at elapsed=0");
+    assert_eq!(
+        next, 0,
+        "transition (after_seconds 1.5) shouldn't fire at elapsed=0"
+    );
     assert_eq!(sink.entries.len(), 1, "patrol_path effect emitted");
     assert_eq!(sink.entries[0].kind, effect_kind::PATROL_PATH);
 
@@ -157,17 +168,29 @@ fn compile_load_and_tick_guard_script() {
     let mut api2 = engine_api_for_sink(&mut sink);
     api2.elapsed = 2.0;
     let next = unsafe { (patrol.tick)(&api2, state.as_mut_ptr()) };
-    assert_ne!(next, 0, "transition (after_seconds 1.5) must fire at elapsed=2.0");
+    assert_ne!(
+        next, 0,
+        "transition (after_seconds 1.5) must fire at elapsed=2.0"
+    );
     // raw_id derived as FNV-1a of "guard::alert".
     let alert_raw = {
         let mut h = 0xcbf29ce484222325u64;
         const P: u64 = 0x100000001b3;
-        for &b in b"guard"   { h = (h ^ b as u64).wrapping_mul(P); }
-        for &b in b"::"      { h = (h ^ b as u64).wrapping_mul(P); }
-        for &b in b"alert"   { h = (h ^ b as u64).wrapping_mul(P); }
+        for &b in b"guard" {
+            h = (h ^ b as u64).wrapping_mul(P);
+        }
+        for &b in b"::" {
+            h = (h ^ b as u64).wrapping_mul(P);
+        }
+        for &b in b"alert" {
+            h = (h ^ b as u64).wrapping_mul(P);
+        }
         h as i64
     };
-    assert_eq!(next, alert_raw, "transition target must be the alert scene's raw_id");
+    assert_eq!(
+        next, alert_raw,
+        "transition target must be the alert scene's raw_id"
+    );
 
     let _ = sink.tick.fetch_add(1, Ordering::Relaxed);
     mgr.unload(id);
@@ -209,22 +232,32 @@ fn active_script_ticks_through_transitions_and_migrates_state() {
 
     // ── v1: state is just `x: i32 = 5` ──────────────────────────────────────
     let v1_src = write_temp("migrate_v1.lang", MIGRATE_V1);
-    let v1_so  = v1_src.with_extension("so");
-    let status = Command::new(&langc).arg(&v1_src).arg("-o").arg(&v1_so).status().unwrap();
+    let v1_so = v1_src.with_extension("so");
+    let status = Command::new(&langc)
+        .arg(&v1_src)
+        .arg("-o")
+        .arg(&v1_so)
+        .status()
+        .unwrap();
     assert!(status.success());
 
     let mut mgr = ScriptManager::new();
-    let v1_id = mgr.load_from_file(Arc::from(v1_so.to_string_lossy().as_ref())).unwrap();
+    let v1_id = mgr
+        .load_from_file(Arc::from(v1_so.to_string_lossy().as_ref()))
+        .unwrap();
     let v1_entry = mgr.get_entry_points(v1_id).unwrap();
     assert_eq!(v1_entry.state_size(), 4); // i32 only
 
     // Build an ActiveScript and tick it twice via the helper.
     let mut script = ActiveScript::from_entry(v1_id, v1_entry);
     // Default value `x = 5` lives at offset 0:
-    assert_eq!(i32::from_ne_bytes(script.state_buffer[0..4].try_into().unwrap()), 5);
+    assert_eq!(
+        i32::from_ne_bytes(script.state_buffer[0..4].try_into().unwrap()),
+        5
+    );
 
     let mut sink = EffectSink::new();
-    let mut api  = engine_api_for_sink(&mut sink);
+    let mut api = engine_api_for_sink(&mut sink);
     let _ = script.tick(v1_entry, &mut api, 0.016);
     assert_eq!(sink.entries.len(), 1);
     assert_eq!(sink.entries[0].kind, effect_kind::ATTACK);
@@ -235,11 +268,18 @@ fn active_script_ticks_through_transitions_and_migrates_state() {
     let v1_version = v1_entry.state_version();
     let v2_body = MIGRATE_V2.replace("{V1_VERSION}", &v1_version.to_string());
     let v2_src = write_temp("migrate_v2.lang", &v2_body);
-    let v2_so  = v2_src.with_extension("so");
-    let status = Command::new(&langc).arg(&v2_src).arg("-o").arg(&v2_so).status().unwrap();
+    let v2_so = v2_src.with_extension("so");
+    let status = Command::new(&langc)
+        .arg(&v2_src)
+        .arg("-o")
+        .arg(&v2_so)
+        .status()
+        .unwrap();
     assert!(status.success());
 
-    let v2_id = mgr.load_from_file(Arc::from(v2_so.to_string_lossy().as_ref())).unwrap();
+    let v2_id = mgr
+        .load_from_file(Arc::from(v2_so.to_string_lossy().as_ref()))
+        .unwrap();
     let v2_entry = mgr.get_entry_points(v2_id).unwrap();
     assert_eq!(v2_entry.state_size(), 16);
 
@@ -254,7 +294,10 @@ fn active_script_ticks_through_transitions_and_migrates_state() {
     let x = i32::from_ne_bytes(script.state_buffer[0..4].try_into().unwrap());
     let y = f64::from_ne_bytes(script.state_buffer[8..16].try_into().unwrap());
     assert_eq!(x, 5, "x must be carried over from old layout via `old.x`");
-    assert!((y - 1.5).abs() < 1e-12, "y must come from the explicit migration assignment");
+    assert!(
+        (y - 1.5).abs() < 1e-12,
+        "y must come from the explicit migration assignment"
+    );
 
     mgr.unload(v1_id);
     mgr.unload(v2_id);

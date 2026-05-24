@@ -6,13 +6,15 @@
 //
 //   cargo bench --bench cache_ops
 
-use divan::{black_box, Bencher};
-use glam::Affine3A;
-use thin_vec::ThinVec;
+use divan::{Bencher, black_box};
 use dumpster_fire_engine::resource_manager::*;
+use glam::Affine3A;
 use std::sync::Arc;
+use thin_vec::ThinVec;
 
-fn main() { divan::main(); }
+fn main() {
+    divan::main();
+}
 
 const SIZES: &[usize] = &[64, 1024, 10_000];
 
@@ -20,19 +22,27 @@ fn build_world(n: usize) -> (World, LevelHandle, StageHandle, ThinVec<ActorHandl
     let mut w = World::new(WorldId::new(1));
     let lh = w.spawn_level(LevelId::new(1), "L");
     let sh = w.spawn_stage(lh, StageId::new(1), "S").unwrap();
-    let actors: ThinVec<_> = (0..n).map(|i| {
-        let aid = ActorId::new(i as i64 + 1);
-        let ah = w.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
-        w.spawn_sub_entity(
-            lh, sh, ah,
-            ActorType::Character(Character {
-                id: CharacterId::new(i as i64 + 1), name: "n".into(),
-                visible: true, physical: true, playable: false, mesh: None,
-            }),
-            Affine3A::IDENTITY,
-        );
-        ah
-    }).collect();
+    let actors: ThinVec<_> = (0..n)
+        .map(|i| {
+            let aid = ActorId::new(i as i64 + 1);
+            let ah = w.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
+            w.spawn_sub_entity(
+                lh,
+                sh,
+                ah,
+                ActorType::Character(Character {
+                    id: CharacterId::new(i as i64 + 1),
+                    name: "n".into(),
+                    visible: true,
+                    physical: true,
+                    playable: false,
+                    mesh: None,
+                }),
+                Affine3A::IDENTITY,
+            );
+            ah
+        })
+        .collect();
     w.propagate_transforms();
     (w, lh, sh, actors)
 }
@@ -43,16 +53,26 @@ fn build_world(n: usize) -> (World, LevelHandle, StageHandle, ThinVec<ActorHandl
 fn subentity_component_lookup_hit(b: Bencher) {
     let (mut w, lh, sh, actors) = build_world(1024);
     for &ah in &actors {
-        w.add_component(lh, sh, ah, 0, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
+        w.add_component(
+            lh,
+            sh,
+            ah,
+            0,
+            PhysicsComponent {
+                mass: 1.0,
+                velocity: (0.0, 0.0, 0.0),
+                acceleration: (0.0, 0.0, 0.0),
+            },
+        );
     }
     b.bench_local(|| {
         let mut hits = 0u64;
         for &ah in &actors {
             let actor = &w.levels[lh].stages[sh].actors[ah];
             for sub in actor.sub_entities.iter().flatten() {
-                if sub.component(black_box(ComponentType::Physics)).is_some() { hits += 1; }
+                if sub.component(black_box(ComponentType::Physics)).is_some() {
+                    hits += 1;
+                }
             }
         }
         hits
@@ -67,7 +87,9 @@ fn subentity_component_lookup_miss(b: Bencher) {
         for &ah in &actors {
             let actor = &w.levels[lh].stages[sh].actors[ah];
             for sub in actor.sub_entities.iter().flatten() {
-                if sub.component(black_box(ComponentType::Audio)).is_some() { hits += 1; }
+                if sub.component(black_box(ComponentType::Audio)).is_some() {
+                    hits += 1;
+                }
             }
         }
         hits
@@ -78,16 +100,26 @@ fn subentity_component_lookup_miss(b: Bencher) {
 fn subentity_has_component(b: Bencher) {
     let (mut w, lh, sh, actors) = build_world(1024);
     for &ah in &actors {
-        w.add_component(lh, sh, ah, 0, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
+        w.add_component(
+            lh,
+            sh,
+            ah,
+            0,
+            PhysicsComponent {
+                mass: 1.0,
+                velocity: (0.0, 0.0, 0.0),
+                acceleration: (0.0, 0.0, 0.0),
+            },
+        );
     }
     b.bench_local(|| {
         let mut hits = 0u64;
         for &ah in &actors {
             let actor = &w.levels[lh].stages[sh].actors[ah];
             for sub in actor.sub_entities.iter().flatten() {
-                if sub.has_component(black_box(ComponentType::Physics)) { hits += 1; }
+                if sub.has_component(black_box(ComponentType::Physics)) {
+                    hits += 1;
+                }
             }
         }
         hits
@@ -102,9 +134,17 @@ fn stage_add_component_first_time(b: Bencher) {
     b.with_inputs(|| build_world(256))
         .bench_local_values(|(mut w, lh, sh, actors)| {
             for &ah in &actors {
-                w.add_component(lh, sh, ah, 0, PhysicsComponent {
-                    mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-                });
+                w.add_component(
+                    lh,
+                    sh,
+                    ah,
+                    0,
+                    PhysicsComponent {
+                        mass: 1.0,
+                        velocity: (0.0, 0.0, 0.0),
+                        acceleration: (0.0, 0.0, 0.0),
+                    },
+                );
             }
             (w, actors)
         });
@@ -115,16 +155,32 @@ fn stage_add_component_idempotent(b: Bencher) {
     // Component already present → cache.contains returns true → no push.
     let (mut w, lh, sh, actors) = build_world(256);
     for &ah in &actors {
-        w.add_component(lh, sh, ah, 0, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
+        w.add_component(
+            lh,
+            sh,
+            ah,
+            0,
+            PhysicsComponent {
+                mass: 1.0,
+                velocity: (0.0, 0.0, 0.0),
+                acceleration: (0.0, 0.0, 0.0),
+            },
+        );
     }
     b.bench_local(|| {
         for &ah in &actors {
             // Re-add same component — cache.contains skips the push.
-            w.add_component(lh, sh, ah, 0, PhysicsComponent {
-                mass: 2.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-            });
+            w.add_component(
+                lh,
+                sh,
+                ah,
+                0,
+                PhysicsComponent {
+                    mass: 2.0,
+                    velocity: (0.0, 0.0, 0.0),
+                    acceleration: (0.0, 0.0, 0.0),
+                },
+            );
         }
     });
 }
@@ -135,9 +191,17 @@ fn stage_add_component_idempotent(b: Bencher) {
 fn stage_cache_scan(b: Bencher, n: usize) {
     let (mut w, lh, sh, actors) = build_world(n);
     for &ah in &actors {
-        w.add_component(lh, sh, ah, 0, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
+        w.add_component(
+            lh,
+            sh,
+            ah,
+            0,
+            PhysicsComponent {
+                mass: 1.0,
+                velocity: (0.0, 0.0, 0.0),
+                acceleration: (0.0, 0.0, 0.0),
+            },
+        );
     }
     let stage = &w.levels[lh].stages[sh];
     b.bench_local(|| {
@@ -158,12 +222,21 @@ fn level_despawn_actor_with_cache(b: Bencher, n: usize) {
     b.with_inputs(|| {
         let (mut w, lh, sh, actors) = build_world(n);
         for &ah in &actors {
-            w.add_component(lh, sh, ah, 0, PhysicsComponent {
-                mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-            });
+            w.add_component(
+                lh,
+                sh,
+                ah,
+                0,
+                PhysicsComponent {
+                    mass: 1.0,
+                    velocity: (0.0, 0.0, 0.0),
+                    acceleration: (0.0, 0.0, 0.0),
+                },
+            );
         }
         (w, lh, sh, actors)
-    }).bench_local_values(|(mut w, lh, sh, actors)| {
+    })
+    .bench_local_values(|(mut w, lh, sh, actors)| {
         for ah in actors {
             w.despawn_actor(lh, sh, ah);
         }
@@ -182,36 +255,65 @@ fn stage_despawn_subentity_partial_evict(b: Bencher) {
         let sh = w.spawn_stage(lh, StageId::new(1), "S").unwrap();
         let aid = ActorId::new(1);
         let ah = w.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
-        let cvi = w.spawn_sub_entity(
-            lh, sh, ah,
-            ActorType::Character(Character {
-                id: CharacterId::new(1), name: "c".into(),
-                visible: true, physical: true, playable: false, mesh: None,
-            }),
-            Affine3A::IDENTITY,
-        ).unwrap();
-        let ivi = w.spawn_sub_entity(
-            lh, sh, ah,
-            ActorType::Item(Item {
-                id:          ItemId::new(1),
-                name:        "i".into(),
-                quantity:    (1, 1, 1),
-                description: Arc::from(""),
-                stackable:   false,
-                visible:     true,
-                physical:    false,
-                mesh:        None,
-            }),
-            Affine3A::IDENTITY,
-        ).unwrap();
-        w.add_component(lh, sh, ah, cvi, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
-        w.add_component(lh, sh, ah, ivi, PhysicsComponent {
-            mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-        });
+        let cvi = w
+            .spawn_sub_entity(
+                lh,
+                sh,
+                ah,
+                ActorType::Character(Character {
+                    id: CharacterId::new(1),
+                    name: "c".into(),
+                    visible: true,
+                    physical: true,
+                    playable: false,
+                    mesh: None,
+                }),
+                Affine3A::IDENTITY,
+            )
+            .unwrap();
+        let ivi = w
+            .spawn_sub_entity(
+                lh,
+                sh,
+                ah,
+                ActorType::Item(Item {
+                    id: ItemId::new(1),
+                    name: "i".into(),
+                    quantity: (1, 1, 1),
+                    description: Arc::from(""),
+                    stackable: false,
+                    visible: true,
+                    physical: false,
+                    mesh: None,
+                }),
+                Affine3A::IDENTITY,
+            )
+            .unwrap();
+        w.add_component(
+            lh,
+            sh,
+            ah,
+            cvi,
+            PhysicsComponent {
+                mass: 1.0,
+                velocity: (0.0, 0.0, 0.0),
+                acceleration: (0.0, 0.0, 0.0),
+            },
+        );
+        w.add_component(
+            lh,
+            sh,
+            ah,
+            ivi,
+            PhysicsComponent {
+                mass: 1.0,
+                velocity: (0.0, 0.0, 0.0),
+                acceleration: (0.0, 0.0, 0.0),
+            },
+        );
         (w, lh, sh, ah, cvi, ivi)
-    }).bench_local_values(|(mut w, lh, sh, ah, cvi, ivi)| {
+    })
+    .bench_local_values(|(mut w, lh, sh, ah, cvi, ivi)| {
         w.despawn_sub_entity(lh, sh, ah, cvi); // partial: other still has Physics
         w.despawn_sub_entity(lh, sh, ah, ivi); // full: cache eviction triggers
         w

@@ -601,7 +601,11 @@ fn ensure_llvm_prebuilt() {
         "bin/llvm-config"
     });
 
-    if !llvm_config.exists() {
+    // Also check for the C API header that wrappers/target.c includes.
+    // A partial extraction (llvm-config present, include/ absent) would pass
+    // the binary check but fail at cc-rs compile time with a confusing error.
+    let include_sentinel = prefix.join("include").join("llvm-c").join("Target.h");
+    if !llvm_config.exists() || !include_sentinel.exists() {
         download_llvm_prebuilt_coordinated(&prefix, os, arch, &llvm_config);
     }
 
@@ -776,25 +780,29 @@ fn find_7z_windows() -> Option<PathBuf> {
 
 // Two-stage bootstrap to get a modern 7za.exe without any pre-installed tools:
 //
-//   Stage 1 — 7za920.zip (7-zip.org, ~374 KB) is a plain ZIP, so PowerShell's
-//              built-in Expand-Archive opens it. Gives us 7za 9.20.
+//   Stage 1 — 7za920.zip (7-zip.org, ~374 KB) is a plain ZIP so PowerShell's
+//              built-in Expand-Archive opens it without any tools. Gives 7za 9.20.
 //
-//   Stage 2 — 7za 9.20 added LZMA2 support, so it CAN open modern .7z archives.
-//              We use it to extract 7z2408-extra.7z (7-zip.org, ~800 KB), which
-//              contains 7za 24.08. That version understands NSIS 3.x installers
-//              (LLVM 18 uses NSIS 3.x; 7za 9.20 only knows NSIS 2.x).
+//   Stage 2 — 7za 9.20 supports LZMA2 so it can open modern .7z archives.
+//              We download 7z2601-extra.7z from GitHub releases (ip7z/7zip),
+//              which contains 7za 26.01. That version understands NSIS 3.x
+//              (LLVM 18 uses NSIS 3.x; 7za 9.20 only handles NSIS 2.x).
+//
+//   NOTE: the old stage-2 URL https://www.7-zip.org/a/7z2408-extra.7z now
+//   returns 404. GitHub releases are used instead — they are stable permanent
+//   URLs and don't get purged.
 fn bootstrap_7za_windows() -> Option<PathBuf> {
     println!(
-        "cargo:warning=7-Zip not found — bootstrapping modern 7za from 7-zip.org (~1.2 MB, one-time)..."
+        "cargo:warning=7-Zip not found — bootstrapping 7za 26.01 (~1.2 MB, one-time)..."
     );
 
     let tmp = std::env::temp_dir().join(format!("dfe_7za_bootstrap_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
 
-    // ── Stage 1: get 7za 9.20 via plain ZIP ───────────────────────────────────
+    // ── Stage 1: 7za920.zip → 7za 9.20 via PowerShell Expand-Archive ─────────
     let zip920 = tmp.join("7za920.zip");
     if !win_download("https://www.7-zip.org/a/7za920.zip", &zip920) {
-        println!("cargo:warning=7za bootstrap: stage-1 download failed.");
+        println!("cargo:warning=7za bootstrap: stage-1 download of 7za920.zip failed.");
         return None;
     }
     let s1 = tmp.join("s1");
@@ -816,14 +824,21 @@ fn bootstrap_7za_windows() -> Option<PathBuf> {
     }
     let old_7za = s1.join("7za.exe");
     if !old_7za.exists() {
-        println!("cargo:warning=7za bootstrap: 7za.exe not found after stage-1 extraction.");
+        println!("cargo:warning=7za bootstrap: 7za.exe not found in 7za920.zip.");
         return None;
     }
 
-    // ── Stage 2: use 7za 9.20 to extract 7z2408-extra.7z (LZMA2 .7z) ─────────
+    // ── Stage 2: 7za 9.20 extracts 7z2601-extra.7z → 7za 26.01 ──────────────
+    // Primary: GitHub releases (stable permanent URLs, not purged).
+    // Fallback: 7-zip.org direct (may drift over time).
     let extra = tmp.join("7z_extra.7z");
-    if !win_download("https://www.7-zip.org/a/7z2408-extra.7z", &extra) {
-        println!("cargo:warning=7za bootstrap: stage-2 download failed.");
+    let extra_urls = [
+        "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-extra.7z",
+        "https://www.7-zip.org/a/7z2601-extra.7z",
+    ];
+    let downloaded = extra_urls.iter().any(|url| win_download(url, &extra));
+    if !downloaded {
+        println!("cargo:warning=7za bootstrap: stage-2 download of 7z2601-extra.7z failed from all URLs.");
         return None;
     }
     let s2 = tmp.join("s2");
@@ -834,7 +849,7 @@ fn bootstrap_7za_windows() -> Option<PathBuf> {
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
-        println!("cargo:warning=7za bootstrap: stage-2 extraction failed.");
+        println!("cargo:warning=7za bootstrap: stage-2 extraction of 7z2601-extra.7z failed.");
         return None;
     }
 

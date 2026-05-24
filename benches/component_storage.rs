@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use thin_vec::ThinVec;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use dumpster_fire_engine::resource_manager::component::*;
+use std::collections::HashMap;
+use thin_vec::ThinVec;
 
 const N: usize = 10_000;
 
@@ -10,10 +10,20 @@ struct EntityMap {
 }
 
 impl EntityMap {
-    fn new() -> Self { Self { components: HashMap::new() } }
-    fn add(&mut self, c: Component) { self.components.insert(c.component_type(), c); }
-    fn get(&self, t: ComponentType) -> Option<&Component> { self.components.get(&t) }
-    fn has(&self, t: ComponentType) -> bool { self.components.contains_key(&t) }
+    fn new() -> Self {
+        Self {
+            components: HashMap::new(),
+        }
+    }
+    fn add(&mut self, c: Component) {
+        self.components.insert(c.component_type(), c);
+    }
+    fn get(&self, t: ComponentType) -> Option<&Component> {
+        self.components.get(&t)
+    }
+    fn has(&self, t: ComponentType) -> bool {
+        self.components.contains_key(&t)
+    }
 }
 
 struct EntityArr {
@@ -21,13 +31,21 @@ struct EntityArr {
 }
 
 impl EntityArr {
-    fn new() -> Self { Self { components: [const { None }; ComponentType::COUNT] } }
+    fn new() -> Self {
+        Self {
+            components: [const { None }; ComponentType::COUNT],
+        }
+    }
     fn add(&mut self, c: Component) {
         let idx = c.component_type().index();
         self.components[idx] = Some(c);
     }
-    fn get(&self, t: ComponentType) -> Option<&Component> { self.components[t.index()].as_ref() }
-    fn has(&self, t: ComponentType) -> bool { self.components[t.index()].is_some() }
+    fn get(&self, t: ComponentType) -> Option<&Component> {
+        self.components[t.index()].as_ref()
+    }
+    fn has(&self, t: ComponentType) -> bool {
+        self.components[t.index()].is_some()
+    }
 }
 
 fn make_physics() -> Component {
@@ -52,7 +70,9 @@ fn build_map_entities(n: usize) -> ThinVec<EntityMap> {
         .map(|i| {
             let mut e = EntityMap::new();
             e.add(make_physics());
-            if i % 2 == 0 { e.add(make_transform()); }
+            if i % 2 == 0 {
+                e.add(make_transform());
+            }
             e
         })
         .collect()
@@ -63,7 +83,9 @@ fn build_arr_entities(n: usize) -> ThinVec<EntityArr> {
         .map(|i| {
             let mut e = EntityArr::new();
             e.add(make_physics());
-            if i % 2 == 0 { e.add(make_transform()); }
+            if i % 2 == 0 {
+                e.add(make_transform());
+            }
             e
         })
         .collect()
@@ -103,7 +125,9 @@ fn bench_scan(c: &mut Criterion) {
         b.iter(|| {
             let mut count = 0usize;
             for e in &map_entities {
-                if e.has(ComponentType::Physics) { count += 1; }
+                if e.has(ComponentType::Physics) {
+                    count += 1;
+                }
             }
             black_box(count)
         })
@@ -112,7 +136,9 @@ fn bench_scan(c: &mut Criterion) {
         b.iter(|| {
             let mut count = 0usize;
             for e in &arr_entities {
-                if e.has(ComponentType::Physics) { count += 1; }
+                if e.has(ComponentType::Physics) {
+                    count += 1;
+                }
             }
             black_box(count)
         })
