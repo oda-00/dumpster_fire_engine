@@ -709,26 +709,9 @@ fn download_llvm_prebuilt(prefix: &Path, os: &str, arch: &str) {
         let tmp_str = tmp.to_str().unwrap();
 
         // ── Download ──────────────────────────────────────────────────────────
-        // curl.exe ships with Windows 10 1803+ and is far faster than
-        // Invoke-WebRequest (which buffers the whole response in memory).
-        let curl_ok = Command::new("curl.exe")
-            .args(["-fsSL", "--retry", "3", "--retry-delay", "2",
-                   "--progress-bar", "-o", tmp_str, &url])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if !curl_ok {
-            println!("cargo:warning=curl.exe not found — falling back to Invoke-WebRequest (slower)...");
-            let ps = Command::new("powershell")
-                .args([
-                    "-NoProfile", "-Command",
-                    &format!("Invoke-WebRequest -Uri '{url}' -OutFile '{tmp_str}'"),
-                ])
-                .status()
-                .expect("powershell Invoke-WebRequest failed");
-            assert!(ps.success(), "LLVM download failed");
-        }
+        // curl.exe (Windows 10 1803+) is much faster than Invoke-WebRequest;
+        // win_download tries curl first, falls back to PowerShell automatically.
+        assert!(win_download(&url, &tmp), "LLVM 18 download failed");
 
         // ── Extract ───────────────────────────────────────────────────────────
         // The LLVM NSIS installer has a UAC manifest requiring elevation regardless
@@ -791,67 +774,97 @@ fn find_7z_windows() -> Option<PathBuf> {
     None
 }
 
-// Bootstrap a standalone 7za.exe from 7-zip.org without requiring any pre-installed
-// extraction tool. 7za920.zip is a plain ZIP file (not a .7z), so PowerShell's
-// Expand-Archive can open it without 7-Zip already being present. The resulting
-// 7za.exe supports reading NSIS archives (support added in 7-Zip 4.57, 2008).
+// Two-stage bootstrap to get a modern 7za.exe without any pre-installed tools:
+//
+//   Stage 1 — 7za920.zip (7-zip.org, ~374 KB) is a plain ZIP, so PowerShell's
+//              built-in Expand-Archive opens it. Gives us 7za 9.20.
+//
+//   Stage 2 — 7za 9.20 added LZMA2 support, so it CAN open modern .7z archives.
+//              We use it to extract 7z2408-extra.7z (7-zip.org, ~800 KB), which
+//              contains 7za 24.08. That version understands NSIS 3.x installers
+//              (LLVM 18 uses NSIS 3.x; 7za 9.20 only knows NSIS 2.x).
 fn bootstrap_7za_windows() -> Option<PathBuf> {
     println!(
-        "cargo:warning=7-Zip not found — bootstrapping 7za.exe from 7-zip.org (~374 KB, one-time)..."
+        "cargo:warning=7-Zip not found — bootstrapping modern 7za from 7-zip.org (~1.2 MB, one-time)..."
     );
 
     let tmp = std::env::temp_dir().join(format!("dfe_7za_bootstrap_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
-    let zip = tmp.join("7za920.zip");
-    let zip_str = zip.to_str().unwrap();
 
-    // Download the bootstrap zip (curl first, PowerShell fallback).
-    const BOOTSTRAP_URL: &str = "https://www.7-zip.org/a/7za920.zip";
-    let dl_ok = Command::new("curl.exe")
-        .args(["-fsSL", "--retry", "3", "-o", zip_str, BOOTSTRAP_URL])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if !dl_ok {
-        let _ = Command::new("powershell")
-            .args([
-                "-NoProfile", "-Command",
-                &format!("Invoke-WebRequest -Uri '{BOOTSTRAP_URL}' -OutFile '{zip_str}'"),
-            ])
-            .status();
-    }
-
-    if !zip.exists() {
-        println!("cargo:warning=7za bootstrap download failed.");
+    // ── Stage 1: get 7za 9.20 via plain ZIP ───────────────────────────────────
+    let zip920 = tmp.join("7za920.zip");
+    if !win_download("https://www.7-zip.org/a/7za920.zip", &zip920) {
+        println!("cargo:warning=7za bootstrap: stage-1 download failed.");
         return None;
     }
-
-    // Expand the zip using PowerShell's built-in Expand-Archive (available since PS 5 / Win10).
-    let expanded = Command::new("powershell")
+    let s1 = tmp.join("s1");
+    let _ = std::fs::create_dir_all(&s1);
+    let ok = Command::new("powershell")
         .args([
             "-NoProfile", "-Command",
             &format!(
-                "Expand-Archive -LiteralPath '{zip_str}' -DestinationPath '{}' -Force",
-                tmp.display()
+                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                zip920.display(), s1.display()
             ),
         ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-
-    if !expanded {
-        println!("cargo:warning=7za bootstrap Expand-Archive failed.");
+    if !ok {
+        println!("cargo:warning=7za bootstrap: Expand-Archive failed.");
+        return None;
+    }
+    let old_7za = s1.join("7za.exe");
+    if !old_7za.exists() {
+        println!("cargo:warning=7za bootstrap: 7za.exe not found after stage-1 extraction.");
         return None;
     }
 
-    let exe = tmp.join("7za.exe");
-    if exe.exists() {
-        Some(exe)
-    } else {
-        println!("cargo:warning=7za.exe not found after extraction.");
-        None
+    // ── Stage 2: use 7za 9.20 to extract 7z2408-extra.7z (LZMA2 .7z) ─────────
+    let extra = tmp.join("7z_extra.7z");
+    if !win_download("https://www.7-zip.org/a/7z2408-extra.7z", &extra) {
+        println!("cargo:warning=7za bootstrap: stage-2 download failed.");
+        return None;
     }
+    let s2 = tmp.join("s2");
+    let _ = std::fs::create_dir_all(&s2);
+    let ok = Command::new(&old_7za)
+        .args(["x", extra.to_str().unwrap(), &format!("-o{}", s2.display()), "-y"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        println!("cargo:warning=7za bootstrap: stage-2 extraction failed.");
+        return None;
+    }
+
+    // 7za.exe from the extra package sits at the archive root.
+    let new_7za = s2.join("7za.exe");
+    if new_7za.exists() {
+        return Some(new_7za);
+    }
+    // Search one level of subdirectories as a fallback.
+    std::fs::read_dir(&s2).ok()?.flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path().join("7za.exe"))
+        .find(|p| p.exists())
+}
+
+/// Download `url` to `dest` using curl.exe (Windows 10 built-in), falling back
+/// to PowerShell's Invoke-WebRequest. Returns true on success.
+fn win_download(url: &str, dest: &Path) -> bool {
+    let s = dest.to_str().unwrap();
+    Command::new("curl.exe")
+        .args(["-fsSL", "--retry", "3", "-o", s, url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        || Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                   &format!("Invoke-WebRequest -Uri '{url}' -OutFile '{s}'")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
 }
 
 fn ensure_libtinfo_shim(lib_dir: &Path) {
