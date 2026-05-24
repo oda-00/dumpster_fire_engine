@@ -623,41 +623,54 @@ fn ensure_llvm_prebuilt() {
     }
 }
 
+// Removes the lock file on drop — ensures cleanup even if the downloader panics.
+struct LockGuard(PathBuf);
+impl Drop for LockGuard {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
 // Coordinates between parallel cargo build-script processes so only one
 // actually downloads LLVM — the other polls and waits.
 fn download_llvm_prebuilt_coordinated(prefix: &Path, os: &str, arch: &str, llvm_config: &Path) {
-    use std::fs::OpenOptions;
-
     std::fs::create_dir_all(prefix).expect("failed to create LLVM prefix dir");
     let lock_path = prefix.join(".downloading");
 
     // Try to become the downloader by atomically creating the lock file.
-    let got_lock = OpenOptions::new()
+    let got_lock = std::fs::OpenOptions::new()
         .write(true)
-        .create_new(true) // fails if already exists
+        .create_new(true) // fails if the file already exists
         .open(&lock_path)
         .is_ok();
 
     if got_lock {
-        // We won the race — download and install LLVM, then remove the lock.
+        // We won the race. LockGuard removes the sentinel on return OR panic.
+        let _guard = LockGuard(lock_path);
         download_llvm_prebuilt(prefix, os, arch);
-        let _ = std::fs::remove_file(&lock_path);
     } else {
         // Another parallel build script is downloading. Poll until done.
         println!(
             "cargo:warning=Another build process is downloading LLVM 18 — waiting for it to finish..."
         );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::thread::sleep(std::time::Duration::from_secs(5));
             if llvm_config.exists() {
-                break;
+                return;
+            }
+            // Lock disappeared but llvm-config still absent — the downloader crashed.
+            // Take over rather than waiting forever.
+            if !lock_path.exists() {
+                println!(
+                    "cargo:warning=Previous LLVM 18 download appears to have failed. Retrying..."
+                );
+                download_llvm_prebuilt_coordinated(prefix, os, arch, llvm_config);
+                return;
             }
             if std::time::Instant::now() > deadline {
                 panic!(
-                    "Timed out waiting for LLVM 18 download. \
-                     Delete {prefix}/.downloading and retry.",
-                    prefix = prefix.display()
+                    "Timed out (30 min) waiting for LLVM 18 download. \
+                     Delete {}/.downloading and retry.",
+                    prefix.display()
                 );
             }
         }
