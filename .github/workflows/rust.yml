@@ -62,10 +62,11 @@ jobs:
           echo "LLVM_SYS_180_PREFIX=$PWD/.llvm/18" >> "$GITHUB_ENV"
           echo "$PWD/.llvm/18/bin"                 >> "$GITHUB_PATH"
 
-      # Windows: the LLVM NSIS installer requires unconditional UAC elevation
-      # (even with /S) so we do NOT run it. Instead we set LLVM_SYS_180_PREFIX
-      # to a workspace-local directory and let vendor/llvm-sys/build.rs do the
-      # download + 7-Zip extraction (no admin needed — see PRs #32 and #33).
+      # Windows: NSIS installer needs UAC elevation unconditionally — don't run it.
+      # GitHub Actions Windows runners have 7-Zip at a known path, so we extract
+      # the NSIS installer directly (7-Zip treats it as an archive, no scripts run).
+      # This happens here, before cargo build, so the vendor/llvm-sys build.rs
+      # finds llvm-config.exe already present and skips its own download entirely.
       - name: Cache LLVM 18 (Windows)
         if: runner.os == 'Windows'
         id: cache-llvm-windows
@@ -73,6 +74,32 @@ jobs:
         with:
           path: .llvm\18
           key: llvm-18.1.8-windows-x86_64
+
+      - name: Extract LLVM 18 (Windows)
+        if: runner.os == 'Windows' && steps.cache-llvm-windows.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $prefix  = "$env:GITHUB_WORKSPACE\.llvm\18"
+          $tmp     = "$env:TEMP\LLVM-18.1.8-win64.exe"
+          $sevenZ  = "C:\Program Files\7-Zip\7z.exe"   # pre-installed on all GHA Windows runners
+
+          New-Item -ItemType Directory -Force $prefix | Out-Null
+          Write-Host "Downloading LLVM 18.1.8 (~600 MB)..."
+          curl.exe -fsSL --retry 3 -o $tmp `
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe"
+          if ($LASTEXITCODE -ne 0) { throw "LLVM download failed (exit $LASTEXITCODE)" }
+
+          Write-Host "Extracting with 7-Zip (no NSIS execution, no admin needed)..."
+          & $sevenZ x $tmp "-o$prefix" -y
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip extraction failed (exit $LASTEXITCODE)" }
+
+          Remove-Item $tmp -Force
+          if (-not (Test-Path "$prefix\bin\llvm-config.exe")) {
+            Write-Host "Contents of $prefix :"
+            Get-ChildItem $prefix -Recurse -Name | Select-Object -First 40
+            throw "llvm-config.exe not found after extraction — check directory listing above"
+          }
+          Write-Host "LLVM 18 extracted to $prefix"
 
       - name: Set LLVM prefix (Windows)
         if: runner.os == 'Windows'
