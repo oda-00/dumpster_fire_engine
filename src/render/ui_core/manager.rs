@@ -5,7 +5,7 @@ use thin_vec::ThinVec;
 use crate::render::ui_core::controller::Controller;
 use crate::render::ui_core::event::EventBus;
 use crate::render::ui_core::id::{WidgetArena, WidgetId, WidgetIdPath};
-use crate::render::ui_core::layout::{Constraint, LayoutContext, Rect, Size};
+use crate::render::ui_core::layout::{Constraint, LayoutContext, LayoutSolver, Rect, Size};
 use crate::render::ui_core::widget::DirtyFlags;
 use crate::resource_manager::world_manager::World;
 

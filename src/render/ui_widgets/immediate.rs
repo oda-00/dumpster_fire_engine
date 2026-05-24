@@ -1,6 +1,6 @@
 use thin_vec::ThinVec;
 
-use crate::render::ui_core::layout::{Alignment, ColumnLayout, NullLayout};
+use crate::render::ui_core::layout::{Alignment, ColumnLayout, LayoutDispatch};
 use crate::render::ui_core::signal::Signal;
 use crate::render::ui_core::widget::{
     ButtonState, CheckboxState, DirtyFlags, LabelState, PanelState, SliderState, Widget, WidgetKind,
@@ -64,7 +64,7 @@ impl<'a> UiBuilder<'a> {
                 min_height: height,
                 max_height: height,
             },
-            layout_solver: Box::new(NullLayout),
+            layout_solver: LayoutDispatch::Null,
             event_handlers: ThinVec::new(),
             user_data: None,
         });
@@ -171,7 +171,7 @@ impl<'a> UiBuilder<'a> {
         };
         let id = self.resolve_or_create(name, WidgetKind::Panel(state), 0.0);
         if let Some(w) = self.manager.widgets.get_mut(id) {
-            w.layout_solver = Box::new(ColumnLayout {
+            w.layout_solver = LayoutDispatch::Column(ColumnLayout {
                 gap: self.gap,
                 cross_alignment: Alignment::Start,
             });

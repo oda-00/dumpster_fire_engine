@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use thin_vec::ThinVec;
 
 use crate::render::ui_core::event::UiEvent;
 use crate::render::ui_core::id::WidgetId;
-use crate::render::ui_core::layout::{Constraint, LayoutSolver, Rect};
+use crate::render::ui_core::layout::{Constraint, LayoutDispatch, Rect};
 use crate::render::ui_core::signal::Signal;
 use crate::resource_manager::world_manager::World;
 
@@ -26,7 +28,9 @@ pub struct Widget {
     pub dirty: u8,
     pub rect: Rect,
     pub constraint: Constraint,
-    pub layout_solver: Box<dyn LayoutSolver>,
+    /// Inline enum dispatch — eliminates Box<dyn LayoutSolver> heap allocation
+    /// and vtable indirection. All concrete solvers are Copy-sized.
+    pub layout_solver: LayoutDispatch,
     pub event_handlers: ThinVec<EventSink>,
     pub user_data: Option<Box<dyn std::any::Any>>,
 }
@@ -71,7 +75,9 @@ pub struct CheckboxState {
 
 pub struct DropdownState {
     pub selected: Signal<usize>,
-    pub options: ThinVec<String>,
+    /// Options stored as ref-counted strings — avoids per-String heap
+    /// allocations; multiple dropdowns can share the same option list.
+    pub options: ThinVec<Arc<str>>,
     pub expanded: bool,
 }
 
@@ -88,15 +94,15 @@ pub struct PanelState {
 }
 
 /// Lazily rendered list: only items in the visible window are built each frame.
-/// `item_builder` is called with the item index and a mutable cursor position;
-/// it should push geometry into the provided DrawList rather than into the tree.
+/// `item_builder` is a bare function pointer (no captures) called with the
+/// item index and its top-left cursor y-position.
 pub struct VirtualListState {
     pub item_count: usize,
     pub item_height: f32,
     pub scroll_offset: f32,
-    /// Closure that renders one item at the given index.
-    /// Signature: `fn(item_index: usize, cursor_y: f32)`.
-    pub item_builder: Box<dyn Fn(usize, f32) + Send + Sync>,
+    /// Bare fn pointer — no heap allocation, no vtable. If per-item context
+    /// is needed, pass it through a thread-local or a separate arena.
+    pub item_builder: fn(usize, f32),
     pub visible_widgets: ThinVec<(usize, WidgetId)>,
 }
 
@@ -139,8 +145,11 @@ pub struct PropertyGridState {
 pub struct PropertyDesc {
     pub name: String,
     pub kind: PropertyKind,
-    pub get: Box<dyn Fn(&World) -> String + Send + Sync>,
-    pub set: Box<dyn Fn(&mut World, &str) + Send + Sync>,
+    /// Bare fn pointer: reads a value from World and formats it as a String.
+    /// No captures needed — World carries all required context.
+    pub get: fn(&World) -> String,
+    /// Bare fn pointer: parses the string and writes back into World.
+    pub set: fn(&mut World, &str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

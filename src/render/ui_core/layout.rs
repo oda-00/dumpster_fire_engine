@@ -213,6 +213,44 @@ impl LayoutSolver for NullLayout {
     fn arrange(&self, _rect: Rect, _children: &mut [(WidgetId, Rect)], _arena: &WidgetArena) {}
 }
 
+/// Inline enum dispatch for layout solvers.
+///
+/// Replaces `Box<dyn LayoutSolver>` in every `Widget`, eliminating one heap
+/// allocation and one vtable indirection per widget. The three concrete types
+/// are all `Copy`-sized (<= 16 bytes each), so the enum fits in a register pair.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum LayoutDispatch {
+    Row(RowLayout),
+    Column(ColumnLayout),
+    #[default]
+    Null,
+}
+
+impl LayoutSolver for LayoutDispatch {
+    #[inline]
+    fn measure(
+        &self,
+        children: &[(WidgetId, Constraint)],
+        arena: &WidgetArena,
+        ctx: &mut LayoutContext,
+    ) -> Size {
+        match self {
+            Self::Row(r) => r.measure(children, arena, ctx),
+            Self::Column(c) => c.measure(children, arena, ctx),
+            Self::Null => Size { w: 0.0, h: 0.0 },
+        }
+    }
+
+    #[inline]
+    fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &WidgetArena) {
+        match self {
+            Self::Row(r) => r.arrange(rect, children, arena),
+            Self::Column(c) => c.arrange(rect, children, arena),
+            Self::Null => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
