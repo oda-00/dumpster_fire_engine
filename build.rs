@@ -45,7 +45,7 @@ fn main() {
         let out = format!("{src}.spv");
 
         // 1. Try native shaderc.
-        if let Some(ref sc) = shaderc_compiler {
+        if let Ok(ref sc) = shaderc_compiler {
             if compile_native(sc, src, &out) {
                 continue;
             }
