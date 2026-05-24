@@ -1,11 +1,11 @@
-use thin_vec::ThinVec;
 use hashbrown::HashMap;
+use thin_vec::ThinVec;
 
-use crate::render::ui_core::id::{WidgetId, WidgetIdPath, WidgetArena};
-use crate::render::ui_core::widget::{Widget, DirtyFlags};
-use crate::render::ui_core::layout::{Rect, Constraint, LayoutContext, Size};
-use crate::render::ui_core::event::EventBus;
 use crate::render::ui_core::controller::Controller;
+use crate::render::ui_core::event::EventBus;
+use crate::render::ui_core::id::{WidgetArena, WidgetId, WidgetIdPath};
+use crate::render::ui_core::layout::{Constraint, LayoutContext, Rect, Size};
+use crate::render::ui_core::widget::{DirtyFlags, Widget};
 use crate::resource_manager::world_manager::World;
 
 pub struct UiManager {
@@ -65,13 +65,10 @@ impl UiManager {
 
     fn measure(&mut self, id: WidgetId, ctx: &mut LayoutContext, constraint: Constraint) -> Size {
         let w = self.widgets.get(id).expect("Widget not found");
-        let child_constraints: ThinVec<Constraint> = w.children.iter().map(|_| constraint).collect();
-        let child_refs: ThinVec<(WidgetId, Constraint)> = w
-            .children
-            .iter()
-            .copied()
-            .zip(child_constraints)
-            .collect();
+        let child_constraints: ThinVec<Constraint> =
+            w.children.iter().map(|_| constraint).collect();
+        let child_refs: ThinVec<(WidgetId, Constraint)> =
+            w.children.iter().copied().zip(child_constraints).collect();
         let size = w.layout_solver.measure(&child_refs, &self.widgets, ctx);
         ctx.set_size(id, size);
         size
@@ -85,7 +82,8 @@ impl UiManager {
             .iter()
             .map(|&cid| (cid, Rect::default()))
             .collect();
-        w.layout_solver.arrange(rect, &mut child_rects, &mut self.widgets);
+        w.layout_solver
+            .arrange(rect, &mut child_rects, &mut self.widgets);
         for (cid, child_rect) in child_rects {
             self.arrange(cid, child_rect);
         }

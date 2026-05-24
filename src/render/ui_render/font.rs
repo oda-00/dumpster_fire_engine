@@ -1,8 +1,8 @@
-use fontdue::{Font, FontSettings};
-use hashbrown::HashMap;
-use ash::vk;
 use crate::forge_master::ore::ForgeImage;
 use crate::render::vulkan::VulkanContext;
+use ash::vk;
+use fontdue::{Font, FontSettings};
+use hashbrown::HashMap;
 
 #[derive(Copy, Clone, Debug)]
 pub struct GlyphRect {
@@ -31,9 +31,7 @@ impl FontAtlas {
     pub fn new(vulkan: &VulkanContext) -> Self {
         let default_font_bytes = include_bytes!("../../assets/fonts/FiraCode-Regular.ttf");
         let font = Font::from_bytes(default_font_bytes, FontSettings::default())
-            .unwrap_or_else(|_| {
-                Font::from_bytes(&[], FontSettings::default()).unwrap()
-            });
+            .unwrap_or_else(|_| Font::from_bytes(&[], FontSettings::default()).unwrap());
 
         let texture = ForgeImage::create_2d(
             &vulkan.device,
@@ -43,7 +41,8 @@ impl FontAtlas {
             vk::Format::R8G8B8A8_UNORM,
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        ).unwrap();
+        )
+        .unwrap();
 
         Self {
             texture,

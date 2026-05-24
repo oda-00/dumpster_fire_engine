@@ -1,5 +1,5 @@
+use crate::render::ui_core::{UiEvent, UiManager, WidgetId, WidgetIdPath};
 use thin_vec::ThinVec;
-use crate::render::ui_core::{UiManager, WidgetId, WidgetIdPath, UiEvent};
 
 pub struct UiBuilder<'a> {
     manager: &'a mut UiManager,

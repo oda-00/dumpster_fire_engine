@@ -1,15 +1,15 @@
+pub mod controller;
+pub mod event;
 pub mod id;
+pub mod layout;
+pub mod manager;
 pub mod signal;
 pub mod widget;
-pub mod layout;
-pub mod event;
-pub mod controller;
-pub mod manager;
 
-pub use id::{WidgetId, WidgetArena, WidgetIdPath};
-pub use signal::Signal;
-pub use widget::{Widget, WidgetKind, DirtyFlags};
-pub use layout::{Rect, Constraint, Size, LayoutSolver, LayoutContext};
-pub use event::{UiEvent, EventBus, EventHandler};
 pub use controller::Controller;
+pub use event::{EventBus, EventHandler, UiEvent};
+pub use id::{WidgetArena, WidgetId, WidgetIdPath};
+pub use layout::{Constraint, LayoutContext, LayoutSolver, Rect, Size};
 pub use manager::UiManager;
+pub use signal::Signal;
+pub use widget::{DirtyFlags, Widget, WidgetKind};

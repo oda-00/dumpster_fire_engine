@@ -1,6 +1,6 @@
-use thin_vec::ThinVec;
 use crate::render::ui_core::layout::Rect;
 use crate::render::ui_render::vertex::UiVertex;
+use thin_vec::ThinVec;
 
 pub struct DrawList {
     pub vertices: ThinVec<UiVertex>,

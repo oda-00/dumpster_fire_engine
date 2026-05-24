@@ -1,8 +1,8 @@
 use thin_vec::ThinVec;
 
 use crate::render::ui_core::id::WidgetId;
+use crate::render::ui_core::layout::{Constraint, LayoutSolver, Rect};
 use crate::render::ui_core::signal::Signal;
-use crate::render::ui_core::layout::{Rect, Constraint, LayoutSolver};
 use crate::resource_manager::world_manager::World;
 
 #[repr(u8)]

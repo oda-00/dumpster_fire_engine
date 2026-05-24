@@ -1,7 +1,7 @@
-use ash::vk;
-use crate::render::vulkan::VulkanContext;
-use crate::render::ui_render::vertex::{RingBuffer, UiVertex};
 use crate::render::ui_render::drawlist::DrawList;
+use crate::render::ui_render::vertex::{RingBuffer, UiVertex};
+use crate::render::vulkan::VulkanContext;
+use ash::vk;
 
 pub struct UIRenderer {
     ring: RingBuffer,
@@ -13,12 +13,7 @@ impl UIRenderer {
         Self { ring }
     }
 
-    pub fn render(
-        &mut self,
-        drawlist: &DrawList,
-        cmd: vk::CommandBuffer,
-        device: &ash::Device,
-    ) {
+    pub fn render(&mut self, drawlist: &DrawList, cmd: vk::CommandBuffer, device: &ash::Device) {
         if drawlist.vertices.is_empty() || drawlist.indices.is_empty() {
             return;
         }

@@ -1,6 +1,6 @@
 use thin_vec::ThinVec;
 
-use crate::render::ui_core::id::{WidgetId, WidgetArena};
+use crate::render::ui_core::id::{WidgetArena, WidgetId};
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Rect {
@@ -12,7 +12,10 @@ pub struct Rect {
 
 impl Rect {
     pub fn size(&self) -> Size {
-        Size { w: self.w, h: self.h }
+        Size {
+            w: self.w,
+            h: self.h,
+        }
     }
 }
 
@@ -66,12 +69,7 @@ pub trait LayoutSolver: Send + Sync {
         arena: &WidgetArena,
         ctx: &mut LayoutContext,
     ) -> Size;
-    fn arrange(
-        &self,
-        rect: Rect,
-        children: &mut [(WidgetId, Rect)],
-        arena: &mut WidgetArena,
-    );
+    fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &mut WidgetArena);
 }
 
 pub struct RowLayout {
@@ -192,11 +190,5 @@ impl LayoutSolver for NullLayout {
         Size { w: 0.0, h: 0.0 }
     }
 
-    fn arrange(
-        &self,
-        _rect: Rect,
-        _children: &mut [(WidgetId, Rect)],
-        _arena: &mut WidgetArena,
-    ) {
-    }
+    fn arrange(&self, _rect: Rect, _children: &mut [(WidgetId, Rect)], _arena: &mut WidgetArena) {}
 }

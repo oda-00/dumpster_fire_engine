@@ -1,6 +1,6 @@
-use ash::vk;
 use crate::render::vulkan::VulkanContext;
 use crate::render::window::FRAMES_IN_FLIGHT;
+use ash::vk;
 use std::mem;
 
 #[repr(C)]
@@ -68,7 +68,8 @@ impl RingBuffer {
             .find(|(i, t)| {
                 (mem_req.memory_type_bits & (1 << i)) != 0
                     && t.property_flags.contains(
-                        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                        vk::MemoryPropertyFlags::HOST_VISIBLE
+                            | vk::MemoryPropertyFlags::HOST_COHERENT,
                     )
             })
             .unwrap()
@@ -82,7 +83,9 @@ impl RingBuffer {
         unsafe { device.bind_buffer_memory(buf, mem, 0) }.unwrap();
 
         let ptr = unsafe {
-            device.map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap() as *mut u8
+            device
+                .map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .unwrap() as *mut u8
         };
 
         (buf, mem, ptr)
@@ -94,11 +97,7 @@ impl RingBuffer {
             self.resize(device, data.len() * 2);
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                self.mapped_ptrs[idx],
-                data.len(),
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr(), self.mapped_ptrs[idx], data.len());
         }
         self.sizes[idx] = data.len();
     }
@@ -106,11 +105,12 @@ impl RingBuffer {
     pub fn end_frame(&mut self, device: &ash::Device) {
         let idx = self.current_frame;
         unsafe {
-            device.flush_mapped_memory_ranges(&[vk::MappedMemoryRange::default()
-                .memory(self.memories[idx])
-                .offset(0)
-                .size(vk::WHOLE_SIZE)])
-            .unwrap();
+            device
+                .flush_mapped_memory_ranges(&[vk::MappedMemoryRange::default()
+                    .memory(self.memories[idx])
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE)])
+                .unwrap();
         }
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
     }
