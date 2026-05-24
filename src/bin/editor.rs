@@ -42,8 +42,7 @@ use dumpster_fire_engine::resource_manager::{
 
 const TOOLBAR_H: f32 = 28.0;
 const TITLEBAR_H: f32 = 22.0;
-const OUTLINER_W: f32 = 220.0;
-const INSPECTOR_W: f32 = 260.0;
+const BOTTOM_H: f32 = 140.0;
 const SEP: [u8; 4] = [58, 58, 74, 255];
 const PANEL_BG: [u8; 4] = [22, 22, 28, 240];
 const TITLEBAR_BG: [u8; 4] = [35, 35, 45, 255];
@@ -92,6 +91,12 @@ struct EditorApp {
     cam_fitted: bool,
     start: Instant,
     win: Option<AppHandle>,
+
+    // ── panel sizing (draggable dividers)
+    outliner_w: f32,
+    inspector_w: f32,
+    div_drag: Option<u8>, // 0 = left divider, 1 = right divider
+    div_hover: Option<u8>,
 
     // ── toolbar state
     grid_enabled: bool,
@@ -317,7 +322,7 @@ impl EditorApp {
         if self.ui_initialized {
             return;
         }
-        let panel_h = win_h - TOOLBAR_H;
+        let panel_h = win_h - TOOLBAR_H - BOTTOM_H;
 
         let tp = self.world.ui.spawn_panel(Panel::new(
             dumpster_fire_engine::resource_manager::ui_manager::layout::Rect {
@@ -331,15 +336,15 @@ impl EditorApp {
             dumpster_fire_engine::resource_manager::ui_manager::layout::Rect {
                 x: 0.0,
                 y: TOOLBAR_H,
-                w: OUTLINER_W,
+                w: self.outliner_w,
                 h: panel_h,
             },
         ));
         let ip = self.world.ui.spawn_panel(Panel::new(
             dumpster_fire_engine::resource_manager::ui_manager::layout::Rect {
-                x: win_w - INSPECTOR_W,
+                x: win_w - self.inspector_w,
                 y: TOOLBAR_H,
-                w: INSPECTOR_W,
+                w: self.inspector_w,
                 h: panel_h,
             },
         ));
@@ -556,6 +561,31 @@ impl AppLogic for EditorApp {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.ui_cursor = [position.x as f32, position.y as f32];
+                let cx = self.ui_cursor[0];
+                let cy = self.ui_cursor[1];
+                let (win_w, _) = ctx
+                    .viewport_grid(app)
+                    .map(|g| (g.win_w, g.win_h))
+                    .unwrap_or((1280.0, 720.0));
+                let left_div_x = self.outliner_w;
+                let right_div_x = win_w - self.inspector_w;
+                if cy >= TOOLBAR_H {
+                    if (cx - left_div_x).abs() < 5.0 {
+                        self.div_hover = Some(0);
+                    } else if (cx - right_div_x).abs() < 5.0 {
+                        self.div_hover = Some(1);
+                    } else {
+                        self.div_hover = None;
+                    }
+                } else {
+                    self.div_hover = None;
+                }
+                if let Some(side) = self.div_drag {
+                    match side {
+                        0 => self.outliner_w = cx.clamp(80.0, 600.0),
+                        _ => self.inspector_w = (win_w - cx).clamp(80.0, 600.0),
+                    }
+                }
                 if self.gizmo_drag.is_some() {
                     self.apply_gizmo_drag();
                 }
@@ -573,11 +603,15 @@ impl AppLogic for EditorApp {
                         .viewport_grid(app)
                         .map(|g| (g.win_w, g.win_h))
                         .unwrap_or((1280.0, 720.0));
+                    if self.div_hover.is_some() {
+                        self.div_drag = self.div_hover;
+                        return true;
+                    }
                     let in_toolbar = self.ui_cursor[1] < TOOLBAR_H + 2.0;
                     let in_outliner =
-                        self.ui_cursor[0] < OUTLINER_W && self.ui_cursor[1] >= TOOLBAR_H;
-                    let in_inspector =
-                        self.ui_cursor[0] >= win_w - INSPECTOR_W && self.ui_cursor[1] >= TOOLBAR_H;
+                        self.ui_cursor[0] < self.outliner_w && self.ui_cursor[1] >= TOOLBAR_H;
+                    let in_inspector = self.ui_cursor[0] >= win_w - self.inspector_w
+                        && self.ui_cursor[1] >= TOOLBAR_H;
                     let in_picker = self.picker_open;
                     let in_spawn = self.spawn_menu_open
                         && self.ui_cursor[0] > 200.0
@@ -603,6 +637,7 @@ impl AppLogic for EditorApp {
                 ElementState::Released => {
                     self.ui_left_down = false;
                     self.gizmo_drag = None;
+                    self.div_drag = None;
                 }
             },
 
@@ -656,6 +691,7 @@ impl AppLogic for EditorApp {
         self.draw_toolbar(ctx, app);
         self.draw_outliner(ctx, app);
         self.draw_inspector(ctx, app);
+        self.draw_bottom_panel(ctx, app);
         self.draw_trs_gizmo(ctx, app);
         if self.picker_open {
             self.draw_file_picker(ctx, app);
@@ -897,7 +933,8 @@ impl EditorApp {
             .viewport_grid(app)
             .map(|g| (g.win_w, g.win_h))
             .unwrap_or((1280.0, 720.0));
-        let panel_h = win_h - TOOLBAR_H;
+        let panel_h = win_h - TOOLBAR_H - BOTTOM_H;
+        let ow = self.outliner_w;
         let x = 0.0_f32;
         let y = TOOLBAR_H;
         let content_y = y + TITLEBAR_H + 2.0;
@@ -925,7 +962,7 @@ impl EditorApp {
                 }
                 let is_sel = self.world.selection == Some(ah);
                 let hovered = input.cursor[0] >= x
-                    && input.cursor[0] < x + OUTLINER_W
+                    && input.cursor[0] < x + ow
                     && input.cursor[1] >= row_y
                     && input.cursor[1] < row_y + row_h;
                 let clicked = hovered && input.left_just_pressed;
@@ -942,9 +979,27 @@ impl EditorApp {
 
         // Now borrow draw_list and render.
         let dl = &mut self.world.ui.draw_list;
-        dl.push_panel_bg(x, y, OUTLINER_W, panel_h, PANEL_BG);
-        dl.push_title_bar(x, y, OUTLINER_W, TITLEBAR_H, TITLEBAR_BG, SEP);
-        dl.push_vsep(x + OUTLINER_W, y, panel_h, SEP);
+        dl.push_panel_bg(x, y, ow, panel_h, PANEL_BG);
+        dl.push_title_bar(x, y, ow, TITLEBAR_H, TITLEBAR_BG, SEP);
+        // Title bar label "OUTLINER"
+        {
+            use dumpster_fire_engine::resource_manager::ui_manager::font;
+            let mut tx = x + 6.0;
+            for c in "OUTLINER".chars() {
+                let uv = font::glyph_rect(c);
+                if uv != [0f32; 4] {
+                    dl.push_rect(tx, y + 3.0, 8.0, 16.0, uv, [200, 210, 230, 255]);
+                }
+                tx += 8.0;
+            }
+        }
+        // Left divider — highlight when hovering or dragging
+        let div_col = if self.div_hover == Some(0) || self.div_drag == Some(0) {
+            [120, 160, 220, 255u8]
+        } else {
+            SEP
+        };
+        dl.push_vsep(x + ow, y, panel_h + BOTTOM_H, div_col);
 
         let mut row_y = content_y;
         if let Some((lh, sh)) = self.main_stage
@@ -955,39 +1010,56 @@ impl EditorApp {
         }
 
         use dumpster_fire_engine::resource_manager::ui_manager::{draw as uidraw, font};
-        for (ah, icon_col, is_sel, hovered, _) in &rows {
-            let bg = if *is_sel {
-                [55, 95, 155, 255]
-            } else if *hovered {
-                [38, 38, 52, 255]
-            } else if (ah.idx & 1) == 0 {
-                [26, 26, 33, 255]
-            } else {
-                [24, 24, 30, 255]
-            };
-            dl.push_rect(x, row_y, OUTLINER_W, row_h - 1.0, uidraw::SOLID, bg);
-            dl.push_rect(x + 6.0, row_y + 4.0, 14.0, 14.0, uidraw::SOLID, *icon_col);
-            // Actor index as readable text
-            let label = format!("Actor {}", ah.idx);
-            let tc: [u8; 4] = if *is_sel {
-                [200, 220, 255, 220]
-            } else {
-                [155, 155, 175, 200]
-            };
-            let mut lx = x + 26.0;
-            for c in label.chars() {
-                if lx + 8.0 > x + OUTLINER_W - 4.0 {
-                    break;
-                }
-                if c != ' ' {
+        if let Some((lh, sh)) = self.main_stage
+            && let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh))
+        {
+            for (ah, icon_col, is_sel, hovered, _) in &rows {
+                let bg = if *is_sel {
+                    [55, 95, 155, 255]
+                } else if *hovered {
+                    [38, 38, 52, 255]
+                } else if (ah.idx & 1) == 0 {
+                    [26, 26, 33, 255]
+                } else {
+                    [24, 24, 30, 255]
+                };
+                dl.push_rect(x, row_y, ow, row_h - 1.0, uidraw::SOLID, bg);
+                dl.push_rect(x + 6.0, row_y + 4.0, 14.0, 14.0, uidraw::SOLID, *icon_col);
+                let label: &str = stage
+                    .actors
+                    .get(*ah)
+                    .and_then(|actor| {
+                        actor
+                            .sub_entities
+                            .iter()
+                            .flatten()
+                            .map(|se| match &se.actor_type {
+                                ActorType::Environment(e) => e.name.as_ref(),
+                                ActorType::Character(c) => c.name.as_ref(),
+                                ActorType::Item(i) => i.name.as_ref(),
+                                ActorType::Utility(u) => u.name.as_ref(),
+                            })
+                            .find(|s: &&str| !s.is_empty())
+                    })
+                    .unwrap_or("Entity");
+                let tc: [u8; 4] = if *is_sel {
+                    [200, 220, 255, 220]
+                } else {
+                    [155, 155, 175, 200]
+                };
+                let mut lx = x + 26.0;
+                for c in label.chars() {
+                    if lx + 8.0 > x + ow - 4.0 {
+                        break;
+                    }
                     let uv = font::glyph_rect(c);
                     if uv != [0.0_f32; 4] {
                         dl.push_rect(lx, row_y + 3.0, 8.0, 16.0, uv, tc);
                     }
+                    lx += 8.0;
                 }
-                lx += 8.0;
+                row_y += row_h;
             }
-            row_y += row_h;
         }
     }
 }
@@ -1024,17 +1096,42 @@ impl EditorApp {
             .viewport_grid(app)
             .map(|g| (g.win_w, g.win_h))
             .unwrap_or((1280.0, 720.0));
-        let panel_h = win_h - TOOLBAR_H;
-        let ix = win_w - INSPECTOR_W;
+        let panel_h = win_h - TOOLBAR_H - BOTTOM_H;
+        let iw = self.inspector_w;
+        let ix = win_w - iw;
         let iy = TOOLBAR_H;
+
+        let draw_chrome = |dl: &mut dumpster_fire_engine::resource_manager::ui_manager::draw::DrawList,
+                           div_hover: Option<u8>,
+                           div_drag: Option<u8>| {
+            dl.push_panel_bg(ix, iy, iw, panel_h, PANEL_BG);
+            dl.push_title_bar(ix, iy, iw, TITLEBAR_H, TITLEBAR_BG, SEP);
+            {
+                use dumpster_fire_engine::resource_manager::ui_manager::font;
+                let mut tx = ix + 6.0;
+                for c in "DETAILS".chars() {
+                    let uv = font::glyph_rect(c);
+                    if uv != [0f32; 4] {
+                        dl.push_rect(tx, iy + 3.0, 8.0, 16.0, uv, [200, 210, 230, 255]);
+                    }
+                    tx += 8.0;
+                }
+            }
+            let div_col = if div_hover == Some(1) || div_drag == Some(1) {
+                [120, 160, 220, 255u8]
+            } else {
+                SEP
+            };
+            dl.push_vsep(ix, iy, panel_h + BOTTOM_H, div_col);
+        };
 
         // Helper: draw empty panel chrome and return
         macro_rules! draw_empty {
             () => {{
+                let dh = self.div_hover;
+                let dd = self.div_drag;
                 let dl = &mut self.world.ui.draw_list;
-                dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
-                dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
-                dl.push_vsep(ix, iy, panel_h, SEP);
+                draw_chrome(dl, dh, dd);
                 return;
             }};
         }
@@ -1103,11 +1200,11 @@ impl EditorApp {
 
         {
             let content_y = iy + TITLEBAR_H + 4.0;
-            let content_w = INSPECTOR_W - 8.0;
+            let content_w = iw - 8.0;
+            let dh = self.div_hover;
+            let dd = self.div_drag;
             let dl = &mut self.world.ui.draw_list;
-            dl.push_panel_bg(ix, iy, INSPECTOR_W, panel_h, PANEL_BG);
-            dl.push_title_bar(ix, iy, INSPECTOR_W, TITLEBAR_H, TITLEBAR_BG, SEP);
-            dl.push_vsep(ix, iy, panel_h, SEP);
+            draw_chrome(dl, dh, dd);
             let mut ui = Ui::with_input(
                 dl,
                 Rect {
@@ -1212,6 +1309,102 @@ fn light_kind_name(tag: u8) -> &'static str {
         18 => "AnalyticSky",
         19 => "Ambient",
         _ => "Unknown",
+    }
+}
+
+// ── Bottom output log panel ────────────────────────────────────────────────
+
+impl EditorApp {
+    fn draw_bottom_panel(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        use dumpster_fire_engine::resource_manager::ui_manager::{draw as uidraw, font};
+
+        let (win_w, win_h) = ctx
+            .viewport_grid(app)
+            .map(|g| (g.win_w, g.win_h))
+            .unwrap_or((1280.0, 720.0));
+        let by = win_h - BOTTOM_H;
+        let dl = &mut self.world.ui.draw_list;
+
+        dl.push_panel_bg(0.0, by, win_w, BOTTOM_H, PANEL_BG);
+        dl.push_hsep(0.0, by, win_w, SEP);
+        dl.push_title_bar(0.0, by, win_w, TITLEBAR_H, TITLEBAR_BG, SEP);
+
+        // Title "OUTPUT LOG"
+        {
+            let mut tx = 6.0_f32;
+            for c in "OUTPUT LOG".chars() {
+                if c == ' ' {
+                    tx += 8.0;
+                    continue;
+                }
+                let uv = font::glyph_rect(c);
+                if uv != [0f32; 4] {
+                    dl.push_rect(tx, by + 3.0, 8.0, 16.0, uv, [200, 210, 230, 255]);
+                }
+                tx += 8.0;
+            }
+        }
+
+        // FPS stats line
+        let fps_str = format!(
+            "{:.1} ms   {:.0} fps",
+            if self.fps_display > 0.0 {
+                1000.0 / self.fps_display
+            } else {
+                0.0
+            },
+            self.fps_display
+        );
+        let stats_y = by + TITLEBAR_H + 4.0;
+        {
+            let mut tx = 8.0_f32;
+            for c in fps_str.chars() {
+                if c == ' ' {
+                    tx += 8.0;
+                    continue;
+                }
+                let uv = font::glyph_rect(c);
+                if uv != [0f32; 4] {
+                    dl.push_rect(tx, stats_y, 8.0, 16.0, uv, [130, 190, 130, 255]);
+                }
+                tx += 8.0;
+            }
+        }
+
+        // Divider between stats and content
+        dl.push_hsep(0.0, stats_y + 18.0, win_w, [42, 42, 56, 255]);
+
+        // Log content area — static placeholder lines in UE style
+        let log_lines: &[(&str, [u8; 4])] = &[
+            ("LogInit: Engine initialized.", [140, 200, 140, 255]),
+            ("LogRenderer: Overlay pipeline online.", [130, 180, 220, 255]),
+            ("LogEditor: Scene loaded.", [180, 180, 180, 255]),
+            ("LogEditor: Ready.", [100, 140, 100, 255]),
+        ];
+        let line_y_start = stats_y + 22.0;
+        for (i, (text, color)) in log_lines.iter().enumerate() {
+            let ly = line_y_start + i as f32 * 18.0;
+            if ly + 16.0 > win_h - 4.0 {
+                break;
+            }
+            let mut tx = 8.0_f32;
+            // Render each char of the log line
+            for c in text.chars() {
+                if tx + 8.0 > win_w - 8.0 {
+                    break;
+                }
+                if c == ' ' {
+                    tx += 8.0;
+                    continue;
+                }
+                let uv = font::glyph_rect(c);
+                if uv != [0f32; 4] {
+                    dl.push_rect(tx, ly, 8.0, 14.0, uv, *color);
+                }
+                tx += 8.0;
+            }
+        }
+        let _ = uidraw::SOLID;
     }
 }
 
@@ -1643,6 +1836,10 @@ fn main() -> ForgeResult<()> {
         cam_fitted: false,
         start: Instant::now(),
         win: None,
+        outliner_w: 220.0,
+        inspector_w: 260.0,
+        div_drag: None,
+        div_hover: None,
         grid_enabled: true,
         gizmo_mode: GizmoMode::Translate,
         gizmo_space: GizmoSpace::World,

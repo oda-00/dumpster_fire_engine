@@ -85,6 +85,7 @@ pub struct GraphicsState {
 
     // command recording — FRAMES_IN_FLIGHT primary buffers
     pub command_pool: vk::CommandPool,
+    pub graphics_queue: vk::Queue,
     pub command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT],
 
     // Per-frame-in-flight sync: image_available + in_flight (CPU-GPU fence).
@@ -142,7 +143,7 @@ impl Window {
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
         device: &ash::Device,
-        _graphics_queue: vk::Queue,
+        graphics_queue: vk::Queue,
         graphics_queue_family: u32,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
         depth_format: vk::Format,
@@ -286,6 +287,7 @@ impl Window {
                 skinned_mold: None,
                 framebuffers,
                 command_pool,
+                graphics_queue,
                 command_buffers,
                 image_available_semaphores,
                 in_flight_fences,
@@ -347,6 +349,8 @@ impl Window {
             gfx.swapchain_format,
             &views,
             gfx.swapchain_extent,
+            gfx.graphics_queue,
+            gfx.command_pool,
         )?;
         gfx.overlay = Some(overlay);
         Ok(())
@@ -398,6 +402,8 @@ impl Window {
                 gfx.swapchain_format,
                 &views,
                 gfx.swapchain_extent,
+                gfx.graphics_queue,
+                gfx.command_pool,
             )?;
             gfx.overlay = Some(overlay);
         }
@@ -641,6 +647,8 @@ impl Window {
             gfx.swapchain_format,
             &views,
             gfx.swapchain_extent,
+            gfx.graphics_queue,
+            gfx.command_pool,
         )?;
         gfx.overlay = Some(overlay);
 

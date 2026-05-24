@@ -93,6 +93,8 @@ impl OverlayPipeline {
         swapchain_format: vk::Format,
         swapchain_views: &[vk::ImageView],
         extent: vk::Extent2D,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
     ) -> ForgeResult<Self> {
         let n_images = swapchain_views.len();
 
@@ -366,7 +368,7 @@ impl OverlayPipeline {
         }
 
         // ── UI overlay pipeline ───────────────────────────────────────────
-        let ui = build_ui_render(device, memory_props, overlay_pass, extent)?;
+        let ui = build_ui_render(device, memory_props, overlay_pass, extent, queue, command_pool)?;
 
         Ok(Self {
             hdr_images,
@@ -494,30 +496,6 @@ impl OverlayPipeline {
             );
             device.cmd_draw(cmd, 3, 1, 0, 0);
             device.cmd_end_render_pass(cmd);
-
-            // Lazy-once: transition font image UNDEFINED → SHADER_READ_ONLY_OPTIMAL
-            // on the first frame so the fragment shader can sample it safely.
-            if !self.ui.font_transitioned {
-                let barrier = vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-                    .src_access_mask(vk::AccessFlags2::empty())
-                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-                    .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image(self.ui.font_image.handle)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
-                let barriers = [barrier];
-                let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-                device.cmd_pipeline_barrier2(cmd, &dep);
-                self.ui.font_transitioned = true;
-            }
 
             // Overlay pass (LOAD_OP_LOAD on swapchain). Caller can record UI
             // / debug-lines draws between begin and end via the public
@@ -649,32 +627,130 @@ fn build_ui_render(
     memory_props: &vk::PhysicalDeviceMemoryProperties,
     overlay_pass: vk::RenderPass,
     extent: vk::Extent2D,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
 ) -> ForgeResult<UiRender> {
-    // Font texture — 1x1 white (UI shader treats sub-pixel uv as solid fill
-    // and modulates by vertex color; future real font atlas can replace this
-    // image without changing the shader).
-    let font_w = 1u32;
-    let font_h = 1u32;
-    let mut font_image = ForgeImage::create_2d(
+    let atlas_bytes = crate::resource_manager::ui_manager::font::bake_atlas();
+    let atlas_w = crate::resource_manager::ui_manager::font::ATLAS_W;
+    let atlas_h = crate::resource_manager::ui_manager::font::ATLAS_H;
+
+    let font_image = ForgeImage::create_2d(
         device,
         memory_props,
-        font_w,
-        font_h,
+        atlas_w,
+        atlas_h,
         vk::Format::R8_UNORM,
         vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
         vk::MemoryPropertyFlags::DEVICE_LOCAL,
     )?;
-    // Upload 1 pixel of 0xFF via host-visible staging buffer + image copy.
+
     let mut staging = ForgeBuffer::create(
         device,
         memory_props,
-        1,
+        atlas_bytes.len() as u64,
         vk::BufferUsageFlags::TRANSFER_SRC,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
     )?;
-    staging.write_bytes(device, &[0xFFu8])?;
-    let _ = &mut font_image; // image data initialised by atlas at first frame; leaving 1x1 sized
+    staging.write_bytes(device, &atlas_bytes)?;
+
+    let cb = unsafe {
+        device
+            .allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )
+            .map_err(ForgeError::Vk)?[0]
+    };
     unsafe {
+        device
+            .begin_command_buffer(
+                cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .map_err(ForgeError::Vk)?;
+
+        let to_dst = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+            .src_access_mask(vk::AccessFlags2::empty())
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(font_image.handle)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        device.cmd_pipeline_barrier2(
+            cb,
+            &vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&to_dst)),
+        );
+
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D::default())
+            .image_extent(vk::Extent3D {
+                width: atlas_w,
+                height: atlas_h,
+                depth: 1,
+            });
+        device.cmd_copy_buffer_to_image(
+            cb,
+            staging.handle,
+            font_image.handle,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region],
+        );
+
+        let to_read = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(font_image.handle)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        device.cmd_pipeline_barrier2(
+            cb,
+            &vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&to_read)),
+        );
+
+        device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
+
+        let fence = device
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+            .map_err(ForgeError::Vk)?;
+        let cbs = [cb];
+        let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+        device
+            .queue_submit(queue, &[submit], fence)
+            .map_err(ForgeError::Vk)?;
+        device
+            .wait_for_fences(&[fence], true, u64::MAX)
+            .map_err(ForgeError::Vk)?;
+        device.destroy_fence(fence, None);
+        device.free_command_buffers(command_pool, &cbs);
         staging.destroy(device);
     }
 
@@ -857,10 +933,6 @@ fn build_ui_render(
         device.update_descriptor_sets(&[write], &[]);
     }
 
-    // Transition font image UNDEFINED → SHADER_READ_ONLY_OPTIMAL so the
-    // first frame's descriptor sample succeeds. Image content is not
-    // critical because the UI shader treats v_uv ≈ (0,0) as solid fill;
-    // the texture is only consulted for non-zero uv (future glyph work).
     let _ = extent;
 
     // Per-frame-in-flight buffers — host-visible so we can write directly
@@ -908,7 +980,7 @@ fn build_ui_render(
         ibs,
         vert_counts: [0; FRAMES_IN_FLIGHT],
         idx_counts: [0; FRAMES_IN_FLIGHT],
-        font_transitioned: false,
+        font_transitioned: true,
     })
 }
 
