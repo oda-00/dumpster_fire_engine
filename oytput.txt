@@ -1,0 +1,686 @@
+/home/alexander/projects/dumpster_fire_engine/target/release/build/llvm-sys-535108aca4eadcf1/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/shaderc-sys-aa04de7842e7ad06/out/lib:/home/alexander/projects/dumpster_fire_engine/target/release:/home/alexander/projects/dumpster_fire_engine/target/release/deps:/usr/lib/rust-1.93/lib/rustlib/x86_64-unknown-linux-gnu/lib' LLVM_SYS_180_PREFIX=/home/alexander/projects/dumpster_fire_engine/.llvm/18 OUT_DIR=/home/alexander/projects/dumpster_fire_engine/target/release/build/dumpster_fire_engine-7ac51022932d5e65/out /home/alexander/projects/dumpster_fire_engine/target/release/deps/game_tick-8225cea201c6f449 --bench`
+Gnuplot not found, using plotters backend
+Benchmarking world_build/1L×1S×50A(50t): Collecting 100 samples in estimat
+world_build/1L×1S×50A(50t)
+                        time:   [32.448 µs 32.528 µs 32.615 µs]
+                        thrpt:  [1.5331 Melem/s 1.5371 Melem/s 1.5409 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking world_build/2L×2S×500A(2000t): Warming up for 3.0000 s
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.1s, enable flat sampling, or reduce sample count to 50.
+Benchmarking world_build/2L×2S×500A(2000t): Collecting 100 samples in esti
+world_build/2L×2S×500A(2000t)
+                        time:   [1.3996 ms 1.4088 ms 1.4186 ms]
+                        thrpt:  [1.4099 Melem/s 1.4197 Melem/s 1.4290 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking world_build/2L×4S×1000A(8000t): Collecting 100 samples in est
+world_build/2L×4S×1000A(8000t)
+                        time:   [8.1364 ms 8.1861 ms 8.2376 ms]
+                        thrpt:  [971.16 Kelem/s 977.27 Kelem/s 983.23 Kelem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking tick_steady_state/2L×2S×500A(2000t): Collecting 100 samples i
+tick_steady_state/2L×2S×500A(2000t)
+                        time:   [35.377 µs 35.473 µs 35.580 µs]
+                        thrpt:  [56.212 Melem/s 56.381 Melem/s 56.534 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low severe
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking tick_scaling/1L×1S×50A(50t): Collecting 100 samples in estima
+tick_scaling/1L×1S×50A(50t)
+                        time:   [619.35 ns 623.41 ns 628.45 ns]
+                        thrpt:  [79.560 Melem/s 80.204 Melem/s 80.730 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) high mild
+  3 (3.00%) high severe
+Benchmarking tick_scaling/2L×2S×500A(2000t): Collecting 100 samples in est
+tick_scaling/2L×2S×500A(2000t)
+                        time:   [35.389 µs 35.485 µs 35.595 µs]
+                        thrpt:  [56.188 Melem/s 56.362 Melem/s 56.515 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  2 (2.00%) low severe
+  3 (3.00%) low mild
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking tick_scaling/2L×4S×1000A(8000t): Collecting 100 samples in es
+tick_scaling/2L×4S×1000A(8000t)
+                        time:   [161.78 µs 163.32 µs 164.82 µs]
+                        thrpt:  [48.539 Melem/s 48.985 Melem/s 49.451 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  4 (4.00%) low severe
+  5 (5.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking tick_scaling/4L×4S×10000A(160000t): Collecting 100 samples in
+tick_scaling/4L×4S×10000A(160000t)
+                        time:   [3.5810 ms 3.7641 ms 3.9556 ms]
+                        thrpt:  [40.449 Melem/s 42.506 Melem/s 44.680 Melem/s]
+
+Benchmarking tick_phases/collect_effects: Collecting 100 samples in estima
+tick_phases/collect_effects
+                        time:   [298.00 ns 298.59 ns 299.21 ns]
+                        thrpt:  [6.6843 Gelem/s 6.6981 Gelem/s 6.7115 Gelem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking tick_phases/post_tick: Collecting 100 samples in estimated 5.
+tick_phases/post_tick   time:   [1.1598 µs 1.1632 µs 1.1673 µs]
+                        thrpt:  [1.7134 Gelem/s 1.7193 Gelem/s 1.7244 Gelem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking tick_phases/propagate_transforms: Collecting 100 samples in e
+tick_phases/propagate_transforms
+                        time:   [4.8178 ns 4.8337 ns 4.8503 ns]
+                        thrpt:  [412.34 Gelem/s 413.76 Gelem/s 415.13 Gelem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking tick_phases/full_tick: Collecting 100 samples in estimated 5.
+tick_phases/full_tick   time:   [34.765 µs 34.858 µs 34.957 µs]
+                        thrpt:  [57.212 Melem/s 57.376 Melem/s 57.528 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low severe
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking transition_storm/2L×2S×500A(2000t): Collecting 100 samples in
+transition_storm/2L×2S×500A(2000t)
+                        time:   [2.1853 µs 2.1902 µs 2.1956 µs]
+                        thrpt:  [910.93 Melem/s 913.17 Melem/s 915.19 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking deep_hsm/depth=16: Collecting 100 samples in estimated 5.0018
+deep_hsm/depth=16       time:   [366.24 ns 367.12 ns 368.01 ns]
+                        thrpt:  [43.477 Melem/s 43.583 Melem/s 43.687 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+Benchmarking deep_hsm/depth=64: Collecting 100 samples in estimated 5.0021
+deep_hsm/depth=64       time:   [2.0460 µs 2.0515 µs 2.0575 µs]
+                        thrpt:  [31.106 Melem/s 31.196 Melem/s 31.280 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) high mild
+  5 (5.00%) high severe
+Benchmarking deep_hsm/depth=256: Collecting 100 samples in estimated 5.017
+deep_hsm/depth=256      time:   [18.547 µs 18.601 µs 18.664 µs]
+                        thrpt:  [13.716 Melem/s 13.763 Melem/s 13.803 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+
+     Running `CARGO=/usr/lib/rust-1.93/bin/cargo CARGO_MANIFEST_DIR=/home/alexander/projects/dumpster_fire_engine CARGO_MANIFEST_PATH=/home/alexander/projects/dumpster_fire_engine/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=dumpster_fire_engine CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' LD_LIBRARY_PATH='/home/alexander/projects/dumpster_fire_engine/target/release/build/link-cplusplus-8c1f1c5e5f307e16/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/llvm-sys-535108aca4eadcf1/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/shaderc-sys-aa04de7842e7ad06/out/lib:/home/alexander/projects/dumpster_fire_engine/target/release:/home/alexander/projects/dumpster_fire_engine/target/release/deps:/usr/lib/rust-1.93/lib/rustlib/x86_64-unknown-linux-gnu/lib' LLVM_SYS_180_PREFIX=/home/alexander/projects/dumpster_fire_engine/.llvm/18 OUT_DIR=/home/alexander/projects/dumpster_fire_engine/target/release/build/dumpster_fire_engine-7ac51022932d5e65/out /home/alexander/projects/dumpster_fire_engine/target/release/deps/iai_critical-a69daf26f48a4153 --bench`
+iai_critical::critical::propagate_dirty_1024
+  Instructions:                     9097465|N/A                  (*********)
+  L1 Hits:                         26241497|N/A                  (*********)
+  LL Hits:                            19254|N/A                  (*********)
+  RAM Hits:                          137221|N/A                  (*********)
+  Total read+write:                26397972|N/A                  (*********)
+  Estimated Cycles:                31140502|N/A                  (*********)
+iai_critical::critical::cue_troupe_delta_1024
+  Instructions:                     9180472|N/A                  (*********)
+  L1 Hits:                         26331333|N/A                  (*********)
+  LL Hits:                            16620|N/A                  (*********)
+  RAM Hits:                          139763|N/A                  (*********)
+  Total read+write:                26487716|N/A                  (*********)
+  Estimated Cycles:                31306138|N/A                  (*********)
+iai_critical::critical::condition_always
+  Instructions:                      314688|N/A                  (*********)
+  L1 Hits:                           647821|N/A                  (*********)
+  LL Hits:                              278|N/A                  (*********)
+  RAM Hits:                            2674|N/A                  (*********)
+  Total read+write:                  650773|N/A                  (*********)
+  Estimated Cycles:                  742801|N/A                  (*********)
+iai_critical::critical::condition_actor_near
+  Instructions:                      353828|N/A                  (*********)
+  L1 Hits:                           614978|N/A                  (*********)
+  LL Hits:                              202|N/A                  (*********)
+  RAM Hits:                            1762|N/A                  (*********)
+  Total read+write:                  616942|N/A                  (*********)
+  Estimated Cycles:                  677658|N/A                  (*********)
+iai_critical::critical::bt_leaf_pass
+  Instructions:                      313869|N/A                  (*********)
+  L1 Hits:                           465797|N/A                  (*********)
+  LL Hits:                              125|N/A                  (*********)
+  RAM Hits:                             698|N/A                  (*********)
+  Total read+write:                  466620|N/A                  (*********)
+  Estimated Cycles:                  490852|N/A                  (*********)
+iai_critical::critical::arena_get_hit_10k
+  Instructions:                      315747|N/A                  (*********)
+  L1 Hits:                           445954|N/A                  (*********)
+  LL Hits:                             5029|N/A                  (*********)
+  RAM Hits:                            5030|N/A                  (*********)
+  Total read+write:                  456013|N/A                  (*********)
+  Estimated Cycles:                  647149|N/A                  (*********)
+iai_critical::critical::play_handle_for_lookup
+  Instructions:                      317304|N/A                  (*********)
+  L1 Hits:                           461082|N/A                  (*********)
+  LL Hits:                             3540|N/A                  (*********)
+  RAM Hits:                            2339|N/A                  (*********)
+  Total read+write:                  466961|N/A                  (*********)
+  Estimated Cycles:                  560647|N/A                  (*********)
+iai_critical::critical::world_full_tick_xlarge
+  Instructions:                   103811073|N/A                  (*********)
+  L1 Hits:                        277322343|N/A                  (*********)
+  LL Hits:                           913669|N/A                  (*********)
+  RAM Hits:                         1443406|N/A                  (*********)
+  Total read+write:               279679418|N/A                  (*********)
+  Estimated Cycles:               332409898|N/A                  (*********)
+
+Iai-Callgrind result: Ok. 8 without regressions; 0 regressed; 8 benchmarks finished in 4.71545s
+     Running `CARGO=/usr/lib/rust-1.93/bin/cargo CARGO_MANIFEST_DIR=/home/alexander/projects/dumpster_fire_engine CARGO_MANIFEST_PATH=/home/alexander/projects/dumpster_fire_engine/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=dumpster_fire_engine CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' LD_LIBRARY_PATH='/home/alexander/projects/dumpster_fire_engine/target/release/build/link-cplusplus-8c1f1c5e5f307e16/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/llvm-sys-535108aca4eadcf1/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/shaderc-sys-aa04de7842e7ad06/out/lib:/home/alexander/projects/dumpster_fire_engine/target/release:/home/alexander/projects/dumpster_fire_engine/target/release/deps:/usr/lib/rust-1.93/lib/rustlib/x86_64-unknown-linux-gnu/lib' LLVM_SYS_180_PREFIX=/home/alexander/projects/dumpster_fire_engine/.llvm/18 OUT_DIR=/home/alexander/projects/dumpster_fire_engine/target/release/build/dumpster_fire_engine-7ac51022932d5e65/out /home/alexander/projects/dumpster_fire_engine/target/release/deps/mesh_pipeline-517d6657bf2d104d --bench`
+Gnuplot not found, using plotters backend
+Benchmarking gltf_parse/triangles/1: Collecting 100 samples in estimated 5
+gltf_parse/triangles/1  time:   [8.7402 µs 8.7593 µs 8.7792 µs]
+                        thrpt:  [341.71 Kelem/s 342.49 Kelem/s 343.24 Kelem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  6 (6.00%) high mild
+Benchmarking gltf_parse/triangles/64: Collecting 100 samples in estimated 
+gltf_parse/triangles/64 time:   [19.786 µs 19.831 µs 19.883 µs]
+                        thrpt:  [9.6563 Melem/s 9.6820 Melem/s 9.7040 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking gltf_parse/triangles/1024: Collecting 100 samples in estimate
+gltf_parse/triangles/1024
+                        time:   [202.29 µs 202.80 µs 203.36 µs]
+                        thrpt:  [15.107 Melem/s 15.148 Melem/s 15.186 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking gltf_parse/triangles/16384: Collecting 100 samples in estimat
+gltf_parse/triangles/16384
+                        time:   [6.0862 ms 6.1069 ms 6.1286 ms]
+                        thrpt:  [8.0201 Melem/s 8.0485 Melem/s 8.0759 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+
+Benchmarking mesh_ore_build/triangles/64: Collecting 100 samples in estima
+mesh_ore_build/triangles/64
+                        time:   [224.75 ns 225.15 ns 225.57 ns]
+                        thrpt:  [851.16 Melem/s 852.77 Melem/s 854.30 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mesh_ore_build/triangles/1024: Collecting 100 samples in esti
+mesh_ore_build/triangles/1024
+                        time:   [2.9891 µs 3.0004 µs 3.0137 µs]
+                        thrpt:  [1.0193 Gelem/s 1.0239 Gelem/s 1.0277 Gelem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking mesh_ore_build/triangles/16384: Collecting 100 samples in est
+mesh_ore_build/triangles/16384
+                        time:   [47.935 µs 48.119 µs 48.333 µs]
+                        thrpt:  [1.0169 Gelem/s 1.0215 Gelem/s 1.0254 Gelem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high mild
+Benchmarking mesh_ore_build/triangles/131072: Warming up for 3.0000 s
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 5.4s, enable flat sampling, or reduce sample count to 60.
+Benchmarking mesh_ore_build/triangles/131072: Collecting 100 samples in es
+mesh_ore_build/triangles/131072
+                        time:   [1.1166 ms 1.1513 ms 1.1854 ms]
+                        thrpt:  [331.71 Melem/s 341.56 Melem/s 352.15 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+vulkan: detected WSL host
+vulkan: enumerating 1 physical device(s)
+vulkan:   [0] llvmpipe (LLVM 21.1.8, 256 bits) — CPU (tier 1), 31714 MB DEVICE_LOCAL, queue_ok=true, dzn_pref=0
+GPU: llvmpipe (LLVM 21.1.8, 256 bits) (31714 MB DEVICE_LOCAL, score tier 1)
+vulkan: MSAA capability — using TYPE_8
+Benchmarking gpu_mesh_upload/triangles/64: Collecting 20 samples in estima
+gpu_mesh_upload/triangles/64
+                        time:   [114.83 µs 115.25 µs 115.70 µs]
+                        thrpt:  [82.298 MiB/s 82.614 MiB/s 82.920 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking gpu_mesh_upload/triangles/1024: Collecting 20 samples in esti
+gpu_mesh_upload/triangles/1024
+                        time:   [228.62 µs 229.14 µs 229.95 µs]
+                        thrpt:  [662.51 MiB/s 664.84 MiB/s 666.35 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking gpu_mesh_upload/triangles/16384: Collecting 20 samples in est
+gpu_mesh_upload/triangles/16384
+                        time:   [2.3881 ms 2.4048 ms 2.4157 ms]
+                        thrpt:  [1009.0 MiB/s 1013.6 MiB/s 1020.7 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking draw_call_collect/factories_1/1: Collecting 100 samples in es
+draw_call_collect/factories_1/1
+                        time:   [13.749 ns 13.782 ns 13.817 ns]
+                        thrpt:  [72.372 Melem/s 72.558 Melem/s 72.734 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+Benchmarking draw_call_collect/factories_1/16: Collecting 100 samples in e
+draw_call_collect/factories_1/16
+                        time:   [229.96 ns 230.79 ns 231.85 ns]
+                        thrpt:  [69.010 Melem/s 69.327 Melem/s 69.578 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking draw_call_collect/factories_8/1: Collecting 100 samples in es
+draw_call_collect/factories_8/1
+                        time:   [113.35 ns 113.61 ns 113.91 ns]
+                        thrpt:  [70.232 Melem/s 70.416 Melem/s 70.577 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking draw_call_collect/factories_8/16: Collecting 100 samples in e
+draw_call_collect/factories_8/16
+                        time:   [1.9725 µs 1.9765 µs 1.9810 µs]
+                        thrpt:  [64.614 Melem/s 64.762 Melem/s 64.894 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking draw_call_collect/factories_64/1: Collecting 100 samples in e
+draw_call_collect/factories_64/1
+                        time:   [1.0382 µs 1.0402 µs 1.0425 µs]
+                        thrpt:  [61.391 Melem/s 61.528 Melem/s 61.646 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking draw_call_collect/factories_64/16: Collecting 100 samples in 
+draw_call_collect/factories_64/16
+                        time:   [16.618 µs 16.656 µs 16.695 µs]
+                        thrpt:  [61.334 Melem/s 61.480 Melem/s 61.621 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+
+     Running `CARGO=/usr/lib/rust-1.93/bin/cargo CARGO_MANIFEST_DIR=/home/alexander/projects/dumpster_fire_engine CARGO_MANIFEST_PATH=/home/alexander/projects/dumpster_fire_engine/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=dumpster_fire_engine CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' LD_LIBRARY_PATH='/home/alexander/projects/dumpster_fire_engine/target/release/build/link-cplusplus-8c1f1c5e5f307e16/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/llvm-sys-535108aca4eadcf1/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/shaderc-sys-aa04de7842e7ad06/out/lib:/home/alexander/projects/dumpster_fire_engine/target/release:/home/alexander/projects/dumpster_fire_engine/target/release/deps:/usr/lib/rust-1.93/lib/rustlib/x86_64-unknown-linux-gnu/lib' LLVM_SYS_180_PREFIX=/home/alexander/projects/dumpster_fire_engine/.llvm/18 OUT_DIR=/home/alexander/projects/dumpster_fire_engine/target/release/build/dumpster_fire_engine-7ac51022932d5e65/out /home/alexander/projects/dumpster_fire_engine/target/release/deps/play_paths-6dca084078ebd90f --bench`
+Gnuplot not found, using plotters backend
+Benchmarking instantiate/flat/5: Collecting 100 samples in estimated 5.002
+instantiate/flat/5      time:   [455.28 ns 456.25 ns 457.29 ns]
+                        thrpt:  [13.121 Melem/s 13.151 Melem/s 13.179 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking instantiate/flat/64: Collecting 100 samples in estimated 5.00
+instantiate/flat/64     time:   [5.5938 µs 5.6050 µs 5.6168 µs]
+                        thrpt:  [11.573 Melem/s 11.597 Melem/s 11.620 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking instantiate/flat/256: Collecting 100 samples in estimated 5.0
+instantiate/flat/256    time:   [22.543 µs 22.617 µs 22.714 µs]
+                        thrpt:  [11.315 Melem/s 11.363 Melem/s 11.400 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking instantiate/deep/16: Collecting 100 samples in estimated 5.00
+instantiate/deep/16     time:   [1.2486 µs 1.2513 µs 1.2550 µs]
+                        thrpt:  [12.749 Melem/s 12.787 Melem/s 12.815 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+Benchmarking instantiate/deep/64: Collecting 100 samples in estimated 5.02
+instantiate/deep/64     time:   [5.6976 µs 5.7129 µs 5.7284 µs]
+                        thrpt:  [11.172 Melem/s 11.203 Melem/s 11.233 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+Benchmarking instantiate/deep/256: Collecting 100 samples in estimated 5.0
+instantiate/deep/256    time:   [28.648 µs 28.775 µs 28.904 µs]
+                        thrpt:  [8.8571 Melem/s 8.8965 Melem/s 8.9359 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking handle_for/range_compressed/16: Collecting 100 samples in est
+handle_for/range_compressed/16
+                        time:   [7.4355 ns 7.4483 ns 7.4620 ns]
+                        thrpt:  [2.2782 Gelem/s 2.2824 Gelem/s 2.2863 Gelem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking handle_for/hashmap_control/16: Collecting 100 samples in esti
+handle_for/hashmap_control/16
+                        time:   [102.51 ns 102.75 ns 103.01 ns]
+                        thrpt:  [165.03 Melem/s 165.45 Melem/s 165.84 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking handle_for/range_compressed/256: Collecting 100 samples in es
+handle_for/range_compressed/256
+                        time:   [111.56 ns 112.18 ns 112.92 ns]
+                        thrpt:  [2.2760 Gelem/s 2.2911 Gelem/s 2.3038 Gelem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  7 (7.00%) high mild
+  4 (4.00%) high severe
+Benchmarking handle_for/hashmap_control/256: Collecting 100 samples in est
+handle_for/hashmap_control/256
+                        time:   [1.5609 µs 1.5665 µs 1.5732 µs]
+                        thrpt:  [163.36 Melem/s 164.06 Melem/s 164.65 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking handle_for/range_compressed/4096: Collecting 100 samples in e
+handle_for/range_compressed/4096
+                        time:   [1.7306 µs 1.7344 µs 1.7391 µs]
+                        thrpt:  [2.3559 Gelem/s 2.3622 Gelem/s 2.3674 Gelem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking handle_for/hashmap_control/4096: Collecting 100 samples in es
+handle_for/hashmap_control/4096
+                        time:   [26.847 µs 26.903 µs 26.961 µs]
+                        thrpt:  [151.96 Melem/s 152.29 Melem/s 152.60 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking collect_effects/depth_8: Collecting 100 samples in estimated 
+collect_effects/depth_8 time:   [56.557 ns 56.697 ns 56.870 ns]
+                        thrpt:  [140.67 Melem/s 141.10 Melem/s 141.45 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking collect_effects/depth_64: Collecting 100 samples in estimated
+collect_effects/depth_64
+                        time:   [417.16 ns 418.37 ns 419.77 ns]
+                        thrpt:  [152.46 Melem/s 152.98 Melem/s 153.42 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking collect_effects/depth_256: Collecting 100 samples in estimate
+collect_effects/depth_256
+                        time:   [1.6549 µs 1.6588 µs 1.6632 µs]
+                        thrpt:  [153.92 Melem/s 154.33 Melem/s 154.69 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking apply_transition_via_tick/sibling_swap_every_tick: Warming up
+Benchmarking apply_transition_via_tick/sibling_swap_every_tick: Collecting
+apply_transition_via_tick/sibling_swap_every_tick
+                        time:   [129.55 ns 130.02 ns 130.51 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking compute_static_troupes_via_instantiate/8: Warming up for 3.00
+Benchmarking compute_static_troupes_via_instantiate/8: Collecting 100 samp
+compute_static_troupes_via_instantiate/8
+                        time:   [1.0124 µs 1.0143 µs 1.0163 µs]
+                        thrpt:  [7.8714 Melem/s 7.8872 Melem/s 7.9017 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  6 (6.00%) high mild
+Benchmarking compute_static_troupes_via_instantiate/64: Warming up for 3.0
+Benchmarking compute_static_troupes_via_instantiate/64: Collecting 100 sam
+compute_static_troupes_via_instantiate/64
+                        time:   [8.5790 µs 8.6372 µs 8.7083 µs]
+                        thrpt:  [7.3493 Melem/s 7.4098 Melem/s 7.4601 Melem/s]
+Benchmarking compute_static_troupes_via_instantiate/256: Warming up for 3.
+Benchmarking compute_static_troupes_via_instantiate/256: Collecting 100 sa
+compute_static_troupes_via_instantiate/256
+                        time:   [31.244 µs 31.332 µs 31.431 µs]
+                        thrpt:  [8.1447 Melem/s 8.1704 Melem/s 8.1936 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+
+     Running `CARGO=/usr/lib/rust-1.93/bin/cargo CARGO_MANIFEST_DIR=/home/alexander/projects/dumpster_fire_engine CARGO_MANIFEST_PATH=/home/alexander/projects/dumpster_fire_engine/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=dumpster_fire_engine CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' LD_LIBRARY_PATH='/home/alexander/projects/dumpster_fire_engine/target/release/build/link-cplusplus-8c1f1c5e5f307e16/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/llvm-sys-535108aca4eadcf1/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/shaderc-sys-aa04de7842e7ad06/out/lib:/home/alexander/projects/dumpster_fire_engine/target/release:/home/alexander/projects/dumpster_fire_engine/target/release/deps:/usr/lib/rust-1.93/lib/rustlib/x86_64-unknown-linux-gnu/lib' LLVM_SYS_180_PREFIX=/home/alexander/projects/dumpster_fire_engine/.llvm/18 OUT_DIR=/home/alexander/projects/dumpster_fire_engine/target/release/build/dumpster_fire_engine-7ac51022932d5e65/out /home/alexander/projects/dumpster_fire_engine/target/release/deps/script_hot_reload-eb6b30de529f1bcb --bench`
+Timer precision: 20 ns
+script_hot_reload           fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ concurrent_round_trip_4     Compiling either v1.15.0
+   Compiling rustix v0.38.44
+   Compiling syn v2.0.117
+   Compiling libc v0.2.186
+   Compiling linux-raw-sys v0.4.15
+   Compiling llvm-sys v180.0.0 (/home/alexander/projects/dumpster_fire_engine/vendor/llvm-sys)
+   Compiling inkwell v0.5.0
+   Compiling rayon v1.12.0
+warning: unexpected `cfg` condition name: `LLVM_SYS_NOT_FOUND`
+   --> vendor/llvm-sys/src/lib.rs:514:55
+    |
+514 | ...= "no-llvm-linking"), LLVM_SYS_NOT_FOUND))]
+    |                          ^^^^^^^^^^^^^^^^^^
+    |
+    = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(LLVM_SYS_NOT_FOUND)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(LLVM_SYS_NOT_FOUND)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: variable `Reason` should have a snake case name
+ --> vendor/llvm-sys/src/error_handling.rs:1:55
+  |
+1 | ...= Option<extern "C" fn(Reason: *const ::libc::c_char)>;
+  |                           ^^^^^^ help: convert the identifier to snake case: `reason`
+  |
+  = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variable `Opaque` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:32:5
+   |
+32 |     Opaque: *mut ::libc::c_void,
+   |     ^^^^^^ help: convert the identifier to snake case (notice the capitalization): `opaque`
+
+warning: variable `Size` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:33:5
+   |
+33 |     Size: ::libc::uintptr_t,
+   |     ^^^^ help: convert the identifier to snake case (notice the capitalization): `size`
+
+warning: variable `Alignment` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:34:5
+   |
+34 |     Alignment: ::libc::c_uint,
+   |     ^^^^^^^^^ help: convert the identifier to snake case: `alignment`
+
+warning: variable `SectionID` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:35:5
+   |
+35 |     SectionID: ::libc::c_uint,
+   |     ^^^^^^^^^ help: convert the identifier to snake case: `section_id`
+
+warning: variable `SectionName` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:36:5
+   |
+36 |     SectionName: *const ::libc::c_char,
+   |     ^^^^^^^^^^^ help: convert the identifier to snake case: `section_name`
+
+warning: variable `Opaque` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:39:5
+   |
+39 |     Opaque: *mut ::libc::c_void,
+   |     ^^^^^^ help: convert the identifier to snake case (notice the capitalization): `opaque`
+
+warning: variable `Size` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:40:5
+   |
+40 |     Size: ::libc::uintptr_t,
+   |     ^^^^ help: convert the identifier to snake case (notice the capitalization): `size`
+
+warning: variable `Alignment` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:41:5
+   |
+41 |     Alignment: ::libc::c_uint,
+   |     ^^^^^^^^^ help: convert the identifier to snake case: `alignment`
+
+warning: variable `SectionID` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:42:5
+   |
+42 |     SectionID: ::libc::c_uint,
+   |     ^^^^^^^^^ help: convert the identifier to snake case: `section_id`
+
+warning: variable `SectionName` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:43:5
+   |
+43 |     SectionName: *const ::libc::c_char,
+   |     ^^^^^^^^^^^ help: convert the identifier to snake case: `section_name`
+
+warning: variable `IsReadOnly` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:44:5
+   |
+44 |     IsReadOnly: LLVMBool,
+   |     ^^^^^^^^^^ help: convert the identifier to snake case: `is_read_only`
+
+warning: variable `Opaque` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:47:19
+   |
+47 |     extern "C" fn(Opaque: *mut ::libc::c_void, ErrMsg: *mut *mut :...
+   |                   ^^^^^^ help: convert the identifier to snake case (notice the capitalization): `opaque`
+
+warning: variable `ErrMsg` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:47:48
+   |
+47 | ...: *mut ::libc::c_void, ErrMsg: *mut *mut ::libc::c_char) -> LLV...
+   |                           ^^^^^^ help: convert the identifier to snake case: `err_msg`
+
+warning: variable `Opaque` should have a snake case name
+  --> vendor/llvm-sys/src/execution_engine.rs:48:66
+   |
+48 | ...= Option<extern "C" fn(Opaque: *mut ::libc::c_void)>;
+   |                           ^^^^^^ help: convert the identifier to snake case (notice the capitalization): `opaque`
+
+warning: `llvm-sys` (lib) generated 16 warnings
+   Compiling thiserror-impl v1.0.69
+   Compiling inkwell_internals v0.10.0
+   Compiling thiserror v1.0.69
+   Compiling langcd v0.1.0 (/home/alexander/projects/dumpster_fire_engine/tools/langcd)
+    Finished `release` profile [optimized] target(s) in 21.29s
+langcd: ready (pid 1456)
+langcd: exiting
+langcd: ready (pid 1477)
+langcd: exiting
+langcd: ready (pid 1498)
+langcd: exiting
+langcd: ready (pid 1519)
+langcd: exiting
+langcd: ready (pid 1540)
+langcd: exiting
+langcd: ready (pid 1561)
+langcd: exiting
+langcd: ready (pid 1582)
+langcd: exiting
+langcd: ready (pid 1603)
+langcd: exiting
+4.834 ms      │ 6.155 ms      │ 5.726 ms      │ 5.61 ms       │ 8       │ 8
+├─ concurrent_round_trip_8  langcd: ready (pid 1624)
+langcd: exiting
+langcd: ready (pid 1645)
+langcd: exiting
+langcd: ready (pid 1666)
+langcd: exiting
+langcd: ready (pid 1687)
+langcd: exiting
+langcd: ready (pid 1708)
+langcd: exiting
+langcd: ready (pid 1729)
+langcd: exiting
+langcd: ready (pid 1750)
+langcd: exiting
+langcd: ready (pid 1771)
+langcd: exiting
+7.06 ms       │ 9.869 ms      │ 9.672 ms      │ 9.244 ms      │ 8       │ 8
+╰─ round_trip               langcd: ready (pid 1792)
+langcd: exiting
+langcd: ready (pid 1813)
+langcd: exiting
+langcd: ready (pid 1834)
+langcd: exiting
+langcd: ready (pid 1855)
+langcd: exiting
+langcd: ready (pid 1876)
+langcd: exiting
+langcd: ready (pid 1897)
+langcd: exiting
+langcd: ready (pid 1918)
+langcd: exiting
+langcd: ready (pid 1939)
+langcd: exiting
+4.021 ms      │ 5.01 ms       │ 4.695 ms      │ 4.584 ms      │ 8       │ 8
+
+     Running `CARGO=/usr/lib/rust-1.93/bin/cargo CARGO_MANIFEST_DIR=/home/alexander/projects/dumpster_fire_engine CARGO_MANIFEST_PATH=/home/alexander/projects/dumpster_fire_engine/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=dumpster_fire_engine CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' LD_LIBRARY_PATH='/home/alexander/projects/dumpster_fire_engine/target/release/build/link-cplusplus-8c1f1c5e5f307e16/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/llvm-sys-535108aca4eadcf1/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/shaderc-sys-aa04de7842e7ad06/out/lib:/home/alexander/projects/dumpster_fire_engine/target/release:/home/alexander/projects/dumpster_fire_engine/target/release/deps:/usr/lib/rust-1.93/lib/rustlib/x86_64-unknown-linux-gnu/lib' LLVM_SYS_180_PREFIX=/home/alexander/projects/dumpster_fire_engine/.llvm/18 OUT_DIR=/home/alexander/projects/dumpster_fire_engine/target/release/build/dumpster_fire_engine-7ac51022932d5e65/out /home/alexander/projects/dumpster_fire_engine/target/release/deps/script_pipeline-42cf458ea7130a5a --bench`
+Timer precision: 10 ns
+script_pipeline       fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ codegen_to_object                │               │               │               │         │
+│  ├─ large_O0        2.554 ms      │ 4.799 ms      │ 2.683 ms      │ 2.76 ms       │ 100     │ 100
+│  ├─ large_O3        10.16 ms      │ 13.03 ms      │ 10.6 ms       │ 10.73 ms      │ 100     │ 100
+│  ├─ small_O0        1.601 ms      │ 2.517 ms      │ 1.751 ms      │ 1.809 ms      │ 100     │ 100
+│  ╰─ small_O3        5.467 ms      │ 7.422 ms      │ 5.716 ms      │ 5.81 ms       │ 100     │ 100
+├─ full_compile                     │               │               │               │         │
+│  ├─ large           10.23 ms      │ 12.82 ms      │ 10.66 ms      │ 10.78 ms      │ 100     │ 100
+│  ╰─ small           5.515 ms      │ 7.093 ms      │ 5.813 ms      │ 5.906 ms      │ 100     │ 100
+├─ lex                              │               │               │               │         │
+│  ├─ large           4.648 µs      │ 18.56 µs      │ 4.768 µs      │ 5.125 µs      │ 100     │ 100
+│  ╰─ small           1.422 µs      │ 4.778 µs      │ 1.462 µs      │ 1.562 µs      │ 100     │ 100
+├─ load_object                      │               │               │               │         │
+│  ├─ large           13.95 µs      │ 53.63 µs      │ 14.64 µs      │ 16.79 µs      │ 100     │ 100
+│  ╰─ small           13.31 µs      │ 62.44 µs      │ 13.67 µs      │ 14.89 µs      │ 100     │ 100
+├─ lower                            │               │               │               │         │
+│  ├─ large           2.353 µs      │ 12.55 µs      │ 2.519 µs      │ 2.745 µs      │ 100     │ 100
+│  ╰─ small           540.7 ns      │ 2.103 µs      │ 590.7 ns      │ 615.1 ns      │ 100     │ 100
+╰─ parse                            │               │               │               │         │
+   ├─ large           5.71 µs       │ 7.673 µs      │ 5.77 µs       │ 5.834 µs      │ 100     │ 100
+   ╰─ small           1.341 µs      │ 2.895 µs      │ 1.362 µs      │ 1.391 µs      │ 100     │ 100
+
+     Running `CARGO=/usr/lib/rust-1.93/bin/cargo CARGO_MANIFEST_DIR=/home/alexander/projects/dumpster_fire_engine CARGO_MANIFEST_PATH=/home/alexander/projects/dumpster_fire_engine/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=dumpster_fire_engine CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' LD_LIBRARY_PATH='/home/alexander/projects/dumpster_fire_engine/target/release/build/link-cplusplus-8c1f1c5e5f307e16/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/llvm-sys-535108aca4eadcf1/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/shaderc-sys-aa04de7842e7ad06/out/lib:/home/alexander/projects/dumpster_fire_engine/target/release:/home/alexander/projects/dumpster_fire_engine/target/release/deps:/usr/lib/rust-1.93/lib/rustlib/x86_64-unknown-linux-gnu/lib' LLVM_SYS_180_PREFIX=/home/alexander/projects/dumpster_fire_engine/.llvm/18 OUT_DIR=/home/alexander/projects/dumpster_fire_engine/target/release/build/dumpster_fire_engine-7ac51022932d5e65/out /home/alexander/projects/dumpster_fire_engine/target/release/deps/script_runtime-e147993146d0dda9 --bench`
+Timer precision: 10 ns
+script_runtime         fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ init_state          76.16 ns      │ 1.815 µs      │ 157.5 ns      │ 176.2 ns      │ 100     │ 800
+├─ native_tick_1k      4.738 µs      │ 24.41 µs      │ 4.778 µs      │ 5.094 µs      │ 100     │ 100
+├─ native_tick_single  11.83 ns      │ 17 ns         │ 12 ns         │ 12.12 ns      │ 100     │ 6400
+├─ on_enter            102.5 ns      │ 345.4 ns      │ 172.6 ns      │ 188.6 ns      │ 100     │ 800
+├─ tick_1k             7.904 µs      │ 12.02 µs      │ 8.475 µs      │ 8.724 µs      │ 100     │ 100
+├─ tick_batch_16       495.7 ns      │ 2.128 µs      │ 703.7 ns      │ 823.2 ns      │ 100     │ 200
+├─ tick_batch_32       801.2 ns      │ 3.05 µs       │ 1.227 µs      │ 1.368 µs      │ 100     │ 200
+├─ tick_batch_128      2.023 µs      │ 17.51 µs      │ 2.789 µs      │ 3.494 µs      │ 100     │ 100
+├─ tick_batch_1024     23.83 µs      │ 109.6 µs      │ 54.93 µs      │ 54.65 µs      │ 100     │ 100
+├─ tick_batch_4096     1.035 ms      │ 2.612 ms      │ 1.397 ms      │ 1.402 ms      │ 100     │ 100
+╰─ tick_single         137.5 ns      │ 445.5 ns      │ 202.7 ns      │ 220.7 ns      │ 100     │ 400
+
+     Running `CARGO=/usr/lib/rust-1.93/bin/cargo CARGO_MANIFEST_DIR=/home/alexander/projects/dumpster_fire_engine CARGO_MANIFEST_PATH=/home/alexander/projects/dumpster_fire_engine/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=dumpster_fire_engine CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' LD_LIBRARY_PATH='/home/alexander/projects/dumpster_fire_engine/target/release/build/link-cplusplus-8c1f1c5e5f307e16/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/llvm-sys-535108aca4eadcf1/out:/home/alexander/projects/dumpster_fire_engine/target/release/build/shaderc-sys-aa04de7842e7ad06/out/lib:/home/alexander/projects/dumpster_fire_engine/target/release:/home/alexander/projects/dumpster_fire_engine/target/release/deps:/usr/lib/rust-1.93/lib/rustlib/x86_64-unknown-linux-gnu/lib' LLVM_SYS_180_PREFIX=/home/alexander/projects/dumpster_fire_engine/.llvm/18 OUT_DIR=/home/alexander/projects/dumpster_fire_engine/target/release/build/dumpster_fire_engine-7ac51022932d5e65/out /home/alexander/projects/dumpster_fire_engine/target/release/deps/transform_kernels-ccbf027b28105dfd --bench`
+Timer precision: 10 ns
+transform_kernels                    fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ cue_troupe_delta_block                          │               │               │               │         │
+│  ├─ 64                             202.6 ns      │ 211.5 ns      │ 203.9 ns      │ 203.7 ns      │ 100     │ 800
+│  ├─ 1024                           3.164 µs      │ 18.95 µs      │ 3.185 µs      │ 3.357 µs      │ 100     │ 100
+│  ╰─ 10000                          31.06 µs      │ 43.69 µs      │ 31.24 µs      │ 31.82 µs      │ 100     │ 100
+├─ cue_troupe_identity_block                       │               │               │               │         │
+│  ├─ 64                             64.28 ns      │ 67.41 ns      │ 64.91 ns      │ 65.01 ns      │ 100     │ 1600
+│  ├─ 1024                           961.7 ns      │ 2.464 µs      │ 980.7 ns      │ 993.3 ns      │ 100     │ 100
+│  ╰─ 10000                          9.327 µs      │ 44.7 µs       │ 9.688 µs      │ 13.29 µs      │ 100     │ 100
+├─ cue_troupe_static_skip                          │               │               │               │         │
+│  ├─ 64                             5.07 ns       │ 5.23 ns       │ 5.109 ns      │ 5.104 ns      │ 100     │ 25600
+│  ├─ 1024                           5.109 ns      │ 5.23 ns       │ 5.152 ns      │ 5.164 ns      │ 100     │ 25600
+│  ╰─ 10000                          5.109 ns      │ 68.16 ns      │ 5.152 ns      │ 5.792 ns      │ 100     │ 25600
+├─ propagate_dirty_dense                           │               │               │               │         │
+│  ├─ 1                              63.66 ns      │ 335.4 ns      │ 72.41 ns      │ 79.56 ns      │ 100     │ 1600
+│  ├─ 4                              100.6 ns      │ 1.823 µs      │ 114.6 ns      │ 143.7 ns      │ 100     │ 1600
+│  ├─ 16                             200.1 ns      │ 745 ns        │ 220.1 ns      │ 233.9 ns      │ 100     │ 800
+│  ├─ 64                             300.2 ns      │ 2.469 µs      │ 325.2 ns      │ 365 ns        │ 100     │ 200
+│  ├─ 256                            911.7 ns      │ 1.772 µs      │ 941.7 ns      │ 956 ns        │ 100     │ 100
+│  ├─ 1024                           10.35 µs      │ 24.8 µs       │ 10.66 µs      │ 11.03 µs      │ 100     │ 100
+│  ╰─ 10000                          106.9 µs      │ 364.3 µs      │ 130.1 µs      │ 168.4 µs      │ 100     │ 100
+├─ propagate_dirty_sparse_10pct                    │               │               │               │         │
+│  ├─ 1                              108.7 ns      │ 699.2 ns      │ 129 ns        │ 155.2 ns      │ 100     │ 1600
+│  ├─ 4                              151.2 ns      │ 2.196 µs      │ 177.5 ns      │ 218.3 ns      │ 100     │ 800
+│  ├─ 16                             147.5 ns      │ 738.5 ns      │ 183.9 ns      │ 203.6 ns      │ 100     │ 400
+│  ├─ 64                             299.7 ns      │ 1.441 µs      │ 340.7 ns      │ 427 ns        │ 100     │ 100
+│  ├─ 256                            2.163 µs      │ 10.29 µs      │ 4.041 µs      │ 5.257 µs      │ 100     │ 100
+│  ├─ 1024                           12.85 µs      │ 99.44 µs      │ 28.83 µs      │ 30.55 µs      │ 100     │ 100
+│  ╰─ 10000                          296.5 µs      │ 765 µs        │ 380.5 µs      │ 397.9 µs      │ 100     │ 100
+├─ set_actor_local_already_dirty     4.057 µs      │ 19.57 µs      │ 4.167 µs      │ 4.34 µs       │ 100     │ 100
+├─ set_actor_local_first_dirty       18.02 µs      │ 74.76 µs      │ 18.38 µs      │ 19.15 µs      │ 100     │ 100
+╰─ set_sub_entity_local_first_dirty  24.32 µs      │ 47.77 µs      │ 24.93 µs      │ 25.75 µs      │ 100     │ 100
