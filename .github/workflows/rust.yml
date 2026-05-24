@@ -17,11 +17,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - name: Install LLVM 18
+      - name: Install LLVM 18 (pre-built tarball)
         run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s 18 all
-          echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
-          echo "/usr/lib/llvm-18/bin" >> $GITHUB_PATH
+          mkdir -p .llvm/18
+          curl -fsSL https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz \
+            | tar xJf - -C .llvm/18 --strip-components=1
+          echo "LLVM_SYS_180_PREFIX=$PWD/.llvm/18" >> $GITHUB_ENV
+          echo "$PWD/.llvm/18/bin" >> $GITHUB_PATH
       - name: Install Vulkan dev + GLSL compiler + Valgrind
         run: sudo apt-get install -y libvulkan-dev glslang-tools valgrind
       - name: Install iai-callgrind-runner

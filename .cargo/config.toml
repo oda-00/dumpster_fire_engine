@@ -1,0 +1,2 @@
+[env]
+LLVM_SYS_180_PREFIX = { value = ".llvm/18", relative = true }

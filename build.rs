@@ -2,6 +2,12 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    // Auto-install dev tooling that isn't handled by the patched llvm-sys build.rs.
+    // Each function is idempotent: it checks whether the tool exists first.
+    ensure_iai_callgrind_runner();
+    ensure_vulkan_and_glslc();
+    ensure_valgrind();
+
     // Prefer the native shaderc Rust binding — zero external tool deps.
     // Falls back to glslc / glslangValidator on PATH, then to pre-built .spv.
     let shaderc_compiler = shaderc::Compiler::new();
@@ -183,4 +189,142 @@ fn compile_external(ec: &ExtCompiler, src: &str, out: &str) -> bool {
             false
         }
     }
+}
+
+// ── Dev-tooling bootstrap ──────────────────────────────────────────────────
+
+fn ensure_iai_callgrind_runner() {
+    const VERSION: &str = "0.16.1";
+    // The runner prints its version to stderr in an error message, not stdout.
+    // Check both streams and also accept a successful (zero) exit code.
+    let already_ok = Command::new("iai-callgrind-runner")
+        .arg("--version")
+        .output()
+        .map(|o| {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr),
+            );
+            combined.contains(VERSION)
+        })
+        .unwrap_or(false);
+    if already_ok {
+        return;
+    }
+    println!("cargo::warning=Installing iai-callgrind-runner {VERSION} (one-time)...");
+    let status = Command::new("cargo")
+        .args(["install", "iai-callgrind-runner", "--version", VERSION, "--locked"])
+        .status();
+    if !matches!(status, Ok(s) if s.success()) {
+        println!(
+            "cargo::warning=Could not install iai-callgrind-runner; \
+             iai-callgrind benchmarks will fail. Run manually: \
+             cargo install iai-callgrind-runner --version {VERSION} --locked"
+        );
+    }
+}
+
+fn ensure_vulkan_and_glslc() {
+    let os = std::env::consts::OS;
+    let has_glslc = Command::new("glslc").arg("--version").output().is_ok()
+        || Command::new("glslangValidator").arg("--version").output().is_ok();
+
+    // Detect whether the Vulkan runtime loader is present by probing for
+    // the shared library directly — ash loads it at runtime via dlopen.
+    let has_vulkan = match os {
+        "linux" => {
+            let out = Command::new("ldconfig").arg("-p").output();
+            out.map(|o| String::from_utf8_lossy(&o.stdout).contains("libvulkan"))
+                .unwrap_or(false)
+        }
+        "macos" => Path::new("/usr/local/lib/libvulkan.dylib").exists()
+            || Path::new("/opt/homebrew/lib/libvulkan.dylib").exists()
+            || std::env::var("VULKAN_SDK").is_ok(),
+        "windows" => {
+            Command::new("where").arg("vulkan-1.dll").output().is_ok()
+        }
+        _ => true,
+    };
+
+    if has_vulkan && has_glslc {
+        return;
+    }
+
+    match os {
+        "linux" => {
+            let mut pkgs: Vec<&str> = Vec::new();
+            if !has_vulkan { pkgs.extend_from_slice(&["libvulkan1", "libvulkan-dev"]); }
+            if !has_glslc  { pkgs.push("glslang-tools"); }
+            if pkgs.is_empty() { return; }
+            println!("cargo::warning=Installing Vulkan/glslc packages: {:?}", pkgs);
+            let mut args = vec!["apt-get", "install", "-y"];
+            args.extend_from_slice(&pkgs);
+            let ok = try_with_sudo("apt-get", &args[1..]);
+            if !ok {
+                println!(
+                    "cargo::warning=Could not auto-install Vulkan packages. \
+                     Run: sudo apt-get install -y {}",
+                    pkgs.join(" ")
+                );
+            }
+        }
+        "macos" => {
+            if !has_vulkan {
+                println!("cargo::warning=Installing MoltenVK (Vulkan on macOS)...");
+                let _ = Command::new("brew").args(["install", "molten-vk"]).status();
+            }
+            if !has_glslc {
+                println!("cargo::warning=Installing glslang (shader compiler)...");
+                let _ = Command::new("brew").args(["install", "glslang"]).status();
+            }
+        }
+        _ => {
+            if !has_vulkan {
+                println!(
+                    "cargo::warning=Vulkan runtime not detected. \
+                     Install the LunarG Vulkan SDK from https://vulkan.lunarg.com/sdk/home"
+                );
+            }
+        }
+    }
+}
+
+fn ensure_valgrind() {
+    if Command::new("valgrind").arg("--version").output().is_ok() {
+        return;
+    }
+    let os = std::env::consts::OS;
+    println!(
+        "cargo::warning=valgrind not found; iai-callgrind benchmarks require it on Linux."
+    );
+    match os {
+        "linux" => {
+            let ok = try_with_sudo("apt-get", &["install", "-y", "valgrind"]);
+            if !ok {
+                println!("cargo::warning=Run: sudo apt-get install -y valgrind");
+            }
+        }
+        _ => {
+            println!(
+                "cargo::warning=valgrind is not available on {os}; \
+                 iai-callgrind benchmarks will be skipped automatically."
+            );
+        }
+    }
+}
+
+/// Run a command, prepending `sudo -n` (non-interactive) when not already root.
+/// Returns true if the command succeeds.
+fn try_with_sudo(cmd: &str, args: &[&str]) -> bool {
+    let is_root = std::env::var("EUID").as_deref() == Ok("0")
+        || Command::new("id").arg("-u").output()
+            .map(|o| o.stdout.starts_with(b"0"))
+            .unwrap_or(false);
+    let status = if is_root {
+        Command::new(cmd).args(args).status()
+    } else {
+        Command::new("sudo").arg("-n").arg(cmd).args(args).status()
+    };
+    matches!(status, Ok(s) if s.success())
 }

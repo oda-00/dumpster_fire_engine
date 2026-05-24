@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 const IAI_VERSION: &str = "0.16.1";
 const LLVM_MAJOR: &str = "18";
 const LLVM_FULL: &str = "18.1.8";
+// Pre-built LLVM is extracted here inside the workspace — gitignored, no sudo needed.
+const LLVM_LOCAL: &str = ".llvm/18";
 
 // ── Platform detection ────────────────────────────────────────────────────────
 
@@ -132,159 +134,151 @@ fn run_privileged(args: &[&str]) -> Result<(), String> {
 
 // ── LLVM 18 ───────────────────────────────────────────────────────────────────
 
-fn check_llvm18(platform: &Platform) -> bool {
-    match &platform.os {
-        Os::MacOs => cmd_output("brew", &["--prefix", &format!("llvm@{LLVM_MAJOR}")])
-            .map(|p| Path::new(&format!("{p}/bin/llvm-config")).exists())
-            .unwrap_or(false),
-        Os::Windows => resolve_llvm_prefix_windows().is_some(),
-        Os::Linux(_) => {
-            for cfg in &[format!("llvm-config-{LLVM_MAJOR}"), "llvm-config".to_string()] {
-                if cmd_output(cfg, &["--version"])
-                    .map(|v| v.starts_with(&format!("{LLVM_MAJOR}.")))
-                    .unwrap_or(false)
-                {
-                    return true;
-                }
-            }
-            false
-        }
+// URL of the official pre-built tarball for each platform.
+// These are release binaries from the LLVM project — no compilation needed.
+fn llvm_tarball_url(platform: &Platform) -> &'static str {
+    match (&platform.os, platform.is_aarch64) {
+        (Os::Linux(_), false) =>
+            concat!("https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8",
+                    "/clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz"),
+        (Os::Linux(_), true) =>
+            concat!("https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8",
+                    "/clang+llvm-18.1.8-aarch64-linux-gnu.tar.xz"),
+        (Os::MacOs, false) =>
+            concat!("https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8",
+                    "/clang+llvm-18.1.8-x86_64-apple-darwin.tar.xz"),
+        (Os::MacOs, true) =>
+            concat!("https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8",
+                    "/clang+llvm-18.1.8-arm64-apple-darwin22.0.tar.xz"),
+        (Os::Windows, _) =>
+            concat!("https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8",
+                    "/LLVM-18.1.8-win64.exe"),
     }
 }
 
-fn resolve_llvm_prefix(platform: &Platform) -> Option<String> {
-    match &platform.os {
-        Os::MacOs => cmd_output("brew", &["--prefix", &format!("llvm@{LLVM_MAJOR}")])
-            .filter(|p| Path::new(&format!("{p}/bin/llvm-config")).exists()),
-        Os::Windows => resolve_llvm_prefix_windows(),
-        Os::Linux(_) => {
-            for dir in &[
-                format!("/usr/lib/llvm-{LLVM_MAJOR}"),
-                format!("/usr/lib64/llvm{LLVM_MAJOR}"),
-                format!("/usr/local/lib/llvm-{LLVM_MAJOR}"),
-            ] {
-                if Path::new(&format!("{dir}/bin/llvm-config")).exists() {
-                    return Some(dir.clone());
-                }
-            }
-            None
-        }
+fn local_llvm_dir(root: &Path) -> PathBuf {
+    root.join(LLVM_LOCAL)
+}
+
+fn local_llvm_config(root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    { local_llvm_dir(root).join("bin").join("llvm-config.exe") }
+    #[cfg(not(windows))]
+    { local_llvm_dir(root).join("bin").join("llvm-config") }
+}
+
+fn check_llvm18(root: &Path, platform: &Platform) -> bool {
+    // Local pre-baked copy takes priority.
+    let cfg = local_llvm_config(root);
+    if cfg.exists() {
+        return cmd_output(cfg.to_str().unwrap(), &["--version"])
+            .map(|v| v.starts_with(&format!("{LLVM_MAJOR}.")))
+            .unwrap_or(false);
     }
+    // Fall back to detecting a system install (Windows installer path).
+    if let Os::Windows = &platform.os {
+        return resolve_llvm_prefix_windows().is_some();
+    }
+    false
+}
+
+fn resolve_llvm_prefix(root: &Path, platform: &Platform) -> Option<String> {
+    // Prefer the local pre-baked directory.
+    let local = local_llvm_dir(root);
+    if local_llvm_config(root).exists() {
+        return Some(local.to_string_lossy().into_owned());
+    }
+    // Windows installer puts LLVM in a well-known system path.
+    if let Os::Windows = &platform.os {
+        return resolve_llvm_prefix_windows();
+    }
+    None
 }
 
 fn resolve_llvm_prefix_windows() -> Option<String> {
     let candidates = [
         env::var("LLVM_SYS_180_PREFIX").unwrap_or_default(),
-        format!(
-            "{}\\LLVM",
-            env::var("PROGRAMFILES").unwrap_or_else(|_| r"C:\Program Files".into())
-        ),
-        format!(
-            "{}\\Programs\\LLVM",
-            env::var("LOCALAPPDATA").unwrap_or_default()
-        ),
+        format!("{}\\LLVM", env::var("PROGRAMFILES").unwrap_or_else(|_| r"C:\Program Files".into())),
+        format!("{}\\Programs\\LLVM", env::var("LOCALAPPDATA").unwrap_or_default()),
         r"C:\Program Files\LLVM".to_string(),
         r"C:\LLVM".to_string(),
     ];
     for c in &candidates {
         if c.is_empty() { continue; }
         let cfg = format!("{c}\\bin\\llvm-config.exe");
-        if Path::new(&cfg).exists() {
-            if cmd_output(&cfg, &["--version"])
+        if Path::new(&cfg).exists()
+            && cmd_output(&cfg, &["--version"])
                 .map(|v| v.starts_with(&format!("{LLVM_MAJOR}.")))
                 .unwrap_or(false)
-            {
-                return Some(c.clone());
-            }
+        {
+            return Some(c.clone());
         }
     }
     None
 }
 
-fn install_llvm18(platform: &Platform) -> Result<(), String> {
-    if check_llvm18(platform) {
+fn install_llvm18(root: &Path, platform: &Platform) -> Result<(), String> {
+    if check_llvm18(root, platform) {
         println!("  LLVM {} already present — skipping", LLVM_MAJOR);
         return Ok(());
     }
-    println!("  Installing LLVM {}...", LLVM_MAJOR);
     match &platform.os {
-        Os::Linux(distro) => install_llvm18_linux(distro),
-        Os::MacOs => run_ok(&["brew", "install", &format!("llvm@{LLVM_MAJOR}")]),
-        Os::Windows => install_llvm18_windows(platform),
+        Os::Windows => install_llvm18_windows(root, platform),
+        _ => install_llvm18_tarball(root, platform),
     }
 }
 
-fn install_llvm18_linux(distro: &Distro) -> Result<(), String> {
-    let p1 = format!("llvm-{LLVM_MAJOR}");
-    let p2 = format!("llvm-{LLVM_MAJOR}-dev");
-    let p3 = format!("libclang-{LLVM_MAJOR}-dev");
-    let pkgs: [&str; 4] = [p1.as_str(), p2.as_str(), p3.as_str(), "libzstd-dev"];
-    match distro {
-        Distro::Debian => {
-            run_privileged(&["apt-get", "update", "-qq"]).ok();
-            let mut args = vec!["apt-get", "install", "-y", "--no-install-recommends"];
-            args.extend_from_slice(&pkgs);
-            if run_privileged(&args).is_ok() {
-                return Ok(());
-            }
-            // apt.llvm.org fallback — handles any Ubuntu/Debian codename automatically
-            println!("  LLVM {} not in default apt repos, adding apt.llvm.org...", LLVM_MAJOR);
-            let tmp = env::temp_dir().join("llvm.sh");
-            download_any(&format!("https://apt.llvm.org/llvm.sh"), &tmp)?;
-            run_privileged(&["bash", tmp.to_str().unwrap(), LLVM_MAJOR, "all"])
-        }
-        Distro::Fedora => run_privileged(&[
-            "dnf", "install", "-y",
-            &format!("llvm{LLVM_MAJOR}"),
-            &format!("llvm{LLVM_MAJOR}-devel"),
-            &format!("clang{LLVM_MAJOR}-devel"),
-            "zstd-devel",
-        ]),
-        Distro::Arch => run_privileged(&["pacman", "-S", "--noconfirm", "--needed", "llvm", "clang"]),
-        Distro::Other(name) => Err(format!(
-            "Unknown Linux distribution '{name}'. Please install LLVM {} manually: https://releases.llvm.org",
-            LLVM_MAJOR
-        )),
-    }
+fn install_llvm18_tarball(root: &Path, platform: &Platform) -> Result<(), String> {
+    let url = llvm_tarball_url(platform);
+    let tmp = env::temp_dir().join(format!("llvm-{LLVM_FULL}.tar.xz"));
+    let dest = local_llvm_dir(root);
+
+    println!("  Downloading LLVM {} pre-built release (~400 MB)...", LLVM_FULL);
+    println!("  Source: {}", url);
+    download_any(url, &tmp)?;
+
+    fs::create_dir_all(&dest)
+        .map_err(|e| format!("create {}: {e}", dest.display()))?;
+
+    println!("  Extracting to {}...", dest.display());
+    // --strip-components=1 drops the top-level directory from the archive
+    run_ok(&[
+        "tar", "xJf", tmp.to_str().unwrap(),
+        "-C", dest.to_str().unwrap(),
+        "--strip-components=1",
+    ])?;
+
+    let _ = fs::remove_file(&tmp); // clean up download
+    Ok(())
 }
 
-fn install_llvm18_windows(platform: &Platform) -> Result<(), String> {
-    // Primary: direct download via PowerShell — guaranteed on all Windows 10/11
+fn install_llvm18_windows(root: &Path, platform: &Platform) -> Result<(), String> {
     let url = format!(
         "https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM_FULL}/LLVM-{LLVM_FULL}-win64.exe"
     );
     let tmp = env::temp_dir().join(format!("LLVM-{LLVM_FULL}-win64.exe"));
 
-    // Fast path: winget (no temp file)
     if cmd_exists("winget") {
         let ok = run(&[
             "winget", "install", "--id", "LLVM.LLVM",
             "--version", LLVM_FULL,
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-            "--silent",
+            "--accept-package-agreements", "--accept-source-agreements", "--silent",
         ]);
-        if ok && check_llvm18(platform) { return Ok(()); }
+        if ok && check_llvm18(root, platform) { return Ok(()); }
     }
-
-    // Fast path: choco
     if cmd_exists("choco") {
         let ok = run(&["choco", "install", "llvm", "--version", LLVM_FULL, "-y", "--no-progress"]);
-        if ok && check_llvm18(platform) { return Ok(()); }
+        if ok && check_llvm18(root, platform) { return Ok(()); }
     }
 
-    // Universal fallback: download NSIS installer and run silently
-    println!("  Downloading LLVM {} installer (~700 MB)...", LLVM_FULL);
+    println!("  Downloading LLVM {} installer...", LLVM_FULL);
     download_powershell(&url, &tmp)?;
-    run_ok(&[tmp.to_str().unwrap(), "/S"])?; // NSIS /S = silent install
+    run_ok(&[tmp.to_str().unwrap(), "/S"])?;
     std::thread::sleep(std::time::Duration::from_secs(3));
 
-    if check_llvm18(platform) {
-        Ok(())
-    } else {
+    if check_llvm18(root, platform) { Ok(()) } else {
         Err(format!(
-            "LLVM {} installed but not detected — you may need to restart your terminal \
-             and re-run setup, or set LLVM_SYS_180_PREFIX manually.",
+            "LLVM {} installed but not detected — restart your terminal and re-run setup.",
             LLVM_MAJOR
         ))
     }
@@ -465,7 +459,7 @@ fn install_iai_runner() -> Result<(), String> {
 // ── Environment files ─────────────────────────────────────────────────────────
 
 fn write_env_file(root: &Path, platform: &Platform) {
-    let prefix = resolve_llvm_prefix(platform);
+    let prefix = resolve_llvm_prefix(root, platform);
 
     // Apply to current process immediately so verify step works without shell restart.
     // SAFETY: single-threaded at this point in setup; no other threads read env.
@@ -613,7 +607,7 @@ fn main() {
     println!();
 
     let results: Vec<(&str, Result<(), String>)> = vec![
-        ("LLVM 18",             install_llvm18(&platform)),
+        ("LLVM 18",             install_llvm18(&root, &platform)),
         ("Vulkan dev libs",     install_vulkan(&platform)),
         ("CMake",               install_cmake(&platform)),
         ("Valgrind",            install_valgrind(&platform)),
