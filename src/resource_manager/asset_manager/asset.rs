@@ -153,6 +153,9 @@ pub struct Audio {
 pub struct AssetArena {
     pub(super) assets: Arena<AssetTag, Asset>,
     pub(super) cache: [ThinVec<AssetHandle>; AssetType::COUNT],
+    // cache_pos[slot] = position of handle `slot` in cache[type], u16::MAX if absent.
+    // Parallel to the Arena's slot array (grow on fresh slot, overwrite on reuse).
+    pub(super) cache_pos: Vec<u16>,
 }
 
 impl AssetArena {
@@ -160,6 +163,7 @@ impl AssetArena {
         Self {
             assets: Arena::new(),
             cache: std::array::from_fn(|_| ThinVec::new()),
+            cache_pos: Vec::new(),
         }
     }
 
@@ -178,15 +182,29 @@ impl AssetArena {
     pub fn insert(&mut self, asset: Asset) -> AssetHandle {
         let ty = asset.asset_type();
         let h = self.assets.insert(asset);
+        let idx = h.idx as usize;
+        let pos = self.cache[ty.index()].len() as u16;
         self.cache[ty.index()].push(h);
+        if idx == self.cache_pos.len() {
+            self.cache_pos.push(pos);
+        } else {
+            self.cache_pos[idx] = pos;
+        }
         h
     }
 
     pub fn remove(&mut self, handle: AssetHandle) -> Option<Asset> {
         let asset = self.assets.remove(handle)?;
-        let type_slot = &mut self.cache[asset.asset_type().index()];
-        if let Some(pos) = type_slot.iter().position(|&h| h == handle) {
-            type_slot.swap_remove(pos);
+        let ty_idx = asset.asset_type().index();
+        let slot = handle.idx as usize;
+        let pos = self.cache_pos[slot];
+        if pos != u16::MAX {
+            self.cache[ty_idx].swap_remove(pos as usize);
+            self.cache_pos[slot] = u16::MAX;
+            if (pos as usize) < self.cache[ty_idx].len() {
+                let displaced = self.cache[ty_idx][pos as usize];
+                self.cache_pos[displaced.idx as usize] = pos;
+            }
         }
         Some(asset)
     }
