@@ -601,7 +601,11 @@ fn ensure_llvm_prebuilt() {
         "bin/llvm-config"
     });
 
-    if !llvm_config.exists() {
+    // Also check for the C API header that wrappers/target.c includes.
+    // A partial extraction (llvm-config present, include/ absent) would pass
+    // the binary check but fail at cc-rs compile time with a confusing error.
+    let include_sentinel = prefix.join("include").join("llvm-c").join("Target.h");
+    if !llvm_config.exists() || !include_sentinel.exists() {
         download_llvm_prebuilt_coordinated(&prefix, os, arch, &llvm_config);
     }
 
