@@ -10,8 +10,10 @@ use thin_vec::ThinVec;
 
 use dumpster_fire_engine::forge_master::ore::{ForgeVertex, GpuMesh, MeshOre};
 use dumpster_fire_engine::forge_master::{FrameId, GraphicsFramePlan, GraphicsOreKind};
-use dumpster_fire_engine::render::factory_master::{Factory, FactoryId, GraphicsTag, Proto, ProtoId};
 use dumpster_fire_engine::render::VulkanContext;
+use dumpster_fire_engine::render::factory_master::{
+    Factory, FactoryId, GraphicsTag, Proto, ProtoId,
+};
 use dumpster_fire_engine::resource_manager::asset_manager::{
     build_test_glb, load_first_mesh_from_slice,
 };
@@ -24,7 +26,12 @@ fn make_mesh(tri_count: usize) -> MeshOre {
     let vertices: ThinVec<ForgeVertex> = (0..n)
         .map(|i| {
             let f = i as f32;
-            ForgeVertex::new([f, f + 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0], [0.0, 0.0])
+            ForgeVertex::new(
+                [f, f + 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0],
+            )
         })
         .collect();
     let indices: ThinVec<u32> = (0..n as u32).collect();
@@ -34,10 +41,12 @@ fn make_mesh(tri_count: usize) -> MeshOre {
 /// Build a GLB blob from `tri_count` triangles (for the parsing benchmarks).
 fn make_glb(tri_count: usize) -> Vec<u8> {
     let n = tri_count * 3;
-    let positions: Vec<[f32; 3]> = (0..n).map(|i| {
-        let f = i as f32;
-        [f, f + 1.0, 0.0]
-    }).collect();
+    let positions: Vec<[f32; 3]> = (0..n)
+        .map(|i| {
+            let f = i as f32;
+            [f, f + 1.0, 0.0]
+        })
+        .collect();
     let indices: Vec<u32> = (0..n as u32).collect();
     build_test_glb(&positions, None, None, Some(&indices))
 }
@@ -51,16 +60,12 @@ fn bench_gltf_parse(c: &mut Criterion) {
         let glb = make_glb(tris);
         let vertex_count = (tris * 3) as u64;
         g.throughput(Throughput::Elements(vertex_count));
-        g.bench_with_input(
-            BenchmarkId::new("triangles", tris),
-            &glb,
-            |b, glb| {
-                b.iter(|| {
-                    let ore = load_first_mesh_from_slice(black_box(glb)).unwrap();
-                    black_box(ore);
-                });
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("triangles", tris), &glb, |b, glb| {
+            b.iter(|| {
+                let ore = load_first_mesh_from_slice(black_box(glb)).unwrap();
+                black_box(ore);
+            });
+        });
     }
     g.finish();
 }
@@ -73,13 +78,9 @@ fn bench_mesh_ore_build(c: &mut Criterion) {
     for &tris in &[64usize, 1_024, 16_384, 131_072] {
         let vertex_count = (tris * 3) as u64;
         g.throughput(Throughput::Elements(vertex_count));
-        g.bench_with_input(
-            BenchmarkId::new("triangles", tris),
-            &tris,
-            |b, &tris| {
-                b.iter(|| black_box(make_mesh(tris)));
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("triangles", tris), &tris, |b, &tris| {
+            b.iter(|| black_box(make_mesh(tris)));
+        });
     }
     g.finish();
 }
@@ -107,18 +108,13 @@ fn bench_gpu_upload(c: &mut Criterion) {
         let byte_count = (ore.vertices.len() * std::mem::size_of::<ForgeVertex>()
             + ore.indices.len() * 4) as u64;
         g.throughput(Throughput::Bytes(byte_count));
-        g.bench_with_input(
-            BenchmarkId::new("triangles", tris),
-            &ore,
-            |b, ore| {
-                b.iter(|| {
-                    let mut mesh = GpuMesh::upload(&upload_ctx, black_box(ore))
-                        .expect("upload");
-                    // Destroy immediately so we don't exhaust VRAM over 20 samples.
-                    unsafe { mesh.destroy(&ctx.device) };
-                });
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("triangles", tris), &ore, |b, ore| {
+            b.iter(|| {
+                let mut mesh = GpuMesh::upload(&upload_ctx, black_box(ore)).expect("upload");
+                // Destroy immediately so we don't exhaust VRAM over 20 samples.
+                unsafe { mesh.destroy(&ctx.device) };
+            });
+        });
     }
     g.finish();
 }
@@ -137,10 +133,8 @@ fn bench_draw_call_collect(c: &mut Criterion) {
             // with `calls_per` GraphicsFrames (no mesh — procedural draws).
             let factories: Vec<_> = (0..factory_count)
                 .map(|fi| {
-                    let mut proto = Proto::<GraphicsTag>::new(
-                        ProtoId::new(fi as i64 + 1),
-                        format!("f{fi}"),
-                    );
+                    let mut proto =
+                        Proto::<GraphicsTag>::new(ProtoId::new(fi as i64 + 1), format!("f{fi}"));
                     for ci in 0..calls_per {
                         proto.push_call(GraphicsFramePlan::new(
                             FrameId::new(ci as i64 + 1),

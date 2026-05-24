@@ -9,19 +9,29 @@ use super::layout::Rect;
 /// and hit-tests against the supplied `UiInputState` so widgets return
 /// their interaction state directly (no second pass).
 pub struct Ui<'a> {
-    pub draw:   &'a mut DrawList,
-    pub input:  UiInputState,
+    pub draw: &'a mut DrawList,
+    pub input: UiInputState,
     pub cursor: [f32; 2],
-    pub width:  f32,
+    pub width: f32,
 }
 
 impl<'a> Ui<'a> {
     pub fn new(draw: &'a mut DrawList, rect: Rect) -> Self {
-        Self { draw, input: UiInputState::default(), cursor: [rect.x, rect.y], width: rect.w }
+        Self {
+            draw,
+            input: UiInputState::default(),
+            cursor: [rect.x, rect.y],
+            width: rect.w,
+        }
     }
 
     pub fn with_input(draw: &'a mut DrawList, rect: Rect, input: UiInputState) -> Self {
-        Self { draw, input, cursor: [rect.x, rect.y], width: rect.w }
+        Self {
+            draw,
+            input,
+            cursor: [rect.x, rect.y],
+            width: rect.w,
+        }
     }
 
     fn hovered(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
@@ -53,7 +63,9 @@ impl<'a> Ui<'a> {
         let max_x = x0 + self.width;
         let mut cx = x0;
         for c in text.chars() {
-            if cx + gw > max_x { break; }
+            if cx + gw > max_x {
+                break;
+            }
             if c != ' ' {
                 let uv = font::glyph_rect(c);
                 if uv != [0.0_f32; 4] {
@@ -74,9 +86,13 @@ impl<'a> Ui<'a> {
         let h = 24.0_f32;
         let hovered = self.hovered(x, y, w, h);
         let clicked = hovered && self.input.left_just_pressed;
-        let color = if clicked { [120, 150, 200, 255] }
-                    else if hovered { [100, 100, 150, 255] }
-                    else { [70, 70, 105, 255] };
+        let color = if clicked {
+            [120, 150, 200, 255]
+        } else if hovered {
+            [100, 100, 150, 255]
+        } else {
+            [70, 70, 105, 255]
+        };
         self.draw.push_rect(x, y, w, h, draw::SOLID, color);
         self.text_at(x + 4.0, y + 4.0, text, [210, 210, 220, 255]);
         self.cursor[1] += 26.0;
@@ -85,15 +101,17 @@ impl<'a> Ui<'a> {
 
     /// Button that reads hover/pressed state from retained `ButtonData`.
     pub fn button_retained(&mut self, text: &str, data: &mut ButtonData) -> bool {
-        let x = self.cursor[0]; let y = self.cursor[1];
-        let w = self.width; let h = 24.0_f32;
+        let x = self.cursor[0];
+        let y = self.cursor[1];
+        let w = self.width;
+        let h = 24.0_f32;
         data.last_rect = Rect { x, y, w, h };
         let hovered = self.hovered(x, y, w, h);
         let clicked = hovered && self.input.left_just_pressed;
         let color = match data.state {
             ButtonState::Pressed => [120, 150, 200, 255],
             ButtonState::Hovered => [100, 100, 155, 255],
-            ButtonState::Idle    => [70,  70,  105, 255],
+            ButtonState::Idle => [70, 70, 105, 255],
         };
         self.draw.push_rect(x, y, w, h, draw::SOLID, color);
         self.text_at(x + 4.0, y + 4.0, text, [210, 210, 220, 255]);
@@ -119,8 +137,10 @@ impl<'a> Ui<'a> {
             }
         }
         let t = ((*value - min) / (max - min).max(1e-5)).clamp(0.0, 1.0);
-        self.draw.push_rect(x, y, w, h, draw::SOLID, [50, 50, 60, 255]);
-        self.draw.push_rect(x, y, w * t, h, draw::SOLID, [70, 130, 195, 255]);
+        self.draw
+            .push_rect(x, y, w, h, draw::SOLID, [50, 50, 60, 255]);
+        self.draw
+            .push_rect(x, y, w * t, h, draw::SOLID, [70, 130, 195, 255]);
         // Label to the right of the track (tiny, 8px glyphs)
         self.text_at(x + 2.0, y - 9.0, label, [160, 160, 180, 200]);
         self.cursor[1] += 20.0;
@@ -134,8 +154,14 @@ impl<'a> Ui<'a> {
         let h = 16.0_f32;
         let hovered = self.hovered(x, y, h, h);
         let clicked = hovered && self.input.left_just_pressed;
-        if clicked { *checked = !*checked; }
-        let color = if *checked { [80, 200, 80, 255] } else { [80, 80, 80, 255] };
+        if clicked {
+            *checked = !*checked;
+        }
+        let color = if *checked {
+            [80, 200, 80, 255]
+        } else {
+            [80, 80, 80, 255]
+        };
         self.draw.push_rect(x, y, h, h, draw::SOLID, color);
         self.text_at(x + h + 4.0, y, label, [190, 190, 200, 255]);
         self.cursor[1] += 20.0;
@@ -144,9 +170,15 @@ impl<'a> Ui<'a> {
 
     /// Checkbox that reads/writes retained `CheckboxData` and sets `last_rect`.
     pub fn checkbox_retained(&mut self, label: &str, data: &mut CheckboxData) -> bool {
-        let x = self.cursor[0]; let y = self.cursor[1]; let sz = 16.0_f32;
+        let x = self.cursor[0];
+        let y = self.cursor[1];
+        let sz = 16.0_f32;
         data.last_rect = Rect { x, y, w: sz, h: sz };
-        let color = if data.checked { [80, 200, 80, 255] } else { [80, 80, 80, 255] };
+        let color = if data.checked {
+            [80, 200, 80, 255]
+        } else {
+            [80, 80, 80, 255]
+        };
         self.draw.push_rect(x, y, sz, sz, draw::SOLID, color);
         self.text_at(x + sz + 4.0, y, label, [190, 190, 200, 255]);
         self.cursor[1] += 20.0;
@@ -160,9 +192,18 @@ impl<'a> Ui<'a> {
 
     /// Section header bar with bottom separator line and white label.
     pub fn section_header(&mut self, text: &str) -> &mut Self {
-        let x = self.cursor[0]; let y = self.cursor[1];
-        self.draw.push_rect(x, y, self.width, 18.0, draw::SOLID, [42, 42, 54, 255]);
-        self.draw.push_line(x, y + 18.0, x + self.width, y + 18.0, 1.0, [68, 68, 84, 255]);
+        let x = self.cursor[0];
+        let y = self.cursor[1];
+        self.draw
+            .push_rect(x, y, self.width, 18.0, draw::SOLID, [42, 42, 54, 255]);
+        self.draw.push_line(
+            x,
+            y + 18.0,
+            x + self.width,
+            y + 18.0,
+            1.0,
+            [68, 68, 84, 255],
+        );
         self.text_at(x + 4.0, y + 1.0, text, [180, 180, 210, 255]);
         self.cursor[1] += 20.0;
         self
@@ -170,17 +211,29 @@ impl<'a> Ui<'a> {
 
     /// Collapsible header — toggles `*collapsed` on click, returns true when expanded.
     pub fn collapsible_header(&mut self, text: &str, collapsed: &mut bool) -> bool {
-        let x = self.cursor[0]; let y = self.cursor[1];
-        let w = self.width; let h = 18.0_f32;
+        let x = self.cursor[0];
+        let y = self.cursor[1];
+        let w = self.width;
+        let h = 18.0_f32;
         if self.hovered(x, y, w, h) && self.input.left_just_pressed {
             *collapsed = !*collapsed;
         }
-        let bg = if self.hovered(x, y, w, h) { [52, 52, 66, 255] } else { [42, 42, 54, 255] };
+        let bg = if self.hovered(x, y, w, h) {
+            [52, 52, 66, 255]
+        } else {
+            [42, 42, 54, 255]
+        };
         self.draw.push_rect(x, y, w, h, draw::SOLID, bg);
         // Arrow indicator
-        let arrow_col = if *collapsed { [110, 110, 130, 255] } else { [170, 170, 200, 255] };
-        self.draw.push_rect(x + 4.0, y + 5.0, 8.0, 8.0, draw::SOLID, arrow_col);
-        self.draw.push_line(x, y + h, x + w, y + h, 1.0, [68, 68, 84, 255]);
+        let arrow_col = if *collapsed {
+            [110, 110, 130, 255]
+        } else {
+            [170, 170, 200, 255]
+        };
+        self.draw
+            .push_rect(x + 4.0, y + 5.0, 8.0, 8.0, draw::SOLID, arrow_col);
+        self.draw
+            .push_line(x, y + h, x + w, y + h, 1.0, [68, 68, 84, 255]);
         self.text_at(x + 16.0, y + 1.0, text, [170, 170, 200, 255]);
         self.cursor[1] += 20.0;
         !*collapsed
@@ -194,10 +247,14 @@ impl<'a> Ui<'a> {
         let y = self.cursor[1];
         let h = 20.0_f32;
         let hovered = self.hovered(x, y, w, h);
-        let clicked  = hovered && self.input.left_just_pressed;
-        let color = if clicked     { [120, 150, 200, 255] }
-                    else if hovered { [100, 100, 150, 255] }
-                    else            { [60,  60,  85,  255] };
+        let clicked = hovered && self.input.left_just_pressed;
+        let color = if clicked {
+            [120, 150, 200, 255]
+        } else if hovered {
+            [100, 100, 150, 255]
+        } else {
+            [60, 60, 85, 255]
+        };
         self.draw.push_rect(x, y, w, h, draw::SOLID, color);
         // Center text horizontally in the button
         let text_w = text.chars().count() as f32 * font::GLYPH_W as f32;
@@ -209,11 +266,19 @@ impl<'a> Ui<'a> {
 
     /// Fixed-width checkbox that advances `cursor[0]` — for horizontal toolbars.
     pub fn hcheckbox(&mut self, label: &str, checked: &mut bool) -> bool {
-        let x = self.cursor[0]; let y = self.cursor[1]; let sz = 20.0_f32;
+        let x = self.cursor[0];
+        let y = self.cursor[1];
+        let sz = 20.0_f32;
         let hovered = self.hovered(x, y, sz, sz);
-        let clicked  = hovered && self.input.left_just_pressed;
-        if clicked { *checked = !*checked; }
-        let color = if *checked { [80, 200, 80, 255] } else { [60, 60, 80, 255] };
+        let clicked = hovered && self.input.left_just_pressed;
+        if clicked {
+            *checked = !*checked;
+        }
+        let color = if *checked {
+            [80, 200, 80, 255]
+        } else {
+            [60, 60, 80, 255]
+        };
         self.draw.push_rect(x, y, sz, sz, draw::SOLID, color);
         // Short label beside the box
         self.text_at(x + sz + 2.0, y + 2.0, label, [190, 190, 200, 255]);
@@ -224,7 +289,8 @@ impl<'a> Ui<'a> {
 
     /// Colored indicator tile — draws a solid rect, advances cursor[0]. No click.
     pub fn htile(&mut self, w: f32, h: f32, color: [u8; 4]) {
-        self.draw.push_rect(self.cursor[0], self.cursor[1], w, h, draw::SOLID, color);
+        self.draw
+            .push_rect(self.cursor[0], self.cursor[1], w, h, draw::SOLID, color);
         self.cursor[0] += w;
     }
 

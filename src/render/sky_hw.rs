@@ -27,16 +27,16 @@ use glam::Vec3;
 ///
 /// Returns linear sRGB radiance (no tonemap).
 pub fn evaluate(
-    model:         SkyModel,
-    view_dir:      Vec3,
-    sun_dir:       Vec3,
-    turbidity:     f32,
+    model: SkyModel,
+    view_dir: Vec3,
+    sun_dir: Vec3,
+    turbidity: f32,
     ground_albedo: Vec3,
 ) -> Vec3 {
     match model {
-        SkyModel::HosekWilkie           => hosek_wilkie(view_dir, sun_dir, turbidity, ground_albedo),
-        SkyModel::Preetham              => preetham    (view_dir, sun_dir, turbidity),
-        SkyModel::AtmosphericScattering => atmospheric (view_dir, sun_dir),
+        SkyModel::HosekWilkie => hosek_wilkie(view_dir, sun_dir, turbidity, ground_albedo),
+        SkyModel::Preetham => preetham(view_dir, sun_dir, turbidity),
+        SkyModel::AtmosphericScattering => atmospheric(view_dir, sun_dir),
     }
 }
 
@@ -46,8 +46,8 @@ pub fn evaluate(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SkyModel {
-    HosekWilkie           = 0,
-    Preetham              = 1,
+    HosekWilkie = 0,
+    Preetham = 1,
     AtmosphericScattering = 2,
 }
 
@@ -78,9 +78,9 @@ pub type Sh9 = [[f32; 3]; 9];
 /// Project a sky model onto SH9. `samples_per_axis` controls the
 /// hemisphere-sampling resolution (32 is a good editor-time default).
 pub fn project_sh9(
-    model:         SkyModel,
-    sun_dir:       Vec3,
-    turbidity:     f32,
+    model: SkyModel,
+    sun_dir: Vec3,
+    turbidity: f32,
     ground_albedo: Vec3,
     samples_per_axis: u32,
 ) -> Sh9 {
@@ -96,7 +96,7 @@ pub fn project_sh9(
             let u = (i as f32 + 0.5) / n as f32;
             let v = (j as f32 + 0.5) / n as f32;
             let theta = (1.0 - 2.0 * u).acos();
-            let phi   = 2.0 * std::f32::consts::PI * v;
+            let phi = 2.0 * std::f32::consts::PI * v;
             let st = theta.sin();
             let dir = Vec3::new(st * phi.cos(), theta.cos(), st * phi.sin());
 
@@ -124,30 +124,32 @@ pub fn project_sh9(
     }
 
     let solid_angle_norm = 4.0 * std::f32::consts::PI / weight_sum;
-    for k in 0..9 {
-        acc[k][0] *= solid_angle_norm;
-        acc[k][1] *= solid_angle_norm;
-        acc[k][2] *= solid_angle_norm;
+    for coeff in &mut acc {
+        coeff[0] *= solid_angle_norm;
+        coeff[1] *= solid_angle_norm;
+        coeff[2] *= solid_angle_norm;
     }
     acc
 }
 
 /// Evaluate the 9 SH basis functions at a unit direction.
 fn sh9_basis(d: Vec3) -> [f32; 9] {
-    let x = d.x; let y = d.y; let z = d.z;
+    let x = d.x;
+    let y = d.y;
+    let z = d.z;
     [
         // l = 0
-        0.282_094_8,                                        // Y(0,0)  = 1/(2√π)
+        0.282_094_8, // Y(0,0)  = 1/(2√π)
         // l = 1
-        0.488_602_5 * y,                                    // Y(1,-1) = √(3/4π) · y
-        0.488_602_5 * z,                                    // Y(1, 0) = √(3/4π) · z
-        0.488_602_5 * x,                                    // Y(1, 1) = √(3/4π) · x
+        0.488_602_5 * y, // Y(1,-1) = √(3/4π) · y
+        0.488_602_5 * z, // Y(1, 0) = √(3/4π) · z
+        0.488_602_5 * x, // Y(1, 1) = √(3/4π) · x
         // l = 2
-        1.092_548_4 * x * y,                                // Y(2,-2)
-        1.092_548_4 * y * z,                                // Y(2,-1)
-        0.315_391_5 * (3.0 * z * z - 1.0),                  // Y(2, 0)
-        1.092_548_4 * x * z,                                // Y(2, 1)
-        0.546_274_2 * (x * x - y * y),                      // Y(2, 2)
+        1.092_548_4 * x * y,               // Y(2,-2)
+        1.092_548_4 * y * z,               // Y(2,-1)
+        0.315_391_5 * (3.0 * z * z - 1.0), // Y(2, 0)
+        1.092_548_4 * x * z,               // Y(2, 1)
+        0.546_274_2 * (x * x - y * y),     // Y(2, 2)
     ]
 }
 
@@ -179,9 +181,9 @@ pub fn sh9_reconstruct(coeffs: &Sh9, normal: Vec3) -> Vec3 {
 /// editor-preview purposes.
 fn hosek_wilkie(view: Vec3, sun: Vec3, turbidity: f32, ground: Vec3) -> Vec3 {
     let view = view.normalize_or_zero();
-    let sun  = sun.normalize_or_zero();
+    let sun = sun.normalize_or_zero();
     let cos_theta = view.y.max(0.0);
-    let gamma     = view.dot(sun).clamp(-1.0, 1.0);
+    let gamma = view.dot(sun).clamp(-1.0, 1.0);
     let sun_theta = sun.y.max(0.0).clamp(0.0, 1.0);
 
     // Perez F: (1 + A * exp(B / cos_theta)) * (1 + C * exp(D * gamma) + E * cos²gamma)
@@ -191,7 +193,7 @@ fn hosek_wilkie(view: Vec3, sun: Vec3, turbidity: f32, ground: Vec3) -> Vec3 {
 
     let cos_theta_safe = cos_theta.max(1.0e-3);
     let f = (1.0 + a * (b / cos_theta_safe).exp())
-          * (1.0 + c * (d * gamma.acos()).exp() + e * gamma * gamma);
+        * (1.0 + c * (d * gamma.acos()).exp() + e * gamma * gamma);
 
     // Zenith chromaticity in xyY space (Hosek–Wilkie precomputed); we use
     // a coarse approximation: pure white at zenith, warm at horizon.
@@ -200,7 +202,7 @@ fn hosek_wilkie(view: Vec3, sun: Vec3, turbidity: f32, ground: Vec3) -> Vec3 {
     let cool = Vec3::new(0.6, 0.75, 1.0);
     let chroma = cool.lerp(warm, 1.0 - cos_theta);
 
-    chroma * (f * zenith_y).max(0.0) * 0.06    // 0.06 ≈ scale to ~candela/m² order
+    chroma * (f * zenith_y).max(0.0) * 0.06 // 0.06 ≈ scale to ~candela/m² order
 }
 
 /// Perez-style A..E coefficients, abridged. `t` is turbidity ∈ [1,10];
@@ -222,9 +224,9 @@ fn hw_perez_coeffs(t: f32, sun_theta: f32, ground: Vec3) -> (f32, f32, f32, f32,
 /// come from Preetham et al. "A Practical Analytic Model for Daylight" (1999).
 fn preetham(view: Vec3, sun: Vec3, turbidity: f32) -> Vec3 {
     let view = view.normalize_or_zero();
-    let sun  = sun.normalize_or_zero();
+    let sun = sun.normalize_or_zero();
     let cos_theta = view.y.max(0.0);
-    let gamma     = view.dot(sun).clamp(-1.0, 1.0).acos();
+    let gamma = view.dot(sun).clamp(-1.0, 1.0).acos();
 
     let t = turbidity.clamp(1.0, 10.0);
 
@@ -234,15 +236,15 @@ fn preetham(view: Vec3, sun: Vec3, turbidity: f32) -> Vec3 {
     //   C = -0.0227 * T + 5.3251
     //   D = 0.1206 * T - 2.5771
     //   E = -0.0670 * T + 0.3703
-    let a =  0.1787 * t - 1.4630;
+    let a = 0.1787 * t - 1.4630;
     let b = -0.3554 * t + 0.4275;
     let c = -0.0227 * t + 5.3251;
-    let d =  0.1206 * t - 2.5771;
+    let d = 0.1206 * t - 2.5771;
     let e = -0.0670 * t + 0.3703;
 
     let cos_theta_safe = cos_theta.max(1.0e-3);
     let f = (1.0 + a * (b / cos_theta_safe).exp())
-          * (1.0 + c * (d * gamma).exp() + e * gamma.cos().powi(2));
+        * (1.0 + c * (d * gamma).exp() + e * gamma.cos().powi(2));
 
     // Sun-warmth tinting (rough approximation of CIE chromaticity).
     let warm = Vec3::new(1.0, 0.88, 0.72);
@@ -258,27 +260,25 @@ fn preetham(view: Vec3, sun: Vec3, turbidity: f32) -> Vec3 {
 /// ray optical depth via spherical Earth (radius 6360 km).
 fn atmospheric(view: Vec3, sun: Vec3) -> Vec3 {
     let view = view.normalize_or_zero();
-    let sun  = sun.normalize_or_zero();
+    let sun = sun.normalize_or_zero();
     let cos_sun = view.dot(sun).clamp(-1.0, 1.0);
 
     let rayleigh_phase = 0.75 * (1.0 + cos_sun * cos_sun);
     let g = 0.76f32;
-    let mie_phase = (1.0 - g * g)
-        / (4.0 * std::f32::consts::PI
-            * (1.0 + g * g - 2.0 * g * cos_sun).powf(1.5));
+    let mie_phase =
+        (1.0 - g * g) / (4.0 * std::f32::consts::PI * (1.0 + g * g - 2.0 * g * cos_sun).powf(1.5));
 
     // Wavelength-dependent Rayleigh scatter (RGB ≈ 680, 550, 440 nm).
-    let beta_r = Vec3::new(5.802e-6, 1.350e-5, 3.310e-5) * 1.0e5;  // scaled to plausible radiance
-    let beta_m = Vec3::splat(2.0e-5)                              * 1.0e4;
+    let beta_r = Vec3::new(5.802e-6, 1.350e-5, 3.310e-5) * 1.0e5; // scaled to plausible radiance
+    let beta_m = Vec3::splat(2.0e-5) * 1.0e4;
 
     let altitude_factor = view.y.max(0.0);
     let r_atten = (-beta_r * (1.0 / altitude_factor.max(1.0e-3))).map(|x| x.exp());
     let m_atten = (-beta_m * (1.0 / altitude_factor.max(1.0e-3))).map(|x| x.exp());
 
     let sun_strength = sun.y.max(0.0).clamp(0.0, 1.0);
-    let direct = (beta_r * rayleigh_phase + beta_m * mie_phase)
-        * sun_strength
-        * (r_atten + m_atten) * 0.5;
+    let direct =
+        (beta_r * rayleigh_phase + beta_m * mie_phase) * sun_strength * (r_atten + m_atten) * 0.5;
 
     direct.max(Vec3::ZERO)
 }
@@ -299,7 +299,7 @@ mod tests {
                 let u = (i as f32 + 0.5) / n as f32;
                 let v = (j as f32 + 0.5) / n as f32;
                 let theta = (1.0 - 2.0 * u).acos();
-                let phi   = 2.0 * std::f32::consts::PI * v;
+                let phi = 2.0 * std::f32::consts::PI * v;
                 let st = theta.sin();
                 let d = Vec3::new(st * phi.cos(), theta.cos(), st * phi.sin());
                 let b = sh9_basis(d);

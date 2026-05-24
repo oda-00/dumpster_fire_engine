@@ -35,22 +35,22 @@ const KTX2_MAGIC: [u8; 12] = [
 #[derive(Debug, Clone)]
 pub struct AssetMetadata {
     /// Required: must start with `"2."`.
-    pub version:     String,
+    pub version: String,
     /// Optional minimum required version (must be ≤ 2.0 to load).
     pub min_version: Option<String>,
     /// Name of tool that generated the file.
-    pub generator:   Option<String>,
+    pub generator: Option<String>,
     /// Copyright notice.
-    pub copyright:   Option<String>,
+    pub copyright: Option<String>,
 }
 
 impl Default for AssetMetadata {
     fn default() -> Self {
         Self {
-            version:     "2.0".to_owned(),
+            version: "2.0".to_owned(),
             min_version: None,
-            generator:   None,
-            copyright:   None,
+            generator: None,
+            copyright: None,
         }
     }
 }
@@ -64,25 +64,25 @@ pub struct MaterialVariant {
 #[derive(Debug, Clone)]
 pub struct GltfAsset {
     /// Parsed `asset` metadata block.
-    pub asset_metadata:        AssetMetadata,
+    pub asset_metadata: AssetMetadata,
     /// `extensionsUsed` array.
-    pub extensions_used:       ThinVec<String>,
+    pub extensions_used: ThinVec<String>,
     /// `extensionsRequired` array.
-    pub extensions_required:   ThinVec<String>,
+    pub extensions_required: ThinVec<String>,
     /// Top-level `KHR_materials_variants.variants` list (may be empty).
-    pub material_variants:     ThinVec<MaterialVariant>,
-    pub scenes:        ThinVec<Scene>,
+    pub material_variants: ThinVec<MaterialVariant>,
+    pub scenes: ThinVec<Scene>,
     pub default_scene: Option<u32>,
-    pub nodes:         ThinVec<Node>,
-    pub meshes:        ThinVec<Mesh>,
-    pub materials:     ThinVec<Material>,
-    pub textures:      ThinVec<Texture>,
-    pub images:        ThinVec<Image>,
-    pub samplers:      ThinVec<Sampler>,
-    pub skins:         ThinVec<Skin>,
-    pub animations:    ThinVec<Animation>,
-    pub cameras:       ThinVec<Camera>,
-    pub lights:        ThinVec<Light>,
+    pub nodes: ThinVec<Node>,
+    pub meshes: ThinVec<Mesh>,
+    pub materials: ThinVec<Material>,
+    pub textures: ThinVec<Texture>,
+    pub images: ThinVec<Image>,
+    pub samplers: ThinVec<Sampler>,
+    pub skins: ThinVec<Skin>,
+    pub animations: ThinVec<Animation>,
+    pub cameras: ThinVec<Camera>,
+    pub lights: ThinVec<Light>,
     /// KHR_gaussian_splatting (Khronos baseline Feb 2026) — zero or more
     /// per-node splat sets. Empty for every asset that doesn't carry the
     /// extension, which is the vast majority today.
@@ -93,9 +93,7 @@ impl GltfAsset {
     pub fn load(path: impl AsRef<Path>) -> GltfResult<Self> {
         // Read the bytes first so we can pre-process KHR_animation_pointer.
         let p = path.as_ref();
-        let bytes = std::fs::read(p).map_err(|e| {
-            GltfError::Io(gltf::Error::Io(e))
-        })?;
+        let bytes = std::fs::read(p).map_err(|e| GltfError::Io(gltf::Error::Io(e)))?;
         // Set the base directory so external .png / .bin URIs can resolve
         // relative to the file we just read. Threading this through every
         // call site cleanly is more invasive than we want here, so we stash
@@ -112,23 +110,26 @@ impl GltfAsset {
         // Step 1: resolve any KHR_animation_pointer JSON patch needed.
         // We parse via Gltf::from_slice (structure-only, no image decode)
         // so we can control image loading ourselves.
-        let (effective_bytes, per_anim_patches): (std::borrow::Cow<'_, [u8]>, Vec<crate::preprocess::PointerPatch>) =
-            match gltf::Gltf::from_slice(bytes) {
-                Ok(_) => (std::borrow::Cow::Borrowed(bytes), Vec::new()),
-                Err(_) => {
-                    if let Some((patched, patches)) = crate::preprocess::rewrite_animation_pointer(bytes) {
-                        (std::borrow::Cow::Owned(patched), patches)
-                    } else {
-                        // Re-parse to get the actual error.
-                        gltf::Gltf::from_slice(bytes).map_err(GltfError::Io)?;
-                        unreachable!()
-                    }
+        let (effective_bytes, per_anim_patches): (
+            std::borrow::Cow<'_, [u8]>,
+            Vec<crate::preprocess::PointerPatch>,
+        ) = match gltf::Gltf::from_slice(bytes) {
+            Ok(_) => (std::borrow::Cow::Borrowed(bytes), Vec::new()),
+            Err(_) => {
+                if let Some((patched, patches)) =
+                    crate::preprocess::rewrite_animation_pointer(bytes)
+                {
+                    (std::borrow::Cow::Owned(patched), patches)
+                } else {
+                    // Re-parse to get the actual error.
+                    gltf::Gltf::from_slice(bytes).map_err(GltfError::Io)?;
+                    unreachable!()
                 }
-            };
+            }
+        };
 
         // Step 2: Parse document and load buffer data.
-        let gltf_obj = gltf::Gltf::from_slice(effective_bytes.as_ref())
-            .map_err(GltfError::Io)?;
+        let gltf_obj = gltf::Gltf::from_slice(effective_bytes.as_ref()).map_err(GltfError::Io)?;
         // Pass the base directory (set by `GltfAsset::load`) so external
         // `.bin` URI references in plain `.gltf` files resolve against the
         // file's parent dir. `.glb` files have all buffers inline so the
@@ -136,9 +137,9 @@ impl GltfAsset {
         // context get `None` and external URIs error cleanly inside the
         // gltf crate.
         let base = image_base_dir();
-        let mut buffer_data = gltf::import_buffers(
-            &gltf_obj.document, base.as_deref(), gltf_obj.blob,
-        ).map_err(GltfError::Io)?;
+        let mut buffer_data =
+            gltf::import_buffers(&gltf_obj.document, base.as_deref(), gltf_obj.blob)
+                .map_err(GltfError::Io)?;
 
         // Step 3: Pre-decompress any EXT_meshopt_compression buffer views.
         preprocess_meshopt_buffer_views(effective_bytes.as_ref(), &mut buffer_data);
@@ -146,10 +147,17 @@ impl GltfAsset {
         // Step 4: Decode images with our custom decoders (WebP, KTX2/BasisU, PNG, JPEG).
         let image_data = load_images_custom(&gltf_obj.document, &buffer_data);
 
-        let mut asset = extract_asset_with_patches(&gltf_obj.document, &buffer_data, &image_data, &per_anim_patches)?;
+        let mut asset = extract_asset_with_patches(
+            &gltf_obj.document,
+            &buffer_data,
+            &image_data,
+            &per_anim_patches,
+        )?;
         // Attach pointer channels and drop the sentinel node-0 channels.
         for (i, patch) in per_anim_patches.into_iter().enumerate() {
-            let Some(anim) = asset.animations.get_mut(i) else { continue };
+            let Some(anim) = asset.animations.get_mut(i) else {
+                continue;
+            };
             let skip = patch.patched_channel_indices;
             if !skip.is_empty() {
                 let kept: thin_vec::ThinVec<crate::animation::AnimChannel> = anim
@@ -161,7 +169,9 @@ impl GltfAsset {
                     .collect();
                 anim.channels = kept;
             }
-            for p in patch.pointers { anim.pointer_channels.push(p); }
+            for p in patch.pointers {
+                anim.pointer_channels.push(p);
+            }
         }
         Ok(asset)
     }
@@ -184,13 +194,13 @@ impl GltfAsset {
 }
 
 fn extract_asset_with_patches(
-    doc:     &gltf::Document,
+    doc: &gltf::Document,
     buffers: &[gltf::buffer::Data],
-    images:  &[gltf::image::Data],
+    images: &[gltf::image::Data],
     patches: &[crate::preprocess::PointerPatch],
 ) -> GltfResult<GltfAsset> {
     let asset_metadata = extract_asset_metadata(doc)?;
-    let extensions_used     = extract_extensions_used(doc);
+    let extensions_used = extract_extensions_used(doc);
     let extensions_required = extract_extensions_required(doc);
 
     // Validate that every required extension is supported.
@@ -207,18 +217,18 @@ fn extract_asset_with_patches(
         extensions_used,
         extensions_required,
         material_variants,
-        scenes:        extract_scenes(doc),
+        scenes: extract_scenes(doc),
         default_scene: doc.default_scene().map(|s| s.index() as u32),
-        nodes:         extract_nodes(doc),
-        meshes:        extract_meshes(doc, buffers)?,
-        materials:     extract_materials(doc),
-        textures:      extract_textures(doc),
-        images:        extract_images(doc, images),
-        samplers:      extract_samplers(doc),
-        skins:         extract_skins(doc, buffers),
-        animations:    extract_animations(doc, buffers, patches)?,
-        cameras:       extract_cameras(doc),
-        lights:        extract_lights(doc),
+        nodes: extract_nodes(doc),
+        meshes: extract_meshes(doc, buffers)?,
+        materials: extract_materials(doc),
+        textures: extract_textures(doc),
+        images: extract_images(doc, images),
+        samplers: extract_samplers(doc),
+        skins: extract_skins(doc, buffers),
+        animations: extract_animations(doc, buffers, patches)?,
+        cameras: extract_cameras(doc),
+        lights: extract_lights(doc),
         gaussian_splats: crate::splat::extract_splats(doc, buffers),
     })
 }
@@ -253,19 +263,33 @@ fn extract_asset_metadata(doc: &gltf::Document) -> GltfResult<AssetMetadata> {
 }
 
 fn extract_extensions_used(doc: &gltf::Document) -> ThinVec<String> {
-    doc.as_json().extensions_used.iter().map(|s| s.to_string()).collect()
+    doc.as_json()
+        .extensions_used
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn extract_extensions_required(doc: &gltf::Document) -> ThinVec<String> {
-    doc.as_json().extensions_required.iter().map(|s| s.to_string()).collect()
+    doc.as_json()
+        .extensions_required
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn extract_material_variants(doc: &gltf::Document) -> ThinVec<MaterialVariant> {
     // KHR_materials_variants stores its top-level data in doc.extensions.
     use serde_json::Value;
-    let Some(exts) = doc.as_json().extensions.as_ref() else { return ThinVec::new(); };
-    let Some(khr) = exts.others.get("KHR_materials_variants") else { return ThinVec::new(); };
-    let Some(arr) = khr.get("variants").and_then(|v| v.as_array()) else { return ThinVec::new(); };
+    let Some(exts) = doc.as_json().extensions.as_ref() else {
+        return ThinVec::new();
+    };
+    let Some(khr) = exts.others.get("KHR_materials_variants") else {
+        return ThinVec::new();
+    };
+    let Some(arr) = khr.get("variants").and_then(|v| v.as_array()) else {
+        return ThinVec::new();
+    };
     arr.iter()
         .filter_map(|v: &Value| {
             let name = v.as_object()?.get("name")?.as_str()?.to_owned();
@@ -279,7 +303,7 @@ fn extract_material_variants(doc: &gltf::Document) -> ThinVec<MaterialVariant> {
 fn extract_scenes(doc: &gltf::Document) -> ThinVec<Scene> {
     doc.scenes()
         .map(|s| Scene {
-            name:  s.name().map(str::to_owned),
+            name: s.name().map(str::to_owned),
             roots: s.nodes().map(|n| n.index() as u32).collect(),
         })
         .collect()
@@ -293,19 +317,22 @@ fn extract_nodes(doc: &gltf::Document) -> ThinVec<Node> {
             let (t, r, s) = n.transform().decomposed();
             let local_matrix = compose_trs(t, r, s);
             Node {
-                name:        n.name().map(str::to_owned),
-                parent:      None,
-                children:    n.children().map(|c| c.index() as u32).collect(),
+                name: n.name().map(str::to_owned),
+                parent: None,
+                children: n.children().map(|c| c.index() as u32).collect(),
                 translation: t,
-                rotation:    r,
-                scale:       s,
+                rotation: r,
+                scale: s,
                 local_matrix,
-                mesh:        n.mesh().map(|m| m.index() as u32),
-                camera:      n.camera().map(|c| c.index() as u32),
-                skin:        n.skin().map(|s| s.index() as u32),
-                light:       n.light().map(|l| l.index() as u32),
-                weights:     n.weights().map(|ws| ws.iter().copied().collect()).unwrap_or_default(),
-                instances:   extract_node_instances(doc, &n),
+                mesh: n.mesh().map(|m| m.index() as u32),
+                camera: n.camera().map(|c| c.index() as u32),
+                skin: n.skin().map(|s| s.index() as u32),
+                light: n.light().map(|l| l.index() as u32),
+                weights: n
+                    .weights()
+                    .map(|ws| ws.iter().copied().collect())
+                    .unwrap_or_default(),
+                instances: extract_node_instances(doc, &n),
             }
         })
         .collect();
@@ -325,11 +352,10 @@ fn extract_nodes(doc: &gltf::Document) -> ThinVec<Node> {
 /// as accessor references; each accessor is `instance_count` long. The
 /// gltf crate surfaces the raw extension value as JSON; we walk it
 /// ourselves (the crate doesn't have first-class support).
-fn extract_node_instances(
-    doc:  &gltf::Document,
-    node: &gltf::Node<'_>,
-) -> Option<NodeInstances> {
-    let ext = node.extension_value("EXT_mesh_gpu_instancing")?.as_object()?;
+fn extract_node_instances(doc: &gltf::Document, node: &gltf::Node<'_>) -> Option<NodeInstances> {
+    let ext = node
+        .extension_value("EXT_mesh_gpu_instancing")?
+        .as_object()?;
     let attrs = ext.get("attributes")?.as_object()?;
 
     // We capture the accessor indices the JSON references and resize the
@@ -337,39 +363,40 @@ fn extract_node_instances(
     // start at sensible defaults (identity); a future gather pass that
     // owns the buffer_data can overwrite them.
     let mut translation: thin_vec::ThinVec<[f32; 3]> = thin_vec::ThinVec::new();
-    let mut rotation:    thin_vec::ThinVec<[f32; 4]> = thin_vec::ThinVec::new();
-    let mut scale:       thin_vec::ThinVec<[f32; 3]> = thin_vec::ThinVec::new();
+    let mut rotation: thin_vec::ThinVec<[f32; 4]> = thin_vec::ThinVec::new();
+    let mut scale: thin_vec::ThinVec<[f32; 3]> = thin_vec::ThinVec::new();
 
-    if let Some(idx_val) = attrs.get("TRANSLATION") {
-        if let Some(idx) = idx_val.as_u64() {
-            if let Some(acc) = doc.accessors().nth(idx as usize) {
-                translation.resize(acc.count(), [0.0_f32; 3]);
-            }
-        }
+    if let Some(idx_val) = attrs.get("TRANSLATION")
+        && let Some(idx) = idx_val.as_u64()
+        && let Some(acc) = doc.accessors().nth(idx as usize)
+    {
+        translation.resize(acc.count(), [0.0_f32; 3]);
     }
-    if let Some(idx_val) = attrs.get("ROTATION") {
-        if let Some(idx) = idx_val.as_u64() {
-            if let Some(acc) = doc.accessors().nth(idx as usize) {
-                rotation.resize(acc.count(), [0.0_f32, 0.0, 0.0, 1.0]);
-            }
-        }
+    if let Some(idx_val) = attrs.get("ROTATION")
+        && let Some(idx) = idx_val.as_u64()
+        && let Some(acc) = doc.accessors().nth(idx as usize)
+    {
+        rotation.resize(acc.count(), [0.0_f32, 0.0, 0.0, 1.0]);
     }
-    if let Some(idx_val) = attrs.get("SCALE") {
-        if let Some(idx) = idx_val.as_u64() {
-            if let Some(acc) = doc.accessors().nth(idx as usize) {
-                scale.resize(acc.count(), [1.0_f32; 3]);
-            }
-        }
+    if let Some(idx_val) = attrs.get("SCALE")
+        && let Some(idx) = idx_val.as_u64()
+        && let Some(acc) = doc.accessors().nth(idx as usize)
+    {
+        scale.resize(acc.count(), [1.0_f32; 3]);
     }
 
-    let inst = NodeInstances { translation, rotation, scale };
+    let inst = NodeInstances {
+        translation,
+        rotation,
+        scale,
+    };
     if inst.is_empty() { None } else { Some(inst) }
 }
 
 // ── Meshes ──────────────────────────────────────────────────────────────────
 
 fn extract_meshes(
-    doc:     &gltf::Document,
+    doc: &gltf::Document,
     buffers: &[gltf::buffer::Data],
 ) -> GltfResult<ThinVec<Mesh>> {
     use rayon::prelude::*;
@@ -377,23 +404,29 @@ fn extract_meshes(
     // gltf::Mesh<'_> wraps &'_ Root + a mesh index — Sync when Root: Sync.
     // Collect first so rayon can slice the Vec across threads.
     let meshes: Vec<gltf::Mesh<'_>> = doc.meshes().collect();
-    let results: Vec<GltfResult<Mesh>> = meshes.par_iter().map(|mesh| {
-        let mut primitives = ThinVec::with_capacity(mesh.primitives().count());
-        for prim in mesh.primitives() {
-            primitives.push(extract_primitive(&prim, buffers)?);
-        }
-        Ok(Mesh {
-            name:     mesh.name().map(str::to_owned),
-            primitives,
-            weights:  mesh.weights().map(|ws| ws.iter().copied().collect()).unwrap_or_default(),
+    let results: Vec<GltfResult<Mesh>> = meshes
+        .par_iter()
+        .map(|mesh| {
+            let mut primitives = ThinVec::with_capacity(mesh.primitives().count());
+            for prim in mesh.primitives() {
+                primitives.push(extract_primitive(&prim, buffers)?);
+            }
+            Ok(Mesh {
+                name: mesh.name().map(str::to_owned),
+                primitives,
+                weights: mesh
+                    .weights()
+                    .map(|ws| ws.iter().copied().collect())
+                    .unwrap_or_default(),
+            })
         })
-    }).collect();
+        .collect();
 
     results.into_iter().collect::<GltfResult<ThinVec<Mesh>>>()
 }
 
 fn extract_primitive(
-    prim:    &gltf::Primitive<'_>,
+    prim: &gltf::Primitive<'_>,
     buffers: &[gltf::buffer::Data],
 ) -> GltfResult<Primitive> {
     let reader = prim.reader(|buf| Some(&*buffers[buf.index()]));
@@ -404,12 +437,14 @@ fn extract_primitive(
         .collect();
     let n = positions.len();
 
-    let mut streams = VertexStreams::default();
-    streams.positions = positions;
+    let mut streams = VertexStreams {
+        positions,
+        ..VertexStreams::default()
+    };
 
     let indices: ThinVec<u32> = match reader.read_indices() {
         Some(it) => it.into_u32().collect(),
-        None     => (0..n as u32).collect(),
+        None => (0..n as u32).collect(),
     };
 
     // Per spec §3.7.2.1: when NORMAL is absent and topology is triangles,
@@ -429,7 +464,9 @@ fn extract_primitive(
         set += 1;
     }
     if streams.uv_sets.is_empty() {
-        streams.uv_sets.push((0..n).map(|_| [0.0_f32, 0.0]).collect());
+        streams
+            .uv_sets
+            .push((0..n).map(|_| [0.0_f32, 0.0]).collect());
     }
 
     // Per spec §3.7.2.1: when TANGENT is absent but NORMAL + TEXCOORD_0 are
@@ -453,9 +490,16 @@ fn extract_primitive(
     set = 0;
     while let Some(c) = reader.read_colors(set) {
         // Clamp colors to [0,1] per spec §3.7.2.2
-        let clamped: ThinVec<[f32; 4]> = c.into_rgba_f32()
-            .map(|[r, g, b, a]| [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0),
-                                   b.clamp(0.0, 1.0), a.clamp(0.0, 1.0)])
+        let clamped: ThinVec<[f32; 4]> = c
+            .into_rgba_f32()
+            .map(|[r, g, b, a]| {
+                [
+                    r.clamp(0.0, 1.0),
+                    g.clamp(0.0, 1.0),
+                    b.clamp(0.0, 1.0),
+                    a.clamp(0.0, 1.0),
+                ]
+            })
             .collect();
         streams.colors.push(clamped);
         set += 1;
@@ -477,9 +521,15 @@ fn extract_primitive(
     for morph in reader.read_morph_targets() {
         let (pos, norm, tan) = morph;
         let mut mt = MorphTarget::default();
-        if let Some(p) = pos  { mt.positions = p.collect(); }
-        if let Some(no) = norm { mt.normals  = no.collect(); }
-        if let Some(t) = tan  { mt.tangents  = t.collect(); }
+        if let Some(p) = pos {
+            mt.positions = p.collect();
+        }
+        if let Some(no) = norm {
+            mt.normals = no.collect();
+        }
+        if let Some(t) = tan {
+            mt.tangents = t.collect();
+        }
         morph_targets.push(mt);
     }
 
@@ -490,7 +540,9 @@ fn extract_primitive(
             gltf::mesh::Semantic::Extras(n) => n.as_str(),
             _ => continue,
         };
-        if !name.starts_with('_') { continue; }
+        if !name.starts_with('_') {
+            continue;
+        }
         match crate::codec::sparse::resolve_custom_attribute(name, &accessor, buffers) {
             Ok(ca) => custom_attrs.push(ca),
             Err(GltfError::SpecViolation(s)) => return Err(GltfError::SpecViolation(s)),
@@ -503,14 +555,17 @@ fn extract_primitive(
 
     let bounds = {
         let bb = prim.bounding_box();
-        Aabb { min: bb.min, max: bb.max }
+        Aabb {
+            min: bb.min,
+            max: bb.max,
+        }
     };
 
     Ok(Primitive {
-        topology:        PrimitiveTopology::from_mode(prim.mode()),
+        topology: PrimitiveTopology::from_mode(prim.mode()),
         streams,
         indices,
-        material:        prim.material().index().map(|i| i as u32),
+        material: prim.material().index().map(|i| i as u32),
         morph_targets,
         bounds,
         custom_attrs,
@@ -525,20 +580,26 @@ fn flat_normals(positions: &[[f32; 3]], indices: &[u32]) -> ThinVec<[f32; 3]> {
     let mut out: ThinVec<[f32; 3]> = (0..n).map(|_| [0.0_f32, 1.0, 0.0]).collect();
     let tri_count = indices.len() / 3;
     for t in 0..tri_count {
-        let i0 = indices[t * 3]     as usize;
+        let i0 = indices[t * 3] as usize;
         let i1 = indices[t * 3 + 1] as usize;
         let i2 = indices[t * 3 + 2] as usize;
-        if i0 >= n || i1 >= n || i2 >= n { continue; }
+        if i0 >= n || i1 >= n || i2 >= n {
+            continue;
+        }
         let p0 = positions[i0];
         let p1 = positions[i1];
         let p2 = positions[i2];
-        let e1 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
-        let e2 = [p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]];
-        let nx = e1[1]*e2[2] - e1[2]*e2[1];
-        let ny = e1[2]*e2[0] - e1[0]*e2[2];
-        let nz = e1[0]*e2[1] - e1[1]*e2[0];
-        let len = (nx*nx + ny*ny + nz*nz).sqrt();
-        let norm = if len > 1e-12 { [nx/len, ny/len, nz/len] } else { [0.0, 1.0, 0.0] };
+        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        let norm = if len > 1e-12 {
+            [nx / len, ny / len, nz / len]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         out[i0] = norm;
         out[i1] = norm;
         out[i2] = norm;
@@ -547,15 +608,27 @@ fn flat_normals(positions: &[[f32; 3]], indices: &[u32]) -> ThinVec<[f32; 3]> {
 }
 
 fn extract_primitive_variant_mappings(prim: &gltf::Primitive<'_>) -> ThinVec<VariantMapping> {
-    let Some(khr) = prim.extension_value("KHR_materials_variants") else { return ThinVec::new(); };
-    let Some(arr) = khr.get("mappings").and_then(|v: &serde_json::Value| v.as_array()) else { return ThinVec::new(); };
+    let Some(khr) = prim.extension_value("KHR_materials_variants") else {
+        return ThinVec::new();
+    };
+    let Some(arr) = khr
+        .get("mappings")
+        .and_then(|v: &serde_json::Value| v.as_array())
+    else {
+        return ThinVec::new();
+    };
     arr.iter()
         .filter_map(|v: &serde_json::Value| {
             let obj = v.as_object()?;
             let material = obj.get("material")?.as_u64()? as u32;
-            let variants: ThinVec<u32> = obj.get("variants")
+            let variants: ThinVec<u32> = obj
+                .get("variants")
                 .and_then(|v: &serde_json::Value| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as u32))
+                        .collect()
+                })
                 .unwrap_or_default();
             Some(VariantMapping { material, variants })
         })
@@ -566,20 +639,24 @@ fn extract_primitive_variant_mappings(prim: &gltf::Primitive<'_>) -> ThinVec<Var
 
 fn apply_texture_transform_from_json(val: &serde_json::Value, tr: &mut TextureRef) {
     let Some(obj) = val.as_object() else { return };
-    if let Some(arr) = obj.get("offset").and_then(|v| v.as_array()) {
-        if let (Some(x), Some(y)) = (arr.first().and_then(|v| v.as_f64()),
-                                      arr.get(1).and_then(|v| v.as_f64())) {
-            tr.uv_offset = [x as f32, y as f32];
-        }
+    if let Some(arr) = obj.get("offset").and_then(|v| v.as_array())
+        && let (Some(x), Some(y)) = (
+            arr.first().and_then(|v| v.as_f64()),
+            arr.get(1).and_then(|v| v.as_f64()),
+        )
+    {
+        tr.uv_offset = [x as f32, y as f32];
     }
     if let Some(r) = obj.get("rotation").and_then(|v| v.as_f64()) {
         tr.uv_rotation = r as f32;
     }
-    if let Some(arr) = obj.get("scale").and_then(|v| v.as_array()) {
-        if let (Some(x), Some(y)) = (arr.first().and_then(|v| v.as_f64()),
-                                      arr.get(1).and_then(|v| v.as_f64())) {
-            tr.uv_scale = [x as f32, y as f32];
-        }
+    if let Some(arr) = obj.get("scale").and_then(|v| v.as_array())
+        && let (Some(x), Some(y)) = (
+            arr.first().and_then(|v| v.as_f64()),
+            arr.get(1).and_then(|v| v.as_f64()),
+        )
+    {
+        tr.uv_scale = [x as f32, y as f32];
     }
     if let Some(tc) = obj.get("texCoord").and_then(|v| v.as_u64()) {
         tr.tex_coord_set = tc as u32;
@@ -591,9 +668,9 @@ fn texture_ref_from(info: gltf::texture::Info<'_>) -> TextureRef {
     let tex_coord_set = info.tex_coord();
     let mut out = TextureRef::identity(texture, tex_coord_set);
     if let Some(tx) = info.texture_transform() {
-        out.uv_offset   = tx.offset();
+        out.uv_offset = tx.offset();
         out.uv_rotation = tx.rotation();
-        out.uv_scale    = tx.scale();
+        out.uv_scale = tx.scale();
         if let Some(ts) = tx.tex_coord() {
             out.tex_coord_set = ts;
         }
@@ -604,13 +681,15 @@ fn texture_ref_from(info: gltf::texture::Info<'_>) -> TextureRef {
 fn extract_materials(doc: &gltf::Document) -> ThinVec<Material> {
     doc.materials()
         .map(|m| {
-            let mut out = Material::default();
-            out.name = m.name().map(str::to_owned);
-            out.alpha_mode = AlphaMode::from(m.alpha_mode());
-            out.alpha_cutoff = m.alpha_cutoff().unwrap_or(0.5);
-            out.double_sided = m.double_sided();
-            out.unlit = m.unlit();
-            out.ior = m.ior().unwrap_or(1.5);
+            let mut out = Material {
+                name: m.name().map(str::to_owned),
+                alpha_mode: AlphaMode::from(m.alpha_mode()),
+                alpha_cutoff: m.alpha_cutoff().unwrap_or(0.5),
+                double_sided: m.double_sided(),
+                unlit: m.unlit(),
+                ior: m.ior().unwrap_or(1.5),
+                ..Material::default()
+            };
 
             let pbr = m.pbr_metallic_roughness();
             out.pbr.base_color_factor = pbr.base_color_factor();
@@ -628,7 +707,10 @@ fn extract_materials(doc: &gltf::Document) -> ThinVec<Material> {
                 if let Some(ext_val) = n.extensions().and_then(|e| e.get("KHR_texture_transform")) {
                     apply_texture_transform_from_json(ext_val, &mut tr);
                 }
-                out.normal = NormalTexture { texture: Some(tr), scale: n.scale() };
+                out.normal = NormalTexture {
+                    texture: Some(tr),
+                    scale: n.scale(),
+                };
             }
 
             if let Some(o) = m.occlusion_texture() {
@@ -638,7 +720,10 @@ fn extract_materials(doc: &gltf::Document) -> ThinVec<Material> {
                 if let Some(ext_val) = o.extensions().and_then(|e| e.get("KHR_texture_transform")) {
                     apply_texture_transform_from_json(ext_val, &mut tr);
                 }
-                out.occlusion = OcclusionTexture { texture: Some(tr), strength: o.strength() };
+                out.occlusion = OcclusionTexture {
+                    texture: Some(tr),
+                    strength: o.strength(),
+                };
             }
 
             out.emissive_factor = m.emissive_factor();
@@ -647,16 +732,16 @@ fn extract_materials(doc: &gltf::Document) -> ThinVec<Material> {
 
             if let Some(t) = m.transmission() {
                 out.transmission = Transmission {
-                    factor:  t.transmission_factor(),
+                    factor: t.transmission_factor(),
                     texture: t.transmission_texture().map(texture_ref_from),
                 };
             }
             if let Some(v) = m.volume() {
                 out.volume = Volume {
-                    thickness_factor:    v.thickness_factor(),
-                    thickness_texture:   v.thickness_texture().map(texture_ref_from),
-                    attenuation_distance:v.attenuation_distance(),
-                    attenuation_color:   v.attenuation_color(),
+                    thickness_factor: v.thickness_factor(),
+                    thickness_texture: v.thickness_texture().map(texture_ref_from),
+                    attenuation_distance: v.attenuation_distance(),
+                    attenuation_color: v.attenuation_color(),
                 };
             }
 
@@ -677,8 +762,8 @@ fn extract_materials(doc: &gltf::Document) -> ThinVec<Material> {
 fn extract_textures(doc: &gltf::Document) -> ThinVec<Texture> {
     doc.textures()
         .map(|t| Texture {
-            name:    t.name().map(str::to_owned),
-            image:   t.source().index() as u32,
+            name: t.name().map(str::to_owned),
+            image: t.source().index() as u32,
             sampler: t.sampler().index().map(|i| i as u32),
         })
         .collect()
@@ -688,8 +773,14 @@ fn extract_samplers(doc: &gltf::Document) -> ThinVec<Sampler> {
     doc.samplers()
         .map(|s| Sampler {
             name: s.name().map(str::to_owned),
-            mag_filter: s.mag_filter().map(mag_filter_from).unwrap_or(MagFilter::Linear),
-            min_filter: s.min_filter().map(min_filter_from).unwrap_or(MinFilter::LinearMipmapLinear),
+            mag_filter: s
+                .mag_filter()
+                .map(mag_filter_from)
+                .unwrap_or(MagFilter::Linear),
+            min_filter: s
+                .min_filter()
+                .map(min_filter_from)
+                .unwrap_or(MinFilter::LinearMipmapLinear),
             wrap_s: wrap_from(s.wrap_s()),
             wrap_t: wrap_from(s.wrap_t()),
         })
@@ -699,9 +790,7 @@ fn extract_samplers(doc: &gltf::Document) -> ThinVec<Sampler> {
 fn extract_images(doc: &gltf::Document, images: &[gltf::image::Data]) -> ThinVec<Image> {
     // Walk every material/texture to flag which texture indices want sRGB —
     // base-colour and emissive maps live in sRGB; everything else is linear.
-    let mut srgb_textures: ThinVec<bool> = (0..doc.textures().count())
-        .map(|_| false)
-        .collect();
+    let mut srgb_textures: ThinVec<bool> = (0..doc.textures().count()).map(|_| false).collect();
     for m in doc.materials() {
         if let Some(t) = m.pbr_metallic_roughness().base_color_texture() {
             srgb_textures[t.texture().index()] = true;
@@ -713,9 +802,8 @@ fn extract_images(doc: &gltf::Document, images: &[gltf::image::Data]) -> ThinVec
 
     // Image format hint = sRGB if any texture pointing to this image is sRGB.
     let n_images = images.len();
-    let mut hints: ThinVec<ImageFormatHint> = (0..n_images)
-        .map(|_| ImageFormatHint::Linear)
-        .collect();
+    let mut hints: ThinVec<ImageFormatHint> =
+        (0..n_images).map(|_| ImageFormatHint::Linear).collect();
     for t in doc.textures() {
         if srgb_textures[t.index()] {
             hints[t.source().index()] = ImageFormatHint::Srgb;
@@ -723,23 +811,28 @@ fn extract_images(doc: &gltf::Document, images: &[gltf::image::Data]) -> ThinVec
     }
 
     // Pre-extract names sequentially (gltf iterator types may not be Send).
-    let names: Vec<Option<String>> = doc.images()
+    let names: Vec<Option<String>> = doc
+        .images()
         .map(|im| im.name().map(str::to_owned))
         .collect();
 
     use rayon::prelude::*;
     let hints_ref: &[ImageFormatHint] = &hints;
 
-    let decoded: Vec<Image> = images.par_iter().enumerate().map(|(i, data)| {
-        let (w, h, rgba) = decode_to_rgba8(data);
-        Image {
-            name:   names.get(i).and_then(|n| n.clone()),
-            width:  w,
-            height: h,
-            rgba,
-            format: *hints_ref.get(i).unwrap_or(&ImageFormatHint::Linear),
-        }
-    }).collect();
+    let decoded: Vec<Image> = images
+        .par_iter()
+        .enumerate()
+        .map(|(i, data)| {
+            let (w, h, rgba) = decode_to_rgba8(data);
+            Image {
+                name: names.get(i).and_then(|n| n.clone()),
+                width: w,
+                height: h,
+                rgba,
+                format: *hints_ref.get(i).unwrap_or(&ImageFormatHint::Linear),
+            }
+        })
+        .collect();
     decoded.into_iter().collect()
 }
 
@@ -757,7 +850,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
     match data.format {
         F::R8 => {
             for i in 0..n {
-                out[i * 4]     = pixels[i];
+                out[i * 4] = pixels[i];
                 out[i * 4 + 1] = pixels[i];
                 out[i * 4 + 2] = pixels[i];
                 out[i * 4 + 3] = 255;
@@ -765,7 +858,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
         }
         F::R8G8 => {
             for i in 0..n {
-                out[i * 4]     = pixels[i * 2];
+                out[i * 4] = pixels[i * 2];
                 out[i * 4 + 1] = pixels[i * 2 + 1];
                 out[i * 4 + 2] = 0;
                 out[i * 4 + 3] = 255;
@@ -773,7 +866,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
         }
         F::R8G8B8 => {
             for i in 0..n {
-                out[i * 4]     = pixels[i * 3];
+                out[i * 4] = pixels[i * 3];
                 out[i * 4 + 1] = pixels[i * 3 + 1];
                 out[i * 4 + 2] = pixels[i * 3 + 2];
                 out[i * 4 + 3] = 255;
@@ -786,7 +879,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
             for i in 0..n {
                 let v = u16_at(pixels, i * 2);
                 let b = (v >> 8) as u8;
-                out[i * 4]     = b;
+                out[i * 4] = b;
                 out[i * 4 + 1] = b;
                 out[i * 4 + 2] = b;
                 out[i * 4 + 3] = 255;
@@ -794,7 +887,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
         }
         F::R16G16 => {
             for i in 0..n {
-                out[i * 4]     = (u16_at(pixels, i * 4) >> 8) as u8;
+                out[i * 4] = (u16_at(pixels, i * 4) >> 8) as u8;
                 out[i * 4 + 1] = (u16_at(pixels, i * 4 + 2) >> 8) as u8;
                 out[i * 4 + 2] = 0;
                 out[i * 4 + 3] = 255;
@@ -802,7 +895,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
         }
         F::R16G16B16 => {
             for i in 0..n {
-                out[i * 4]     = (u16_at(pixels, i * 6) >> 8) as u8;
+                out[i * 4] = (u16_at(pixels, i * 6) >> 8) as u8;
                 out[i * 4 + 1] = (u16_at(pixels, i * 6 + 2) >> 8) as u8;
                 out[i * 4 + 2] = (u16_at(pixels, i * 6 + 4) >> 8) as u8;
                 out[i * 4 + 3] = 255;
@@ -810,7 +903,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
         }
         F::R16G16B16A16 => {
             for i in 0..n {
-                out[i * 4]     = (u16_at(pixels, i * 8) >> 8) as u8;
+                out[i * 4] = (u16_at(pixels, i * 8) >> 8) as u8;
                 out[i * 4 + 1] = (u16_at(pixels, i * 8 + 2) >> 8) as u8;
                 out[i * 4 + 2] = (u16_at(pixels, i * 8 + 4) >> 8) as u8;
                 out[i * 4 + 3] = (u16_at(pixels, i * 8 + 6) >> 8) as u8;
@@ -818,7 +911,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
         }
         F::R32G32B32FLOAT => {
             for i in 0..n {
-                out[i * 4]     = f32_to_u8(f32_at(pixels, i * 12));
+                out[i * 4] = f32_to_u8(f32_at(pixels, i * 12));
                 out[i * 4 + 1] = f32_to_u8(f32_at(pixels, i * 12 + 4));
                 out[i * 4 + 2] = f32_to_u8(f32_at(pixels, i * 12 + 8));
                 out[i * 4 + 3] = 255;
@@ -826,7 +919,7 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
         }
         F::R32G32B32A32FLOAT => {
             for i in 0..n {
-                out[i * 4]     = f32_to_u8(f32_at(pixels, i * 16));
+                out[i * 4] = f32_to_u8(f32_at(pixels, i * 16));
                 out[i * 4 + 1] = f32_to_u8(f32_at(pixels, i * 16 + 4));
                 out[i * 4 + 2] = f32_to_u8(f32_at(pixels, i * 16 + 8));
                 out[i * 4 + 3] = f32_to_u8(f32_at(pixels, i * 16 + 12));
@@ -836,13 +929,16 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
     (w, h, out)
 }
 
-#[inline] fn u16_at(buf: &[u8], i: usize) -> u16 {
+#[inline]
+fn u16_at(buf: &[u8], i: usize) -> u16 {
     u16::from_le_bytes([buf[i], buf[i + 1]])
 }
-#[inline] fn f32_at(buf: &[u8], i: usize) -> f32 {
+#[inline]
+fn f32_at(buf: &[u8], i: usize) -> f32 {
     f32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]])
 }
-#[inline] fn f32_to_u8(v: f32) -> u8 {
+#[inline]
+fn f32_to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
@@ -852,67 +948,80 @@ fn decode_to_rgba8(data: &gltf::image::Data) -> (u32, u32, ThinVec<u8>) {
 /// carry the extension and write the decompressed bytes into the fallback
 /// range in the buffer data. This runs before the gltf crate's accessor
 /// readers see the data, so regular `prim.reader(...)` calls get clean bytes.
-fn preprocess_meshopt_buffer_views(
-    raw_bytes: &[u8],
-    buffer_data: &mut Vec<gltf::buffer::Data>,
-) {
+fn preprocess_meshopt_buffer_views(raw_bytes: &[u8], buffer_data: &mut [gltf::buffer::Data]) {
     let json_val = match extract_json_value(raw_bytes) {
         Some(v) => v,
-        None    => return,
+        None => return,
     };
     let bvs = match json_val["bufferViews"].as_array() {
         Some(a) => a,
-        None    => return,
+        None => return,
     };
 
     for bv in bvs {
-        let Some(ext) = bv.get("extensions")
-            .and_then(|e| e.get("EXT_meshopt_compression")) else { continue };
+        let Some(ext) = bv
+            .get("extensions")
+            .and_then(|e| e.get("EXT_meshopt_compression"))
+        else {
+            continue;
+        };
 
         let comp_buf_idx = ext["buffer"].as_u64().unwrap_or(0) as usize;
-        let comp_off     = ext["byteOffset"].as_u64().unwrap_or(0) as usize;
-        let comp_len     = ext["byteLength"].as_u64().unwrap_or(0) as usize;
-        let stride       = ext["byteStride"].as_u64().unwrap_or(1) as usize;
-        let count        = ext["count"].as_u64().unwrap_or(0) as usize;
-        let mode_str     = ext["mode"].as_str().unwrap_or("ATTRIBUTES");
-        let filter_str   = ext["filter"].as_str().unwrap_or("NONE");
+        let comp_off = ext["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let comp_len = ext["byteLength"].as_u64().unwrap_or(0) as usize;
+        let stride = ext["byteStride"].as_u64().unwrap_or(1) as usize;
+        let count = ext["count"].as_u64().unwrap_or(0) as usize;
+        let mode_str = ext["mode"].as_str().unwrap_or("ATTRIBUTES");
+        let filter_str = ext["filter"].as_str().unwrap_or("NONE");
 
-        if comp_buf_idx >= buffer_data.len() || count == 0 || stride == 0 { continue; }
+        if comp_buf_idx >= buffer_data.len() || count == 0 || stride == 0 {
+            continue;
+        }
 
         let mode = match mode_str {
             "ATTRIBUTES" => MeshoptMode::Attributes,
-            "TRIANGLES"  => MeshoptMode::Triangles,
-            "INDICES"    => MeshoptMode::Indices,
-            _            => continue,
+            "TRIANGLES" => MeshoptMode::Triangles,
+            "INDICES" => MeshoptMode::Indices,
+            _ => continue,
         };
         let filter = match filter_str {
-            "OCTAHEDRAL"  => MeshoptFilter::Octahedral,
-            "QUATERNION"  => MeshoptFilter::Quaternion,
+            "OCTAHEDRAL" => MeshoptFilter::Octahedral,
+            "QUATERNION" => MeshoptFilter::Quaternion,
             "EXPONENTIAL" => MeshoptFilter::Exponential,
-            _             => MeshoptFilter::None,
+            _ => MeshoptFilter::None,
         };
 
         // Read compressed bytes into an owned Vec (avoids aliasing when we
         // write back below, in case src and dst are in the same buffer).
         let comp_end = comp_off.saturating_add(comp_len);
-        if comp_end > buffer_data[comp_buf_idx].0.len() { continue; }
+        if comp_end > buffer_data[comp_buf_idx].0.len() {
+            continue;
+        }
         let compressed: Vec<u8> = buffer_data[comp_buf_idx].0[comp_off..comp_end].to_vec();
 
         let decompressed = match crate::codec::meshopt::decompress_buffer_view(
-            mode, filter, count, stride, &compressed,
+            mode,
+            filter,
+            count,
+            stride,
+            &compressed,
         ) {
-            Ok(d)  => d,
+            Ok(d) => d,
             Err(_) => continue,
         };
 
         // Write decompressed bytes into the fallback buffer-view location.
         let dst_buf_idx = bv["buffer"].as_u64().unwrap_or(0) as usize;
-        let dst_off     = bv["byteOffset"].as_u64().unwrap_or(0) as usize;
-        let dst_len     = bv["byteLength"].as_u64().unwrap_or(0) as usize;
+        let dst_off = bv["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let dst_len = bv["byteLength"].as_u64().unwrap_or(0) as usize;
 
-        if dst_buf_idx >= buffer_data.len() { continue; }
+        if dst_buf_idx >= buffer_data.len() {
+            continue;
+        }
         let dst_end = dst_off.saturating_add(dst_len);
-        if dst_end > buffer_data[dst_buf_idx].0.len() { continue; }
+        if dst_end > buffer_data[dst_buf_idx].0.len() {
+            continue;
+        }
 
         let copy_len = dst_len.min(decompressed.len());
         buffer_data[dst_buf_idx].0[dst_off..dst_off + copy_len]
@@ -933,11 +1042,17 @@ pub(crate) enum RawSource {
     /// Inline bytes pulled from a buffer view or a `data:` URI. `mime`
     /// disambiguates WebP / KTX2 / PNG / JPEG when the file's magic isn't
     /// authoritative.
-    Bytes { bytes: Vec<u8>, mime: Option<String> },
+    Bytes {
+        bytes: Vec<u8>,
+        mime: Option<String>,
+    },
     /// Relative path resolved against the per-thread `IMAGE_BASE_DIR`
     /// (set by `GltfAsset::load`). Falls back to an error if `load_slice`
     /// was called without a base dir set.
-    ExternalUri { path_str: String, mime: Option<String> },
+    ExternalUri {
+        path_str: String,
+        mime: Option<String>,
+    },
     /// The gltf crate exposed a source variant we don't know how to honour,
     /// or the bytes were truncated.
     Unsupported,
@@ -950,20 +1065,21 @@ fn load_single_image_custom(src: RawSource) -> GltfResult<gltf::image::Data> {
     match src {
         RawSource::Bytes { bytes, mime } => decode_image_bytes(&bytes, mime.as_deref()),
         RawSource::ExternalUri { path_str, mime } => {
-            let path_str = path_str.strip_prefix("file://").unwrap_or(&path_str).to_owned();
+            let path_str = path_str
+                .strip_prefix("file://")
+                .unwrap_or(&path_str)
+                .to_owned();
             let Some(base) = image_base_dir() else {
-                return Err(GltfError::UnsupportedFeature(
-                    format!("external URI image without filesystem context: {path_str}")
-                ));
+                return Err(GltfError::UnsupportedFeature(format!(
+                    "external URI image without filesystem context: {path_str}"
+                )));
             };
             let resolved = base.join(&path_str);
-            let bytes = std::fs::read(&resolved).map_err(|e| {
-                GltfError::Io(gltf::Error::Io(e))
-            })?;
+            let bytes = std::fs::read(&resolved).map_err(|e| GltfError::Io(gltf::Error::Io(e)))?;
             decode_image_bytes(&bytes, mime.as_deref())
         }
         RawSource::Unsupported => Err(GltfError::UnsupportedFeature(
-            "image source variant not understood (truncated bytes or unknown URI)".to_owned()
+            "image source variant not understood (truncated bytes or unknown URI)".to_owned(),
         )),
     }
 }
@@ -973,7 +1089,7 @@ fn load_single_image_custom(src: RawSource) -> GltfResult<gltf::image::Data> {
 /// copied out of the document; external URIs are stashed as relative
 /// paths for `load_single_image_custom` to resolve later.
 fn extract_raw_source(
-    src:         gltf::image::Source<'_>,
+    src: gltf::image::Source<'_>,
     buffer_data: &[gltf::buffer::Data],
 ) -> RawSource {
     match src {
@@ -982,7 +1098,7 @@ fn extract_raw_source(
             match buf.get(view.offset()..view.offset() + view.length()) {
                 Some(slice) => RawSource::Bytes {
                     bytes: slice.to_vec(),
-                    mime:  Some(mime_type.to_owned()),
+                    mime: Some(mime_type.to_owned()),
                 },
                 None => RawSource::Unsupported,
             }
@@ -991,17 +1107,17 @@ fn extract_raw_source(
             if let Some(rest) = uri.strip_prefix("data:") {
                 let mut parts = rest.splitn(2, ";base64,");
                 let uri_mime = parts.next().map(str::to_owned);
-                if let Some(b64) = parts.next() {
-                    if let Some(bytes) = simple_base64_decode(b64) {
-                        let mime = uri_mime.or_else(|| mime_type.map(str::to_owned));
-                        return RawSource::Bytes { bytes, mime };
-                    }
+                if let Some(b64) = parts.next()
+                    && let Some(bytes) = simple_base64_decode(b64)
+                {
+                    let mime = uri_mime.or_else(|| mime_type.map(str::to_owned));
+                    return RawSource::Bytes { bytes, mime };
                 }
                 RawSource::Unsupported
             } else {
                 RawSource::ExternalUri {
                     path_str: uri.to_owned(),
-                    mime:     mime_type.map(str::to_owned),
+                    mime: mime_type.map(str::to_owned),
                 }
             }
         }
@@ -1015,15 +1131,18 @@ fn load_images_custom(
     use rayon::prelude::*;
     // Pre-extract owned sources sequentially (gltf types aren't Send),
     // then decode in parallel through `load_single_image_custom`.
-    let sources: Vec<RawSource> = doc.images()
+    let sources: Vec<RawSource> = doc
+        .images()
         .map(|img| extract_raw_source(img.source(), buffer_data))
         .collect();
     let dummy = || gltf::image::Data {
         pixels: vec![0, 0, 0, 0],
         format: gltf::image::Format::R8G8B8A8,
-        width: 1, height: 1,
+        width: 1,
+        height: 1,
     };
-    sources.into_par_iter()
+    sources
+        .into_par_iter()
         .map(|src| load_single_image_custom(src).unwrap_or_else(|_| dummy()))
         .collect()
 }
@@ -1053,21 +1172,21 @@ fn decode_image_bytes(bytes: &[u8], mime_type: Option<&str>) -> GltfResult<gltf:
         return Ok(gltf::image::Data {
             pixels: rgba.to_vec(),
             format: gltf::image::Format::R8G8B8A8,
-            width:  w,
+            width: w,
             height: h,
         });
     }
 
     // KTX2 detection
-    let is_ktx2 = mime_type == Some("image/ktx2")
-        || bytes.get(..12).map_or(false, |m| m == KTX2_MAGIC);
+    let is_ktx2 =
+        mime_type == Some("image/ktx2") || bytes.get(..12).is_some_and(|m| m == KTX2_MAGIC);
 
     if is_ktx2 {
         let (w, h, rgba) = decode_ktx2_to_rgba8(bytes)?;
         return Ok(gltf::image::Data {
             pixels: rgba,
             format: gltf::image::Format::R8G8B8A8,
-            width:  w,
+            width: w,
             height: h,
         });
     }
@@ -1080,10 +1199,7 @@ fn decode_image_bytes(bytes: &[u8], mime_type: Option<&str>) -> GltfResult<gltf:
 }
 
 /// Decode PNG / JPEG bytes via the `image` crate (re-exposed through gltf).
-fn decode_standard_image(
-    bytes:     &[u8],
-    mime_type: Option<&str>,
-) -> GltfResult<gltf::image::Data> {
+fn decode_standard_image(bytes: &[u8], mime_type: Option<&str>) -> GltfResult<gltf::image::Data> {
     use image::GenericImageView;
     let fmt = if mime_type == Some("image/png") {
         Some(image::ImageFormat::Png)
@@ -1093,14 +1209,14 @@ fn decode_standard_image(
         // Sniff from bytes.
         match bytes.get(..4) {
             Some([0x89, 0x50, 0x4E, 0x47]) => Some(image::ImageFormat::Png),
-            Some([0xFF, 0xD8, ..])          => Some(image::ImageFormat::Jpeg),
-            _                               => None,
+            Some([0xFF, 0xD8, ..]) => Some(image::ImageFormat::Jpeg),
+            _ => None,
         }
     };
     let dyn_img = match fmt {
         Some(f) => image::load_from_memory_with_format(bytes, f)
             .map_err(|_| GltfError::InvalidAccessor("image decode failed"))?,
-        None    => image::load_from_memory(bytes)
+        None => image::load_from_memory(bytes)
             .map_err(|_| GltfError::InvalidAccessor("image decode failed, unknown format"))?,
     };
     let (w, h) = dyn_img.dimensions();
@@ -1123,7 +1239,12 @@ fn decode_standard_image(
 /// special "UASTC in a vkFormat=0 wrapper" case routes through the
 /// BasisU decoder. Anything else surfaces as an explicit unsupported
 /// error rather than silent black output.
-fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -> GltfResult<Vec<u8>> {
+fn decode_ktx2_uncompressed(
+    vk_format: u32,
+    level_data: &[u8],
+    w: u32,
+    h: u32,
+) -> GltfResult<Vec<u8>> {
     use crate::codec::bc;
     let n = (w as usize) * (h as usize);
     Ok(match vk_format {
@@ -1134,7 +1255,7 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
             let take = level_data.len().min(n);
             let mut out = vec![0u8; n * 4];
             for i in 0..take {
-                out[i * 4]     = level_data[i];
+                out[i * 4] = level_data[i];
                 out[i * 4 + 3] = 255;
             }
             out
@@ -1145,7 +1266,7 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
             let take = level_data.len().min(n * 2);
             let mut out = vec![0u8; n * 4];
             for i in 0..(take / 2) {
-                out[i * 4]     = level_data[i * 2];
+                out[i * 4] = level_data[i * 2];
                 out[i * 4 + 1] = level_data[i * 2 + 1];
                 out[i * 4 + 3] = 255;
             }
@@ -1157,7 +1278,7 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
             let take = level_data.len().min(n * 3);
             let mut out = vec![0u8; n * 4];
             for i in 0..(take / 3) {
-                out[i * 4]     = level_data[i * 3];
+                out[i * 4] = level_data[i * 3];
                 out[i * 4 + 1] = level_data[i * 3 + 1];
                 out[i * 4 + 2] = level_data[i * 3 + 2];
                 out[i * 4 + 3] = 255;
@@ -1177,7 +1298,7 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
             let take = level_data.len().min(n * 4);
             let mut out = vec![0u8; n * 4];
             for i in 0..(take / 4) {
-                out[i * 4]     = level_data[i * 4 + 2];
+                out[i * 4] = level_data[i * 4 + 2];
                 out[i * 4 + 1] = level_data[i * 4 + 1];
                 out[i * 4 + 2] = level_data[i * 4];
                 out[i * 4 + 3] = level_data[i * 4 + 3];
@@ -1207,12 +1328,12 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
         //   135 BC2_UNORM, 136 BC2_SRGB, 137 BC3_UNORM, 138 BC3_SRGB,
         //   139 BC4_UNORM, 140 BC4_SNORM, 141 BC5_UNORM, 142 BC5_SNORM,
         //   143 BC6H_UFLOAT, 144 BC6H_SFLOAT, 145 BC7_UNORM, 146 BC7_SRGB.
-        131 | 132 | 133 | 134 => bc::decode_bc1(level_data, w, h).to_vec(),
-        135 | 136                => bc::decode_bc2(level_data, w, h).to_vec(),
-        137 | 138                => bc::decode_bc3(level_data, w, h).to_vec(),
-        139 | 140                => bc::decode_bc4(level_data, w, h).to_vec(),
-        141 | 142                => bc::decode_bc5(level_data, w, h).to_vec(),
-        145 | 146                => bc::decode_bc7(level_data, w, h).to_vec(),
+        131..=134 => bc::decode_bc1(level_data, w, h).to_vec(),
+        135 | 136 => bc::decode_bc2(level_data, w, h).to_vec(),
+        137 | 138 => bc::decode_bc3(level_data, w, h).to_vec(),
+        139 | 140 => bc::decode_bc4(level_data, w, h).to_vec(),
+        141 | 142 => bc::decode_bc5(level_data, w, h).to_vec(),
+        145 | 146 => bc::decode_bc7(level_data, w, h).to_vec(),
 
         // ETC2 + EAC family.
         147 | 148 => crate::codec::etc2::decode_etc2_rgb(level_data, w, h).to_vec(),
@@ -1222,24 +1343,26 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
         155 | 156 => crate::codec::etc2::decode_eac_r11g11(level_data, w, h).to_vec(),
 
         // ASTC LDR: vkFormats 157..=184 cover 14 block sizes × {UNORM, SRGB}.
-        157 | 158 => crate::codec::astc::decode_astc(level_data, w, h, 4,  4 ).to_vec(),
-        159 | 160 => crate::codec::astc::decode_astc(level_data, w, h, 5,  4 ).to_vec(),
-        161 | 162 => crate::codec::astc::decode_astc(level_data, w, h, 5,  5 ).to_vec(),
-        163 | 164 => crate::codec::astc::decode_astc(level_data, w, h, 6,  5 ).to_vec(),
-        165 | 166 => crate::codec::astc::decode_astc(level_data, w, h, 6,  6 ).to_vec(),
-        167 | 168 => crate::codec::astc::decode_astc(level_data, w, h, 8,  5 ).to_vec(),
-        169 | 170 => crate::codec::astc::decode_astc(level_data, w, h, 8,  6 ).to_vec(),
-        171 | 172 => crate::codec::astc::decode_astc(level_data, w, h, 8,  8 ).to_vec(),
-        173 | 174 => crate::codec::astc::decode_astc(level_data, w, h, 10, 5 ).to_vec(),
-        175 | 176 => crate::codec::astc::decode_astc(level_data, w, h, 10, 6 ).to_vec(),
-        177 | 178 => crate::codec::astc::decode_astc(level_data, w, h, 10, 8 ).to_vec(),
+        157 | 158 => crate::codec::astc::decode_astc(level_data, w, h, 4, 4).to_vec(),
+        159 | 160 => crate::codec::astc::decode_astc(level_data, w, h, 5, 4).to_vec(),
+        161 | 162 => crate::codec::astc::decode_astc(level_data, w, h, 5, 5).to_vec(),
+        163 | 164 => crate::codec::astc::decode_astc(level_data, w, h, 6, 5).to_vec(),
+        165 | 166 => crate::codec::astc::decode_astc(level_data, w, h, 6, 6).to_vec(),
+        167 | 168 => crate::codec::astc::decode_astc(level_data, w, h, 8, 5).to_vec(),
+        169 | 170 => crate::codec::astc::decode_astc(level_data, w, h, 8, 6).to_vec(),
+        171 | 172 => crate::codec::astc::decode_astc(level_data, w, h, 8, 8).to_vec(),
+        173 | 174 => crate::codec::astc::decode_astc(level_data, w, h, 10, 5).to_vec(),
+        175 | 176 => crate::codec::astc::decode_astc(level_data, w, h, 10, 6).to_vec(),
+        177 | 178 => crate::codec::astc::decode_astc(level_data, w, h, 10, 8).to_vec(),
         179 | 180 => crate::codec::astc::decode_astc(level_data, w, h, 10, 10).to_vec(),
         181 | 182 => crate::codec::astc::decode_astc(level_data, w, h, 12, 10).to_vec(),
         183 | 184 => crate::codec::astc::decode_astc(level_data, w, h, 12, 12).to_vec(),
 
-        other => return Err(GltfError::UnsupportedFeature(
-            format!("KTX2 uncompressed vkFormat {other}")
-        )),
+        other => {
+            return Err(GltfError::UnsupportedFeature(format!(
+                "KTX2 uncompressed vkFormat {other}"
+            )));
+        }
     })
 }
 
@@ -1247,19 +1370,26 @@ fn decode_ktx2_uncompressed(vk_format: u32, level_data: &[u8], w: u32, h: u32) -
 /// so HDR values land at 255 rather than wrapping; sub-zero clamps to 0.
 fn half_to_u8(h: u16) -> u8 {
     let sign = (h >> 15) & 1;
-    let exp  = ((h >> 10) & 0x1f) as i32;
+    let exp = ((h >> 10) & 0x1f) as i32;
     let mant = (h & 0x3ff) as u32;
-    let f = if exp == 0 && mant == 0 { 0.0 }
-            else if exp == 0          { (mant as f32) * (1.0 / (1u32 << 24) as f32) }
-            else if exp == 0x1f       { if mant == 0 { f32::INFINITY } else { f32::NAN } }
-            else {
-                let m = (mant | 0x400) as f32;
-                m * (1u32 << (exp - 25).max(-126) as u32) as f32
-            };
+    let f = if exp == 0 && mant == 0 {
+        0.0
+    } else if exp == 0 {
+        (mant as f32) * (1.0 / (1u32 << 24) as f32)
+    } else if exp == 0x1f {
+        if mant == 0 { f32::INFINITY } else { f32::NAN }
+    } else {
+        let m = (mant | 0x400) as f32;
+        m * (1u32 << (exp - 25).max(-126) as u32) as f32
+    };
     let f = if sign == 1 { -f } else { f };
-    if !f.is_finite() || f <= 0.0 { 0 }
-    else if f >= 1.0              { 255 }
-    else                           { (f * 255.0 + 0.5) as u8 }
+    if !f.is_finite() || f <= 0.0 {
+        0
+    } else if f >= 1.0 {
+        255
+    } else {
+        (f * 255.0 + 0.5) as u8
+    }
 }
 
 fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
@@ -1269,16 +1399,15 @@ fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
     let w = ktx.pixel_width;
     let h = ktx.pixel_height.max(1);
 
-    let level_data = ktx.level_data(bytes, 0)
+    let level_data = ktx
+        .level_data(bytes, 0)
         .ok_or(GltfError::InvalidAccessor("KTX2 has no level 0 data"))?;
 
     let rgba: Vec<u8> = match ktx.supercompression {
         SupercompressionScheme::None => decode_ktx2_uncompressed(ktx.vk_format, level_data, w, h)?,
         SupercompressionScheme::BasisLZ => {
             // ETC1S via BasisLZ supercompression.
-            crate::codec::basisu_etc1s::transcode_to_rgba8(
-                &ktx.sgd, level_data, w, h,
-            )?.to_vec()
+            crate::codec::basisu_etc1s::transcode_to_rgba8(&ktx.sgd, level_data, w, h)?.to_vec()
         }
         SupercompressionScheme::Zstd => {
             // Run the hand-rolled ZSTD decoder over the level payload to
@@ -1289,9 +1418,9 @@ fn decode_ktx2_to_rgba8(bytes: &[u8]) -> GltfResult<(u32, u32, Vec<u8>)> {
             decode_ktx2_uncompressed(ktx.vk_format, &raw, w, h)?
         }
         other => {
-            return Err(GltfError::UnsupportedFeature(
-                format!("KTX2 supercompression scheme {other:?}")
-            ));
+            return Err(GltfError::UnsupportedFeature(format!(
+                "KTX2 supercompression scheme {other:?}"
+            )));
         }
     };
 
@@ -1305,7 +1434,9 @@ fn extract_json_value(bytes: &[u8]) -> Option<serde_json::Value> {
         && u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) == GLB_MAGIC
     {
         // GLB: JSON chunk is at bytes 12..12+json_chunk_length
-        if bytes.len() < 20 { return None; }
+        if bytes.len() < 20 {
+            return None;
+        }
         let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
         // Chunk type at [16..20] should be 0x4E4F534A ("JSON")
         let json_bytes = bytes.get(20..20 + json_len)?;
@@ -1321,7 +1452,10 @@ fn simple_base64_decode(input: &str) -> Option<Vec<u8>> {
         let mut t = [255u8; 128];
         let src = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut i = 0usize;
-        while i < src.len() { t[src[i] as usize] = i as u8; i += 1; }
+        while i < src.len() {
+            t[src[i] as usize] = i as u8;
+            i += 1;
+        }
         t
     };
     let input = input.trim().as_bytes();
@@ -1329,10 +1463,16 @@ fn simple_base64_decode(input: &str) -> Option<Vec<u8>> {
     let mut buf = 0u32;
     let mut bits = 0u32;
     for &c in input {
-        if c == b'=' { break; }
-        if c as usize >= 128 { return None; }
+        if c == b'=' {
+            break;
+        }
+        if c as usize >= 128 {
+            return None;
+        }
         let v = TABLE[c as usize];
-        if v == 255 { return None; }
+        if v == 255 {
+            return None;
+        }
         buf = (buf << 6) | v as u32;
         bits += 6;
         if bits >= 8 {
@@ -1354,8 +1494,8 @@ fn extract_skins(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> ThinVe
                 .map(|it| it.map(flatten_mat4).collect())
                 .unwrap_or_default();
             Skin {
-                name:    s.name().map(str::to_owned),
-                joints:  s.joints().map(|j| j.index() as u32).collect(),
+                name: s.name().map(str::to_owned),
+                joints: s.joints().map(|j| j.index() as u32).collect(),
                 inverse_bind_matrices,
                 skeleton_root: s.skeleton().map(|n| n.index() as u32),
             }
@@ -1363,19 +1503,18 @@ fn extract_skins(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> ThinVe
         .collect()
 }
 
-#[inline] fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
+#[inline]
+fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
     [
-        m[0][0], m[0][1], m[0][2], m[0][3],
-        m[1][0], m[1][1], m[1][2], m[1][3],
-        m[2][0], m[2][1], m[2][2], m[2][3],
-        m[3][0], m[3][1], m[3][2], m[3][3],
+        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
+        m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
     ]
 }
 
 // ── Animations ──────────────────────────────────────────────────────────────
 
 fn extract_animations(
-    doc:     &gltf::Document,
+    doc: &gltf::Document,
     buffers: &[gltf::buffer::Data],
     patches: &[crate::preprocess::PointerPatch],
 ) -> GltfResult<ThinVec<Animation>> {
@@ -1394,35 +1533,46 @@ fn extract_animations(
         // sampler's index. Multiple channels may share a sampler — we keep
         // a sparse lookup so we only decode each sampler once.
         let sampler_count = anim.samplers().count();
-        let mut decoded: ThinVec<Option<AnimSampler>> =
-            (0..sampler_count).map(|_| None).collect();
+        let mut decoded: ThinVec<Option<AnimSampler>> = (0..sampler_count).map(|_| None).collect();
 
         let channels: ThinVec<AnimChannel> = anim
             .channels()
             .map(|c| AnimChannel {
                 target_node: c.target().node().index() as u32,
                 target_path: anim_path_from(c.target().property()),
-                sampler:     c.sampler().index() as u32,
+                sampler: c.sampler().index() as u32,
             })
             .collect();
 
         for (ch_idx, c) in anim.channels().enumerate() {
             // Skip pointer-patched channels — their samplers point at
             // non-TRS data; the typed reader would assert on stride.
-            if patched_idx.contains(&(ch_idx as u32)) { continue; }
+            if patched_idx.contains(&(ch_idx as u32)) {
+                continue;
+            }
             let s_idx = c.sampler().index();
-            if decoded[s_idx].is_some() { continue; }
+            if decoded[s_idx].is_some() {
+                continue;
+            }
             let reader = c.reader(|buf| Some(&*buffers[buf.index()]));
-            let input: ThinVec<f32> = reader.read_inputs()
+            let input: ThinVec<f32> = reader
+                .read_inputs()
                 .ok_or(GltfError::InvalidAccessor("animation input"))?
                 .collect();
-            let output = match reader.read_outputs()
+            let output = match reader
+                .read_outputs()
                 .ok_or(GltfError::InvalidAccessor("animation output"))?
             {
-                gltf::animation::util::ReadOutputs::Translations(it) => SamplerOutput::Vec3(it.collect()),
-                gltf::animation::util::ReadOutputs::Scales(it)       => SamplerOutput::Vec3(it.collect()),
-                gltf::animation::util::ReadOutputs::Rotations(it)    => SamplerOutput::Vec4(it.into_f32().collect()),
-                gltf::animation::util::ReadOutputs::MorphTargetWeights(it) => SamplerOutput::Scalars(it.into_f32().collect()),
+                gltf::animation::util::ReadOutputs::Translations(it) => {
+                    SamplerOutput::Vec3(it.collect())
+                }
+                gltf::animation::util::ReadOutputs::Scales(it) => SamplerOutput::Vec3(it.collect()),
+                gltf::animation::util::ReadOutputs::Rotations(it) => {
+                    SamplerOutput::Vec4(it.into_f32().collect())
+                }
+                gltf::animation::util::ReadOutputs::MorphTargetWeights(it) => {
+                    SamplerOutput::Scalars(it.into_f32().collect())
+                }
             };
             decoded[s_idx] = Some(AnimSampler {
                 interpolation: interp_from(c.sampler().interpolation()),
@@ -1435,11 +1585,13 @@ fn extract_animations(
         // an empty sampler so indices stay stable.
         let samplers: ThinVec<AnimSampler> = decoded
             .into_iter()
-            .map(|opt| opt.unwrap_or(AnimSampler {
-                interpolation: Interpolation::Linear,
-                input:         ThinVec::new(),
-                output:        SamplerOutput::Scalars(ThinVec::new()),
-            }))
+            .map(|opt| {
+                opt.unwrap_or(AnimSampler {
+                    interpolation: Interpolation::Linear,
+                    input: ThinVec::new(),
+                    output: SamplerOutput::Scalars(ThinVec::new()),
+                })
+            })
             .collect();
 
         out.push(Animation {
@@ -1454,17 +1606,17 @@ fn extract_animations(
 
 fn interp_from(i: gltf::animation::Interpolation) -> Interpolation {
     match i {
-        gltf::animation::Interpolation::Linear      => Interpolation::Linear,
-        gltf::animation::Interpolation::Step        => Interpolation::Step,
+        gltf::animation::Interpolation::Linear => Interpolation::Linear,
+        gltf::animation::Interpolation::Step => Interpolation::Step,
         gltf::animation::Interpolation::CubicSpline => Interpolation::CubicSpline,
     }
 }
 
 fn anim_path_from(p: gltf::animation::Property) -> AnimPath {
     match p {
-        gltf::animation::Property::Translation  => AnimPath::Translation,
-        gltf::animation::Property::Rotation     => AnimPath::Rotation,
-        gltf::animation::Property::Scale        => AnimPath::Scale,
+        gltf::animation::Property::Translation => AnimPath::Translation,
+        gltf::animation::Property::Rotation => AnimPath::Rotation,
+        gltf::animation::Property::Scale => AnimPath::Scale,
         gltf::animation::Property::MorphTargetWeights => AnimPath::MorphWeights,
     }
 }
@@ -1475,34 +1627,37 @@ fn extract_cameras(doc: &gltf::Document) -> ThinVec<Camera> {
     doc.cameras()
         .map(|c| match c.projection() {
             gltf::camera::Projection::Perspective(p) => Camera::Perspective {
-                name:         c.name().map(str::to_owned),
+                name: c.name().map(str::to_owned),
                 aspect_ratio: p.aspect_ratio(),
-                y_fov:        p.yfov(),
-                z_near:       p.znear(),
-                z_far:        p.zfar(),
+                y_fov: p.yfov(),
+                z_near: p.znear(),
+                z_far: p.zfar(),
             },
             gltf::camera::Projection::Orthographic(o) => Camera::Orthographic {
-                name:   c.name().map(str::to_owned),
-                x_mag:  o.xmag(),
-                y_mag:  o.ymag(),
+                name: c.name().map(str::to_owned),
+                x_mag: o.xmag(),
+                y_mag: o.ymag(),
                 z_near: o.znear(),
-                z_far:  o.zfar(),
+                z_far: o.zfar(),
             },
         })
         .collect()
 }
 
 fn extract_lights(doc: &gltf::Document) -> ThinVec<Light> {
-    let Some(lights) = doc.lights() else { return ThinVec::new(); };
+    let Some(lights) = doc.lights() else {
+        return ThinVec::new();
+    };
     lights
         .map(|l| {
             use gltf::khr_lights_punctual::Kind;
             let (kind, inner, outer) = match l.kind() {
                 Kind::Directional => (LightKind::Directional, 0.0, 0.0),
-                Kind::Point       => (LightKind::Point, 0.0, 0.0),
-                Kind::Spot { inner_cone_angle, outer_cone_angle } => {
-                    (LightKind::Spot, inner_cone_angle, outer_cone_angle)
-                }
+                Kind::Point => (LightKind::Point, 0.0, 0.0),
+                Kind::Spot {
+                    inner_cone_angle,
+                    outer_cone_angle,
+                } => (LightKind::Spot, inner_cone_angle, outer_cone_angle),
             };
             Light {
                 name: l.name().map(str::to_owned),

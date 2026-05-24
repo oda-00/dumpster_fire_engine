@@ -14,13 +14,13 @@ pub type AssetId = Id<AssetMarker>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AssetType {
-    Texture     = 0,
-    TitleText   = 1,
-    Visual      = 2,
-    Audio       = 3,
-    Mesh        = 4,
+    Texture = 0,
+    TitleText = 1,
+    Visual = 2,
+    Audio = 3,
+    Mesh = 4,
     IngotBuffer = 5,
-    IngotImage  = 6,
+    IngotImage = 6,
 }
 
 impl AssetType {
@@ -60,8 +60,8 @@ pub struct IngotBuffer {
 #[derive(Debug, Clone)]
 pub struct IngotImage {
     pub ore_kind: OreKind,
-    pub width:    u32,
-    pub height:   u32,
+    pub width: u32,
+    pub height: u32,
     /// Readback bytes in the format specified at `Ore` construction time.
     pub data: Arc<[u8]>,
 }
@@ -82,13 +82,13 @@ pub enum AssetKind {
 impl AssetKind {
     pub fn asset_type(&self) -> AssetType {
         match self {
-            AssetKind::Texture(_)     => AssetType::Texture,
-            AssetKind::TitleText(_)   => AssetType::TitleText,
-            AssetKind::Visual(_)      => AssetType::Visual,
-            AssetKind::Audio(_)       => AssetType::Audio,
-            AssetKind::Mesh(_)        => AssetType::Mesh,
+            AssetKind::Texture(_) => AssetType::Texture,
+            AssetKind::TitleText(_) => AssetType::TitleText,
+            AssetKind::Visual(_) => AssetType::Visual,
+            AssetKind::Audio(_) => AssetType::Audio,
+            AssetKind::Mesh(_) => AssetType::Mesh,
             AssetKind::IngotBuffer(_) => AssetType::IngotBuffer,
-            AssetKind::IngotImage(_)  => AssetType::IngotImage,
+            AssetKind::IngotImage(_) => AssetType::IngotImage,
         }
     }
 }
@@ -97,7 +97,7 @@ impl AssetKind {
 
 #[derive(Debug, Clone)]
 pub struct Asset {
-    id:   AssetId,
+    id: AssetId,
     data: AssetKind,
 }
 
@@ -106,9 +106,15 @@ impl Asset {
         Self { id, data }
     }
 
-    pub fn id(&self)          -> AssetId    { self.id }
-    pub fn data(&self)        -> &AssetKind { &self.data }
-    pub fn asset_type(&self)  -> AssetType  { self.data.asset_type() }
+    pub fn id(&self) -> AssetId {
+        self.id
+    }
+    pub fn data(&self) -> &AssetKind {
+        &self.data
+    }
+    pub fn asset_type(&self) -> AssetType {
+        self.data.asset_type()
+    }
 
     pub(super) fn replace_kind(&mut self, kind: AssetKind) -> AssetKind {
         std::mem::replace(&mut self.data, kind)
@@ -118,39 +124,48 @@ impl Asset {
 // ── File-based asset kinds ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub struct Texture   { pub path: Arc<str> }
+pub struct Texture {
+    pub path: Arc<str>,
+}
 
 #[derive(Debug, Clone)]
-pub struct TitleText { pub text: Arc<str> }
+pub struct TitleText {
+    pub text: Arc<str>,
+}
 
 #[derive(Debug, Clone)]
-pub struct Visual    { pub path: Arc<str> }
+pub struct Visual {
+    pub path: Arc<str>,
+}
 
 #[derive(Debug, Clone)]
-pub struct Mesh      { pub path: Arc<str> }
+pub struct Mesh {
+    pub path: Arc<str>,
+}
 
 #[derive(Debug, Clone)]
-pub struct Audio     { pub path: Arc<str> }
+pub struct Audio {
+    pub path: Arc<str>,
+}
 
 // ── AssetArena ────────────────────────────────────────────────────────────────
 
 pub struct AssetArena {
     pub(super) assets: Arena<AssetTag, Asset>,
-    pub(super) cache:  [ThinVec<AssetHandle>; AssetType::COUNT],
+    pub(super) cache: [ThinVec<AssetHandle>; AssetType::COUNT],
 }
 
 impl AssetArena {
     pub fn new() -> Self {
         Self {
             assets: Arena::new(),
-            cache:  std::array::from_fn(|_| ThinVec::new()),
+            cache: std::array::from_fn(|_| ThinVec::new()),
         }
     }
 
     pub fn id(&self, handle: AssetHandle) -> Option<AssetId> {
         self.assets.get(handle).map(Asset::id)
     }
-
 
     pub fn get(&self, handle: AssetHandle) -> Option<&Asset> {
         self.assets.get(handle)
@@ -172,9 +187,9 @@ impl AssetArena {
         let type_slot = &mut self.cache[asset.asset_type().index()];
         if let Some(pos) = type_slot.iter().position(|&h| h == handle) {
             type_slot.swap_remove(pos);
+        }
+        Some(asset)
     }
-    Some(asset)
-}
 
     pub fn contains(&self, handle: AssetHandle) -> bool {
         self.assets.contains(handle)
@@ -182,6 +197,10 @@ impl AssetArena {
 
     pub fn len(&self) -> usize {
         self.assets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.assets.is_empty()
     }
 
     /// All handles of a given type, in insertion order.
@@ -194,7 +213,8 @@ impl AssetArena {
     }
 }
 
-
 impl Default for AssetArena {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

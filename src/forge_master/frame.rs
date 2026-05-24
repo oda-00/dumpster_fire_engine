@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use thin_vec::ThinVec;
 
-use ash::vk;
 use crate::resource_manager::manager::{Handle, Id};
+use ash::vk;
 
 use super::ingot::Ingot;
 use super::master::{ForgeMaster, ForgeResult};
@@ -48,7 +48,13 @@ impl FramePlan {
     /// submission. The plan metadata (id, name) is preserved alongside the
     /// ingots so callers can reassemble them into the originally-named
     /// frames after the batch returns.
-    pub fn into_ores(self) -> (super::frame::FrameId, std::sync::Arc<str>, Vec<super::ore::Ore>) {
+    pub fn into_ores(
+        self,
+    ) -> (
+        super::frame::FrameId,
+        std::sync::Arc<str>,
+        Vec<super::ore::Ore>,
+    ) {
         (self.id, self.name, self.ores.into_iter().collect())
     }
 }
@@ -88,6 +94,9 @@ impl Frame {
         }
     }
 
+    /// # Safety
+    /// `device` must be the device used to create all contained ingots and all
+    /// associated GPU work must have completed.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         for ingot in &mut self.ingots {
             unsafe { ingot.destroy(device) };
@@ -142,13 +151,13 @@ pub fn ore_for_buffer(
 
 #[derive(Debug, Clone)]
 pub struct GraphicsFramePlan {
-    pub id:             FrameId,
-    pub name:           Arc<str>,
-    pub kind:           GraphicsOreKind,
+    pub id: FrameId,
+    pub name: Arc<str>,
+    pub kind: GraphicsOreKind,
     /// Procedural vertex count (used when `mesh` is `None`).
-    pub vertex_count:   u32,
+    pub vertex_count: u32,
     pub instance_count: u32,
-    pub first_vertex:   u32,
+    pub first_vertex: u32,
     pub first_instance: u32,
     /// Uploaded mesh (ForwardLit draws). `None` = procedural / shader-generated.
     pub mesh: Option<Arc<GpuMesh>>,
@@ -182,9 +191,9 @@ pub struct GraphicsFramePlan {
 impl GraphicsFramePlan {
     /// Procedural draw (no vertex buffer — shader generates verts).
     pub fn new(
-        id:           FrameId,
-        name:         impl Into<Arc<str>>,
-        kind:         GraphicsOreKind,
+        id: FrameId,
+        name: impl Into<Arc<str>>,
+        kind: GraphicsOreKind,
         vertex_count: u32,
     ) -> Self {
         Self {
@@ -193,10 +202,10 @@ impl GraphicsFramePlan {
             kind,
             vertex_count,
             instance_count: 1,
-            first_vertex:   0,
+            first_vertex: 0,
             first_instance: 0,
             mesh: None,
-            mvp:  MAT4_IDENTITY,
+            mvp: MAT4_IDENTITY,
             material_set: None,
             vertex_buffer_override: None,
             skin_vertex_buffer: None,
@@ -206,21 +215,17 @@ impl GraphicsFramePlan {
     }
 
     /// Indexed mesh draw (ForwardLit).
-    pub fn new_mesh(
-        id:   FrameId,
-        name: impl Into<Arc<str>>,
-        mesh: Arc<GpuMesh>,
-    ) -> Self {
+    pub fn new_mesh(id: FrameId, name: impl Into<Arc<str>>, mesh: Arc<GpuMesh>) -> Self {
         Self {
             id,
             name: name.into(),
-            kind:           GraphicsOreKind::ForwardLit,
-            vertex_count:   0, // unused; index count comes from GpuMesh
+            kind: GraphicsOreKind::ForwardLit,
+            vertex_count: 0, // unused; index count comes from GpuMesh
             instance_count: 1,
-            first_vertex:   0,
+            first_vertex: 0,
             first_instance: 0,
             mesh: Some(mesh),
-            mvp:  MAT4_IDENTITY,
+            mvp: MAT4_IDENTITY,
             material_set: None,
             vertex_buffer_override: None,
             skin_vertex_buffer: None,
@@ -272,7 +277,7 @@ impl GraphicsFramePlan {
     }
 
     pub fn with_offsets(mut self, first_vertex: u32, first_instance: u32) -> Self {
-        self.first_vertex   = first_vertex;
+        self.first_vertex = first_vertex;
         self.first_instance = first_instance;
         self
     }
@@ -288,20 +293,20 @@ impl GraphicsFramePlan {
     /// touch the ForgeMaster.
     pub fn refine(self) -> GraphicsFrame {
         GraphicsFrame {
-            id:             self.id,
-            name:           self.name,
-            kind:           self.kind,
-            vertex_count:   self.vertex_count,
+            id: self.id,
+            name: self.name,
+            kind: self.kind,
+            vertex_count: self.vertex_count,
             instance_count: self.instance_count,
-            first_vertex:   self.first_vertex,
+            first_vertex: self.first_vertex,
             first_instance: self.first_instance,
-            mesh:           self.mesh,
-            mvp:            self.mvp,
-            material_set:   self.material_set,
+            mesh: self.mesh,
+            mvp: self.mvp,
+            material_set: self.material_set,
             vertex_buffer_override: self.vertex_buffer_override,
-            skin_vertex_buffer:     self.skin_vertex_buffer,
-            skin_palette_set:       self.skin_palette_set,
-            instance_set:           self.instance_set,
+            skin_vertex_buffer: self.skin_vertex_buffer,
+            skin_palette_set: self.skin_palette_set,
+            instance_set: self.instance_set,
         }
     }
 
@@ -324,18 +329,18 @@ impl GraphicsFramePlan {
 /// `GpuMesh::destroy(device)` to properly free the Vulkan allocations.
 #[derive(Debug, Clone)]
 pub struct GraphicsFrame {
-    pub id:             FrameId,
-    pub name:           Arc<str>,
-    pub kind:           GraphicsOreKind,
-    pub vertex_count:   u32,
+    pub id: FrameId,
+    pub name: Arc<str>,
+    pub kind: GraphicsOreKind,
+    pub vertex_count: u32,
     pub instance_count: u32,
-    pub first_vertex:   u32,
+    pub first_vertex: u32,
     pub first_instance: u32,
     pub mesh: Option<Arc<GpuMesh>>,
-    pub mvp:  [f32; 16],
+    pub mvp: [f32; 16],
     pub material_set: Option<vk::DescriptorSet>,
     pub vertex_buffer_override: Option<vk::Buffer>,
-    pub skin_vertex_buffer:     Option<vk::Buffer>,
-    pub skin_palette_set:       Option<vk::DescriptorSet>,
-    pub instance_set:           Option<vk::DescriptorSet>,
+    pub skin_vertex_buffer: Option<vk::Buffer>,
+    pub skin_palette_set: Option<vk::DescriptorSet>,
+    pub instance_set: Option<vk::DescriptorSet>,
 }

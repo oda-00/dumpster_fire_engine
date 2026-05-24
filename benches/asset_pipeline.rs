@@ -4,14 +4,14 @@
 //   cargo bench --bench asset_pipeline
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use thin_vec::ThinVec;
 use dumpster_fire_engine::resource_manager::asset_manager::{
-    AssetArena, AssetHandle, AssetId, AssetKind, AssetSource, AssetType, Audio, Fetcher, Mesh, Pipeline,
-    QueueEntry, Texture, TitleText, Visual,
+    AssetArena, AssetHandle, AssetId, AssetKind, AssetSource, AssetType, Audio, Fetcher, Mesh,
+    Pipeline, QueueEntry, Texture, TitleText, Visual,
 };
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
+use thin_vec::ThinVec;
 
 // ── AssetArena ─────────────────────────────────────────────────────────────
 

@@ -15,12 +15,12 @@ use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CpuFeatures {
-    pub sse2:  bool,
+    pub sse2: bool,
     pub ssse3: bool,
     pub sse41: bool,
-    pub avx2:  bool,
-    pub fma:   bool,
-    pub neon:  bool,
+    pub avx2: bool,
+    pub fma: bool,
+    pub neon: bool,
 }
 
 impl CpuFeatures {
@@ -28,7 +28,14 @@ impl CpuFeatures {
     /// fallback. Used by `simd_runtime_dispatch` tests to verify the
     /// scalar path is bit-identical to the SIMD path.
     pub const fn scalar_only() -> Self {
-        Self { sse2: false, ssse3: false, sse41: false, avx2: false, fma: false, neon: false }
+        Self {
+            sse2: false,
+            ssse3: false,
+            sse41: false,
+            avx2: false,
+            fma: false,
+            neon: false,
+        }
     }
 }
 
@@ -39,11 +46,11 @@ pub fn cpu_features() -> CpuFeatures {
         let mut f = CpuFeatures::scalar_only();
         #[cfg(target_arch = "x86_64")]
         {
-            f.sse2  = is_x86_feature_detected!("sse2");
+            f.sse2 = is_x86_feature_detected!("sse2");
             f.ssse3 = is_x86_feature_detected!("ssse3");
             f.sse41 = is_x86_feature_detected!("sse4.1");
-            f.avx2  = is_x86_feature_detected!("avx2");
-            f.fma   = is_x86_feature_detected!("fma");
+            f.avx2 = is_x86_feature_detected!("avx2");
+            f.fma = is_x86_feature_detected!("fma");
         }
         #[cfg(target_arch = "aarch64")]
         {

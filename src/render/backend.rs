@@ -13,12 +13,12 @@ pub enum BackendKind {
 /// Snapshot of one frame's UI geometry, ready to upload.
 pub struct DrawListSnapshot<'a> {
     pub vertices: &'a [UiVertex],
-    pub indices:  &'a [u32],
+    pub indices: &'a [u32],
 }
 
 /// Per-frame scene + timing data passed into a backend's draw call.
 pub struct RenderSceneInput<'a> {
-    pub world:   &'a World,
+    pub world: &'a World,
     pub elapsed: f32,
 }
 
@@ -32,9 +32,11 @@ pub trait GpuSurface: Send {
     fn draw_frame(
         &mut self,
         scene: &RenderSceneInput<'_>,
-        ui:    &DrawListSnapshot<'_>,
+        ui: &DrawListSnapshot<'_>,
     ) -> crate::forge_master::master::ForgeResult<()>;
 
     fn resize(&mut self, width: u32, height: u32);
-    fn has_ray_tracing(&self) -> bool { false }
+    fn has_ray_tracing(&self) -> bool {
+        false
+    }
 }

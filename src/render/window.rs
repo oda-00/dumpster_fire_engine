@@ -1,11 +1,13 @@
-use std::sync::Arc;
+use crate::forge_master::ore::GraphicsOreKind;
+use crate::forge_master::{
+    ForgeError, ForgeImage, ForgeMaster, ForgeResult, GraphicsForge, GraphicsMold,
+};
+use crate::resource_manager::manager::{Handle as ResourceHandle, Id};
 use ash::vk;
 use glam::Mat4;
+use std::sync::Arc;
 use thin_vec::ThinVec;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use crate::forge_master::{ForgeError, ForgeMaster, ForgeResult, ForgeImage, GraphicsForge, GraphicsMold};
-use crate::forge_master::ore::GraphicsOreKind;
-use crate::resource_manager::manager::{Handle as ResourceHandle, Id};
 
 use super::factory_master::{ComputeTag, FactoryHandle, FactoryMaster, GraphicsTag, Proto};
 
@@ -24,14 +26,15 @@ pub type WindowId = Id<WindowMarker>;
 /// 2 = double-buffer the command recording — CPU records frame N+1 while
 /// the GPU is still consuming frame N. Higher (3) reduces stutter on input
 /// spikes but adds a frame of latency; 2 is the standard tradeoff.
+///
 /// Number of frames the CPU is allowed to record ahead of the GPU. Three
 /// matches the MAILBOX-mode swapchain image count (caps.min_image_count
 /// + 1 = typically 3) so we never CPU-stall waiting for an image while
-/// also providing headroom for the GPU to be one frame behind. Two would
-/// be the conservative pick but adds CPU-side fence waits on input-light
-/// frames; four+ buys little and burns more host-visible UBO / staging
-/// memory. Three is the standard Vulkan recommendation for real-time
-/// rendering with triple-buffered presents.
+///   also providing headroom for the GPU to be one frame behind. Two would
+///   be the conservative pick but adds CPU-side fence waits on input-light
+///   frames; four+ buys little and burns more host-visible UBO / staging
+///   memory. Three is the standard Vulkan recommendation for real-time
+///   rendering with triple-buffered presents.
 pub const FRAMES_IN_FLIGHT: usize = 3;
 
 // ── Graphics plumbing ───────────────────────────────────────────────────────
@@ -213,20 +216,24 @@ impl Window {
 
         // Command pool + FRAMES_IN_FLIGHT command buffers.
         let command_pool = unsafe {
-            device.create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(graphics_queue_family)
-                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-                None,
-            ).map_err(ForgeError::Vk)?
+            device
+                .create_command_pool(
+                    &vk::CommandPoolCreateInfo::default()
+                        .queue_family_index(graphics_queue_family)
+                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+                    None,
+                )
+                .map_err(ForgeError::Vk)?
         };
         let cb_vec = unsafe {
-            device.allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(command_pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(FRAMES_IN_FLIGHT as u32),
-            ).map_err(ForgeError::Vk)?
+            device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(command_pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(FRAMES_IN_FLIGHT as u32),
+                )
+                .map_err(ForgeError::Vk)?
         };
         let mut command_buffers = [vk::CommandBuffer::null(); FRAMES_IN_FLIGHT];
         for (i, cb) in cb_vec.into_iter().enumerate() {
@@ -238,14 +245,17 @@ impl Window {
         let mut in_flight_fences = [vk::Fence::null(); FRAMES_IN_FLIGHT];
         for i in 0..FRAMES_IN_FLIGHT {
             image_available_semaphores[i] = unsafe {
-                device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                     .map_err(ForgeError::Vk)?
             };
             in_flight_fences[i] = unsafe {
-                device.create_fence(
-                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
-                    None,
-                ).map_err(ForgeError::Vk)?
+                device
+                    .create_fence(
+                        &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                        None,
+                    )
+                    .map_err(ForgeError::Vk)?
             };
         }
 
@@ -301,12 +311,19 @@ impl Window {
     /// `Window::new_with_surface` and before issuing any skinned draws.
     pub fn attach_skinned_forge(
         &mut self,
-        device:    &ash::Device,
-        forge:     &GraphicsForge,
+        device: &ash::Device,
+        forge: &GraphicsForge,
     ) -> ForgeResult<()> {
-        let gfx = self.graphics.as_mut()
+        let gfx = self
+            .graphics
+            .as_mut()
             .expect("attach_skinned_forge requires a graphics window");
-        let mold = forge.compile(device, gfx.swapchain_format, gfx.depth_format, gfx.msaa_samples)?;
+        let mold = forge.compile(
+            device,
+            gfx.swapchain_format,
+            gfx.depth_format,
+            gfx.msaa_samples,
+        )?;
         gfx.skinned_mold = Some(mold);
         Ok(())
     }
@@ -316,9 +333,13 @@ impl Window {
     /// sets, and the overlay LOAD_OP_LOAD render pass. Idempotent: returns
     /// `Ok(())` if already initialised.
     pub fn init_overlay_pipeline(&mut self, device: &ash::Device) -> ForgeResult<()> {
-        let gfx = self.graphics.as_mut()
+        let gfx = self
+            .graphics
+            .as_mut()
             .expect("init_overlay_pipeline requires a graphics window");
-        if gfx.overlay.is_some() { return Ok(()); }
+        if gfx.overlay.is_some() {
+            return Ok(());
+        }
         let views: ThinVec<vk::ImageView> = gfx.swapchain_image_views.iter().copied().collect();
         let overlay = crate::render::overlay::OverlayPipeline::new(
             device,
@@ -333,11 +354,20 @@ impl Window {
 
     /// Phase 9 — bring up the RT pipeline + SBT. Requires
     /// `VulkanContext::has_ray_tracing == true`; otherwise no-op.
-    pub fn init_rt_pipeline(&mut self, vulkan: &crate::render::vulkan::VulkanContext) -> ForgeResult<()> {
-        if !vulkan.has_ray_tracing { return Ok(()); }
-        let gfx = self.graphics.as_mut()
+    pub fn init_rt_pipeline(
+        &mut self,
+        vulkan: &crate::render::vulkan::VulkanContext,
+    ) -> ForgeResult<()> {
+        if !vulkan.has_ray_tracing {
+            return Ok(());
+        }
+        let gfx = self
+            .graphics
+            .as_mut()
             .expect("init_rt_pipeline requires a graphics window");
-        if gfx.rt.is_some() { return Ok(()); }
+        if gfx.rt.is_some() {
+            return Ok(());
+        }
         let rt = crate::render::rt_pipeline::RtPipeline::new(vulkan)?;
         gfx.rt = Some(rt);
         Ok(())
@@ -349,13 +379,15 @@ impl Window {
     /// during the overlay pass.
     pub fn set_ui_draw(
         &mut self,
-        device:     &ash::Device,
+        device: &ash::Device,
         vert_bytes: &[u8],
-        idx_bytes:  &[u8],
+        idx_bytes: &[u8],
         vert_count: u32,
-        idx_count:  u32,
+        idx_count: u32,
     ) -> ForgeResult<()> {
-        let gfx = self.graphics.as_mut()
+        let gfx = self
+            .graphics
+            .as_mut()
             .expect("set_ui_draw requires a graphics window");
         // Make sure overlay is built — bring it up on first call.
         if gfx.overlay.is_none() {
@@ -386,47 +418,58 @@ impl Window {
     /// Returns `Ok(())` immediately on the very first frame (the fences
     /// are created in the signalled state).
     pub fn wait_for_last_submission(&self, device: &ash::Device) -> ForgeResult<()> {
-        let Some(gfx) = self.graphics.as_ref() else { return Ok(()); };
+        let Some(gfx) = self.graphics.as_ref() else {
+            return Ok(());
+        };
         let prev = (gfx.current_frame + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT;
         let fence = gfx.in_flight_fences[prev];
-        if fence == vk::Fence::null() { return Ok(()); }
-        unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }
-            .map_err(ForgeError::Vk)
+        if fence == vk::Fence::null() {
+            return Ok(());
+        }
+        unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }.map_err(ForgeError::Vk)
     }
 
     pub fn build_compute_factory(
         &mut self,
-        proto:  Proto<ComputeTag>,
-        forge:  &mut ForgeMaster,
+        proto: Proto<ComputeTag>,
+        forge: &mut ForgeMaster,
         device: &ash::Device,
     ) -> ForgeResult<FactoryHandle> {
-        self.factory_master.build_compute_proto(proto, forge, device)
+        self.factory_master
+            .build_compute_proto(proto, forge, device)
     }
 
     /// Async batched compute. The downstream graphics submission must
     /// wait on the returned semaphore at vertex stages.
     pub fn build_compute_factory_async(
         &mut self,
-        proto:  Proto<ComputeTag>,
-        forge:  &mut ForgeMaster,
+        proto: Proto<ComputeTag>,
+        forge: &mut ForgeMaster,
         device: &ash::Device,
     ) -> ForgeResult<(FactoryHandle, vk::Semaphore)> {
-        self.factory_master.build_compute_proto_async(proto, forge, device)
+        self.factory_master
+            .build_compute_proto_async(proto, forge, device)
     }
 
     pub fn build_graphics_factory(
         &mut self,
-        proto:  Proto<GraphicsTag>,
+        proto: Proto<GraphicsTag>,
         device: &ash::Device,
     ) -> FactoryHandle {
         self.factory_master.build_graphics_proto(proto, device)
     }
 
     /// Destroy all Vulkan resources (if any) and the factory master.
+    ///
+    /// # Safety
+    /// All submitted GPU work must have completed and `device` must be the
+    /// device used to create all resources owned by this window.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         if let Some(ref mut gfx) = self.graphics {
             unsafe {
-                if let Some(mut o) = gfx.overlay.take() { o.destroy(device); }
+                if let Some(mut o) = gfx.overlay.take() {
+                    o.destroy(device);
+                }
                 // rt destruction needs the VulkanContext (KHR loader) — skip;
                 // shutdown path runs after device_wait_idle so leaked handles
                 // are reclaimed at process exit.
@@ -491,8 +534,14 @@ impl Window {
     /// Recreate the swapchain, framebuffers, depth images, and per-image
     /// semaphores at the current window size. Caller must guarantee the GPU
     /// is idle on this device — we call `device_wait_idle` ourselves.
-    pub fn recreate_swapchain(&mut self, instance: &ash::Instance, device: &ash::Device) -> ForgeResult<()> {
-        let Some(gfx) = self.graphics.as_mut() else { return Ok(()) };
+    pub fn recreate_swapchain(
+        &mut self,
+        instance: &ash::Instance,
+        device: &ash::Device,
+    ) -> ForgeResult<()> {
+        let Some(gfx) = self.graphics.as_mut() else {
+            return Ok(());
+        };
 
         // If the window is minimised, defer recreation until non-zero size.
         let size = gfx.winit_window.inner_size();
@@ -533,7 +582,9 @@ impl Window {
             // Destroy the previous overlay pipeline — its framebuffers and
             // HDR images are sized to the old swapchain extent. Rebuilt
             // below once the new swapchain images exist.
-            if let Some(mut o) = gfx.overlay.take() { o.destroy(device); }
+            if let Some(mut o) = gfx.overlay.take() {
+                o.destroy(device);
+            }
         }
 
         // Rebuild via the shared helper (oldSwapchain = current handle for
@@ -599,6 +650,10 @@ impl Window {
     /// Issue all graphics draw calls from every factory this window owns.
     /// Handles in-flight frame pacing, swapchain out-of-date, and dynamic
     /// viewport/scissor.
+    ///
+    /// # Safety
+    /// `device`, `queue`, and all passed Vulkan objects must be valid and
+    /// compatible with the resources created for this window.
     pub unsafe fn draw_frame(
         &mut self,
         instance: &ash::Instance,
@@ -614,6 +669,10 @@ impl Window {
     /// `ForgeMaster::refine_batch_async`) — the returned semaphore from
     /// that call must be passed here so the graphics queue blocks
     /// per-stage instead of the CPU blocking on a fence.
+    ///
+    /// # Safety
+    /// All Vulkan handles must be valid and `queue` must be the graphics queue
+    /// associated with `device`.
     pub unsafe fn draw_frame_with_compute_wait(
         &mut self,
         instance: &ash::Instance,
@@ -641,7 +700,8 @@ impl Window {
 
         // Wait for this slot's previous submission to complete.
         unsafe {
-            device.wait_for_fences(&[in_flight], true, u64::MAX)
+            device
+                .wait_for_fences(&[in_flight], true, u64::MAX)
                 .map_err(ForgeError::Vk)?;
         }
 
@@ -703,9 +763,11 @@ impl Window {
             .clear_values(&clear_values);
 
         unsafe {
-            device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+            device
+                .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
                 .map_err(ForgeError::Vk)?;
-            device.begin_command_buffer(command_buffer, &begin_info)
+            device
+                .begin_command_buffer(command_buffer, &begin_info)
                 .map_err(ForgeError::Vk)?;
 
             // Compute → graphics memory dependency. Same-queue submission
@@ -719,13 +781,15 @@ impl Window {
             let mem_barrier2 = vk::MemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
-                    | vk::PipelineStageFlags2::VERTEX_SHADER)
-                .dst_access_mask(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ
-                    | vk::AccessFlags2::SHADER_STORAGE_READ);
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
+                        | vk::PipelineStageFlags2::VERTEX_SHADER,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::VERTEX_ATTRIBUTE_READ | vk::AccessFlags2::SHADER_STORAGE_READ,
+                );
             let memory_barriers = [mem_barrier2];
-            let dep_info = vk::DependencyInfo::default()
-                .memory_barriers(&memory_barriers);
+            let dep_info = vk::DependencyInfo::default().memory_barriers(&memory_barriers);
             device.cmd_pipeline_barrier2(command_buffer, &dep_info);
 
             device.cmd_begin_render_pass(command_buffer, &rp_begin, vk::SubpassContents::INLINE);
@@ -734,7 +798,7 @@ impl Window {
             let viewports = [vk::Viewport {
                 x: 0.0,
                 y: 0.0,
-                width:  gfx.swapchain_extent.width  as f32,
+                width: gfx.swapchain_extent.width as f32,
                 height: gfx.swapchain_extent.height as f32,
                 min_depth: 0.0,
                 max_depth: 1.0,
@@ -777,17 +841,17 @@ impl Window {
                     );
                 }
                 // Bind skin palette descriptor set (set 2) for skinned draws.
-                if call.kind == GraphicsOreKind::SkinnedForwardLit {
-                    if let Some(skin_set) = call.skin_palette_set {
-                        device.cmd_bind_descriptor_sets(
-                            command_buffer,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            mold.pipeline_layout,
-                            2,
-                            &[skin_set],
-                            &[],
-                        );
-                    }
+                if call.kind == GraphicsOreKind::SkinnedForwardLit
+                    && let Some(skin_set) = call.skin_palette_set
+                {
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        mold.pipeline_layout,
+                        2,
+                        &[skin_set],
+                        &[],
+                    );
                 }
                 // Bind per-instance mat4 SSBO (set 3). Always bind something
                 // — the shader unconditionally reads `instances.m[gl_InstanceIndex]`
@@ -809,28 +873,25 @@ impl Window {
                     // Use the compute-shader-posed vertex buffer when the call
                     // carries an override (MorphBlend output); otherwise the
                     // rest-pose mesh buffer.
-                    let vb = call.vertex_buffer_override
+                    let vb = call
+                        .vertex_buffer_override
                         .unwrap_or(mesh.vertex_buffer.handle);
                     // Skinned pipeline needs the per-vertex joints/weights buffer at binding 1.
                     if call.kind == GraphicsOreKind::SkinnedForwardLit {
                         if let Some(skin_vb) = call.skin_vertex_buffer {
                             device.cmd_bind_vertex_buffers(
-                                command_buffer, 0,
-                                &[vb, skin_vb], &[0, 0],
+                                command_buffer,
+                                0,
+                                &[vb, skin_vb],
+                                &[0, 0],
                             );
                         } else {
                             // No skin buffer — fall back to single binding so the
                             // draw still records (visual will be wrong but no crash).
-                            device.cmd_bind_vertex_buffers(
-                                command_buffer, 0,
-                                &[vb], &[0],
-                            );
+                            device.cmd_bind_vertex_buffers(command_buffer, 0, &[vb], &[0]);
                         }
                     } else {
-                        device.cmd_bind_vertex_buffers(
-                            command_buffer, 0,
-                            &[vb], &[0],
-                        );
+                        device.cmd_bind_vertex_buffers(command_buffer, 0, &[vb], &[0]);
                     }
                     device.cmd_bind_index_buffer(
                         command_buffer,
@@ -838,8 +899,7 @@ impl Window {
                         0,
                         vk::IndexType::UINT32,
                     );
-                    let mvp_bytes: &[u8] =
-                        std::slice::from_raw_parts(call.mvp.as_ptr().cast(), 64);
+                    let mvp_bytes: &[u8] = std::slice::from_raw_parts(call.mvp.as_ptr().cast(), 64);
                     device.cmd_push_constants(
                         command_buffer,
                         mold.pipeline_layout,
@@ -851,7 +911,9 @@ impl Window {
                         command_buffer,
                         mesh.index_count,
                         call.instance_count,
-                        0, 0, 0,
+                        0,
+                        0,
+                        0,
                     );
                 } else {
                     device.cmd_draw(
@@ -865,7 +927,9 @@ impl Window {
             }
 
             device.cmd_end_render_pass(command_buffer);
-            device.end_command_buffer(command_buffer).map_err(ForgeError::Vk)?;
+            device
+                .end_command_buffer(command_buffer)
+                .map_err(ForgeError::Vk)?;
         }
 
         // Submit + present via Sync2 (queue_submit2): one
@@ -878,7 +942,8 @@ impl Window {
         // bound from SkinPalette output).
         let render_done = gfx.render_finished_semaphores[image_index as usize];
 
-        let mut wait_infos: Vec<vk::SemaphoreSubmitInfo> = Vec::with_capacity(1 + compute_wait.len());
+        let mut wait_infos: Vec<vk::SemaphoreSubmitInfo> =
+            Vec::with_capacity(1 + compute_wait.len());
         wait_infos.push(
             vk::SemaphoreSubmitInfo::default()
                 .semaphore(img_avail)
@@ -908,7 +973,8 @@ impl Window {
         let present_image_indices = [image_index];
 
         unsafe {
-            device.queue_submit2(queue, &[submit_info], in_flight)
+            device
+                .queue_submit2(queue, &[submit_info], in_flight)
                 .map_err(ForgeError::Vk)?;
 
             let present_info = vk::PresentInfoKHR::default()
@@ -940,13 +1006,17 @@ impl Window {
     /// Depth is cleared once by the render-pass clear values; per-pane
     /// scissors ensure depth regions are disjoint so no explicit inter-pane
     /// depth flush is required.
+    ///
+    /// # Safety
+    /// All Vulkan handles must be valid; `queue` must be the graphics queue
+    /// for `device`; and all viewport rects must be within swapchain bounds.
     pub unsafe fn draw_frame_with_viewports(
         &mut self,
-        instance:     &ash::Instance,
-        device:       &ash::Device,
-        queue:        vk::Queue,
+        instance: &ash::Instance,
+        device: &ash::Device,
+        queue: vk::Queue,
         compute_wait: &[vk::Semaphore],
-        viewports:    &[(vk::Viewport, vk::Rect2D, [f32; 16])],
+        viewports: &[(vk::Viewport, vk::Rect2D, [f32; 16])],
     ) -> ForgeResult<()> {
         if self.graphics.as_ref().is_some_and(|g| g.needs_resize) {
             self.recreate_swapchain(instance, device)?;
@@ -960,18 +1030,22 @@ impl Window {
             return Ok(());
         }
 
-        let frame     = gfx.current_frame;
+        let frame = gfx.current_frame;
         let img_avail = gfx.image_available_semaphores[frame];
         let in_flight = gfx.in_flight_fences[frame];
 
         unsafe {
-            device.wait_for_fences(&[in_flight], true, u64::MAX)
+            device
+                .wait_for_fences(&[in_flight], true, u64::MAX)
                 .map_err(ForgeError::Vk)?;
         }
 
         let acquire = unsafe {
             gfx.swapchain_loader.acquire_next_image(
-                gfx.swapchain, u64::MAX, img_avail, vk::Fence::null(),
+                gfx.swapchain,
+                u64::MAX,
+                img_avail,
+                vk::Fence::null(),
             )
         };
         let (image_index, _) = match acquire {
@@ -983,7 +1057,9 @@ impl Window {
             Err(e) => return Err(ForgeError::Vk(e)),
         };
 
-        unsafe { device.reset_fences(&[in_flight]).map_err(ForgeError::Vk)?; }
+        unsafe {
+            device.reset_fences(&[in_flight]).map_err(ForgeError::Vk)?;
+        }
 
         let command_buffer = gfx.command_buffers[frame];
 
@@ -995,8 +1071,17 @@ impl Window {
             .collect();
 
         let clear_values = [
-            vk::ClearValue { color: vk::ClearColorValue { float32: [0.05, 0.05, 0.1, 1.0] } },
-            vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.05, 0.05, 0.1, 1.0],
+                },
+            },
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
         ];
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -1010,18 +1095,23 @@ impl Window {
             .clear_values(&clear_values);
 
         unsafe {
-            device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+            device
+                .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
                 .map_err(ForgeError::Vk)?;
-            device.begin_command_buffer(command_buffer, &begin_info)
+            device
+                .begin_command_buffer(command_buffer, &begin_info)
                 .map_err(ForgeError::Vk)?;
 
             let mem_barrier2 = vk::MemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
-                    | vk::PipelineStageFlags2::VERTEX_SHADER)
-                .dst_access_mask(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ
-                    | vk::AccessFlags2::SHADER_STORAGE_READ);
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT
+                        | vk::PipelineStageFlags2::VERTEX_SHADER,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::VERTEX_ATTRIBUTE_READ | vk::AccessFlags2::SHADER_STORAGE_READ,
+                );
             let memory_barriers = [mem_barrier2];
             let dep_info = vk::DependencyInfo::default().memory_barriers(&memory_barriers);
             device.cmd_pipeline_barrier2(command_buffer, &dep_info);
@@ -1053,52 +1143,60 @@ impl Window {
                             command_buffer,
                             vk::PipelineBindPoint::GRAPHICS,
                             mold.pipeline_layout,
-                            1, &[mat_set], &[],
+                            1,
+                            &[mat_set],
+                            &[],
                         );
                     }
-                    if call.kind == GraphicsOreKind::SkinnedForwardLit {
-                        if let Some(skin_set) = call.skin_palette_set {
-                            device.cmd_bind_descriptor_sets(
-                                command_buffer,
-                                vk::PipelineBindPoint::GRAPHICS,
-                                mold.pipeline_layout,
-                                2, &[skin_set], &[],
-                            );
-                        }
+                    if call.kind == GraphicsOreKind::SkinnedForwardLit
+                        && let Some(skin_set) = call.skin_palette_set
+                    {
+                        device.cmd_bind_descriptor_sets(
+                            command_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            mold.pipeline_layout,
+                            2,
+                            &[skin_set],
+                            &[],
+                        );
                     }
                     if let Some(inst_set) = call.instance_set {
                         device.cmd_bind_descriptor_sets(
                             command_buffer,
                             vk::PipelineBindPoint::GRAPHICS,
                             mold.pipeline_layout,
-                            3, &[inst_set], &[],
+                            3,
+                            &[inst_set],
+                            &[],
                         );
                     }
 
                     if let Some(mesh) = &call.mesh {
-                        let vb = call.vertex_buffer_override
+                        let vb = call
+                            .vertex_buffer_override
                             .unwrap_or(mesh.vertex_buffer.handle);
                         if call.kind == GraphicsOreKind::SkinnedForwardLit {
                             if let Some(skin_vb) = call.skin_vertex_buffer {
                                 device.cmd_bind_vertex_buffers(
-                                    command_buffer, 0, &[vb, skin_vb], &[0, 0],
+                                    command_buffer,
+                                    0,
+                                    &[vb, skin_vb],
+                                    &[0, 0],
                                 );
                             } else {
-                                device.cmd_bind_vertex_buffers(
-                                    command_buffer, 0, &[vb], &[0],
-                                );
+                                device.cmd_bind_vertex_buffers(command_buffer, 0, &[vb], &[0]);
                             }
                         } else {
-                            device.cmd_bind_vertex_buffers(
-                                command_buffer, 0, &[vb], &[0],
-                            );
+                            device.cmd_bind_vertex_buffers(command_buffer, 0, &[vb], &[0]);
                         }
                         device.cmd_bind_index_buffer(
-                            command_buffer, mesh.index_buffer.handle, 0, vk::IndexType::UINT32,
+                            command_buffer,
+                            mesh.index_buffer.handle,
+                            0,
+                            vk::IndexType::UINT32,
                         );
                         let mvp = mat4_mul(pane_vp, &call.mvp);
-                        let mvp_bytes: &[u8] =
-                            std::slice::from_raw_parts(mvp.as_ptr().cast(), 64);
+                        let mvp_bytes: &[u8] = std::slice::from_raw_parts(mvp.as_ptr().cast(), 64);
                         device.cmd_push_constants(
                             command_buffer,
                             mold.pipeline_layout,
@@ -1110,12 +1208,13 @@ impl Window {
                             command_buffer,
                             mesh.index_count,
                             call.instance_count,
-                            0, 0, 0,
+                            0,
+                            0,
+                            0,
                         );
                     } else {
                         let mvp = mat4_mul(pane_vp, &call.mvp);
-                        let mvp_bytes: &[u8] =
-                            std::slice::from_raw_parts(mvp.as_ptr().cast(), 64);
+                        let mvp_bytes: &[u8] = std::slice::from_raw_parts(mvp.as_ptr().cast(), 64);
                         device.cmd_push_constants(
                             command_buffer,
                             mold.pipeline_layout,
@@ -1160,8 +1259,10 @@ impl Window {
                         .image(swap_img)
                         .subresource_range(vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0, level_count: 1,
-                            base_array_layer: 0, layer_count: 1,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
                         }),
                     vk::ImageMemoryBarrier2::default()
                         .src_stage_mask(vk::PipelineStageFlags2::NONE)
@@ -1173,8 +1274,10 @@ impl Window {
                         .image(hdr_img)
                         .subresource_range(vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0, level_count: 1,
-                            base_array_layer: 0, layer_count: 1,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
                         }),
                 ];
                 device.cmd_pipeline_barrier2(
@@ -1187,26 +1290,41 @@ impl Window {
                 let region = vk::ImageBlit {
                     src_subresource: vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0, base_array_layer: 0, layer_count: 1,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
                     },
                     src_offsets: [
                         vk::Offset3D { x: 0, y: 0, z: 0 },
-                        vk::Offset3D { x: extent.width as i32, y: extent.height as i32, z: 1 },
+                        vk::Offset3D {
+                            x: extent.width as i32,
+                            y: extent.height as i32,
+                            z: 1,
+                        },
                     ],
                     dst_subresource: vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0, base_array_layer: 0, layer_count: 1,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
                     },
                     dst_offsets: [
                         vk::Offset3D { x: 0, y: 0, z: 0 },
-                        vk::Offset3D { x: extent.width as i32, y: extent.height as i32, z: 1 },
+                        vk::Offset3D {
+                            x: extent.width as i32,
+                            y: extent.height as i32,
+                            z: 1,
+                        },
                     ],
                 };
                 device.cmd_blit_image(
                     command_buffer,
-                    swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    hdr_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[region], vk::Filter::LINEAR,
+                    swap_img,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    hdr_img,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[region],
+                    vk::Filter::LINEAR,
                 );
 
                 // HDR: TRANSFER_DST → COLOR_ATTACHMENT_OPTIMAL (so `overlay.record`
@@ -1224,8 +1342,10 @@ impl Window {
                         .image(hdr_img)
                         .subresource_range(vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0, level_count: 1,
-                            base_array_layer: 0, layer_count: 1,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
                         }),
                     vk::ImageMemoryBarrier2::default()
                         .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
@@ -1237,8 +1357,10 @@ impl Window {
                         .image(swap_img)
                         .subresource_range(vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0, level_count: 1,
-                            base_array_layer: 0, layer_count: 1,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
                         }),
                 ];
                 device.cmd_pipeline_barrier2(
@@ -1247,14 +1369,22 @@ impl Window {
                 );
 
                 // Run the tonemap + overlay passes.
-                overlay.record(device, command_buffer, image_index, crate::render::overlay::TonemapPush {
-                    exposure_scale: 1.0,
-                    op:             2, // ACES default
-                    _pad:           [0; 2],
-                }, frame);
+                overlay.record(
+                    device,
+                    command_buffer,
+                    image_index,
+                    crate::render::overlay::TonemapPush {
+                        exposure_scale: 1.0,
+                        op: 2, // ACES default
+                        _pad: [0; 2],
+                    },
+                    frame,
+                );
             }
 
-            device.end_command_buffer(command_buffer).map_err(ForgeError::Vk)?;
+            device
+                .end_command_buffer(command_buffer)
+                .map_err(ForgeError::Vk)?;
         }
 
         let render_done = gfx.render_finished_semaphores[image_index as usize];
@@ -1284,12 +1414,13 @@ impl Window {
             .command_buffer_infos(&cb_infos)
             .signal_semaphore_infos(&signal_infos);
 
-        let signal_semaphores    = [render_done];
-        let present_swapchains   = [gfx.swapchain];
+        let signal_semaphores = [render_done];
+        let present_swapchains = [gfx.swapchain];
         let present_image_indices = [image_index];
 
         unsafe {
-            device.queue_submit2(queue, &[submit_info], in_flight)
+            device
+                .queue_submit2(queue, &[submit_info], in_flight)
                 .map_err(ForgeError::Vk)?;
 
             let present_info = vk::PresentInfoKHR::default()
@@ -1297,10 +1428,13 @@ impl Window {
                 .swapchains(&present_swapchains)
                 .image_indices(&present_image_indices);
             match gfx.swapchain_loader.queue_present(queue, &present_info) {
-                Ok(suboptimal) if suboptimal => { gfx.needs_resize = true; }
+                Ok(suboptimal) if suboptimal => {
+                    gfx.needs_resize = true;
+                }
                 Ok(_) => {}
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR)
-                | Err(vk::Result::SUBOPTIMAL_KHR) => { gfx.needs_resize = true; }
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
+                    gfx.needs_resize = true;
+                }
                 Err(e) => return Err(ForgeError::Vk(e)),
             }
         }
@@ -1358,7 +1492,7 @@ fn create_swapchain_resources(
     };
 
     let swapchain_extent = vk::Extent2D {
-        width:  width.clamp(caps.min_image_extent.width,  caps.max_image_extent.width),
+        width: width.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
         height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
     };
     let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
@@ -1502,7 +1636,8 @@ fn create_swapchain_resources(
         ThinVec::with_capacity(swapchain_images.len());
     for _ in 0..swapchain_images.len() {
         let s = unsafe {
-            device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            device
+                .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                 .map_err(ForgeError::Vk)?
         };
         render_finished_semaphores.push(s);

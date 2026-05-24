@@ -34,7 +34,10 @@ fn bench_uastc(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter(|| {
                 let rgba = codec::basisu_uastc::transcode_to_rgba8(
-                    black_box(&blocks), (bw * 4) as u32, (bh * 4) as u32);
+                    black_box(&blocks),
+                    (bw * 4) as u32,
+                    (bh * 4) as u32,
+                );
                 black_box(rgba);
             });
         });
@@ -62,9 +65,11 @@ fn bench_meshopt_vertex(c: &mut Criterion) {
                 let out = codec::meshopt::decompress_buffer_view(
                     codec::meshopt::MeshoptMode::Attributes,
                     codec::meshopt::MeshoptFilter::None,
-                    count, stride,
+                    count,
+                    stride,
                     black_box(&src),
-                ).expect("decode");
+                )
+                .expect("decode");
                 black_box(out);
             });
         });
@@ -149,10 +154,12 @@ fn synth_meshopt_vertex_payload(count: usize, stride: usize) -> Vec<u8> {
         // One mode byte per 4 byte-positions (covers stride = 4); for wider
         // strides the codec walks stride bytes total, with 4 positions encoded
         // per mode byte.
-        let mode_bytes = (stride + 3) / 4;
-        for _ in 0..mode_bytes { src.push(0xAA); } // mode 2 for all positions
+        let mode_bytes = stride.div_ceil(4);
+        src.extend(std::iter::repeat_n(0xAAu8, mode_bytes)); // mode 2 for all positions
         // 16 raw bytes per byte position.
-        for _ in 0..stride { src.extend_from_slice(&[0u8; 16]); }
+        for _ in 0..stride {
+            src.extend_from_slice(&[0u8; 16]);
+        }
     }
     src
 }
@@ -172,19 +179,21 @@ fn synth_vp8l_2x2_black() -> Vec<u8> {
             *nbits -= 8;
         }
     };
-    put(1, 14, &mut buf, &mut nbits, &mut bits);  // width-1
-    put(1, 14, &mut buf, &mut nbits, &mut bits);  // height-1
-    put(0, 1,  &mut buf, &mut nbits, &mut bits);  // alpha
-    put(0, 3,  &mut buf, &mut nbits, &mut bits);  // version
-    put(0, 1,  &mut buf, &mut nbits, &mut bits);  // no transforms
-    put(0, 1,  &mut buf, &mut nbits, &mut bits);  // no meta huffman
+    put(1, 14, &mut buf, &mut nbits, &mut bits); // width-1
+    put(1, 14, &mut buf, &mut nbits, &mut bits); // height-1
+    put(0, 1, &mut buf, &mut nbits, &mut bits); // alpha
+    put(0, 3, &mut buf, &mut nbits, &mut bits); // version
+    put(0, 1, &mut buf, &mut nbits, &mut bits); // no transforms
+    put(0, 1, &mut buf, &mut nbits, &mut bits); // no meta huffman
     for _ in 0..5 {
         put(1, 1, &mut buf, &mut nbits, &mut bits); // simple
         put(0, 1, &mut buf, &mut nbits, &mut bits); // 1 symbol
         put(0, 1, &mut buf, &mut nbits, &mut bits); // sym_bits=0 → 1 bit symbol
         put(0, 1, &mut buf, &mut nbits, &mut bits); // sym = 0
     }
-    if nbits > 0 { bits.push((buf & 0xff) as u8); }
+    if nbits > 0 {
+        bits.push((buf & 0xff) as u8);
+    }
 
     let mut vp8l_data = vec![0x2fu8];
     vp8l_data.extend_from_slice(&bits);
@@ -208,12 +217,16 @@ fn synth_vp8l_2x2_black() -> Vec<u8> {
 /// index, DFD, KVD, SGD) come back empty and parsing may legitimately fail
 /// on the synthetic file. The bench cares about the dispatch cost only.
 fn synth_ktx2_minimal() -> Vec<u8> {
-    let magic: [u8; 12] = [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A];
+    let magic: [u8; 12] = [
+        0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+    ];
     let mut bytes = Vec::with_capacity(12 + 17 * 4);
     bytes.extend_from_slice(&magic);
     // 17 little-endian u32 header fields (vkFormat, typeSize, w/h/d, layer/face/level counts,
     // supercompression, then offset/length triples for DFD, KVD, SGD).
-    for _ in 0..17 { bytes.extend_from_slice(&0u32.to_le_bytes()); }
+    for _ in 0..17 {
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
     bytes
 }
 
@@ -221,10 +234,10 @@ fn synth_ktx2_minimal() -> Vec<u8> {
 fn synth_draco_header_only() -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(b"DRACO");
-    b.push(2);   // major version
-    b.push(2);   // minor version
-    b.push(1);   // encoder type (mesh)
-    b.push(0);   // encoder method (sequential)
+    b.push(2); // major version
+    b.push(2); // minor version
+    b.push(1); // encoder type (mesh)
+    b.push(0); // encoder method (sequential)
     b.extend_from_slice(&0u16.to_le_bytes()); // flags
     b
 }
@@ -239,14 +252,16 @@ fn synth_draco_header_only() -> Vec<u8> {
 // Throughput::Elements.
 fn bench_pose_sample(c: &mut Criterion) {
     let mut group = c.benchmark_group("pose");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/models/BrainStem.glb");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/BrainStem.glb");
     if !path.exists() {
         eprintln!("bench skipped: {} not found", path.display());
         return;
     }
     let asset = GltfAsset::load(&path).expect("load BrainStem");
-    if asset.animations.is_empty() { return; }
+    if asset.animations.is_empty() {
+        return;
+    }
     let anim_idx = 0;
     let total_joints = asset.skins.first().map_or(0, |s| s.joints.len());
     let anim_duration = asset.animations[anim_idx].duration().max(1e-3);
@@ -257,7 +272,11 @@ fn bench_pose_sample(c: &mut Criterion) {
         let mut t = 0.0f32;
         b.iter(|| {
             t = (t + 0.016) % anim_duration; // ~60 Hz advance
-            pose.sample(black_box(&asset), black_box(&asset.animations[anim_idx]), black_box(t));
+            pose.sample(
+                black_box(&asset),
+                black_box(&asset.animations[anim_idx]),
+                black_box(t),
+            );
             black_box(&pose.world);
         });
     });
@@ -271,8 +290,8 @@ fn bench_pose_sample(c: &mut Criterion) {
 // uncompressed RGBA8 OUTPUT size — what the user ultimately sees.
 fn bench_bc(c: &mut Criterion) {
     let mut group = c.benchmark_group("bc");
-    let out_bytes = (64u64 * 64 * 4);
-    let bc1_input = vec![0xAAu8; 256 * 8];  // 256 blocks × 8 bytes
+    let out_bytes = 64u64 * 64 * 4;
+    let bc1_input = vec![0xAAu8; 256 * 8]; // 256 blocks × 8 bytes
     let bc7_input = vec![0xAAu8; 256 * 16]; // 256 blocks × 16 bytes
     group.throughput(Throughput::Bytes(out_bytes));
     group.bench_function("bc1_64x64", |b| {
@@ -296,23 +315,35 @@ fn bench_bc(c: &mut Criterion) {
 // ─── ETC2 + EAC family (codec/etc2) ─────────────────────────────────────────
 fn bench_etc2(c: &mut Criterion) {
     let mut group = c.benchmark_group("etc2");
-    let out_bytes = (64u64 * 64 * 4);
-    let rgb_input    = vec![0xAAu8; 256 * 8];  // 256 blocks × 8 bytes
-    let rgba8_input  = vec![0xAAu8; 256 * 16];
-    let r11_input    = vec![0xAAu8; 256 * 8];
+    let out_bytes = 64u64 * 64 * 4;
+    let rgb_input = vec![0xAAu8; 256 * 8]; // 256 blocks × 8 bytes
+    let rgba8_input = vec![0xAAu8; 256 * 16];
+    let r11_input = vec![0xAAu8; 256 * 8];
     let r11g11_input = vec![0xAAu8; 256 * 16];
     group.throughput(Throughput::Bytes(out_bytes));
     group.bench_function("etc2_rgb_64x64", |b| {
         b.iter(|| black_box(codec::etc2::decode_etc2_rgb(black_box(&rgb_input), 64, 64)));
     });
     group.bench_function("etc2_rgba8_64x64", |b| {
-        b.iter(|| black_box(codec::etc2::decode_etc2_rgba8(black_box(&rgba8_input), 64, 64)));
+        b.iter(|| {
+            black_box(codec::etc2::decode_etc2_rgba8(
+                black_box(&rgba8_input),
+                64,
+                64,
+            ))
+        });
     });
     group.bench_function("eac_r11_64x64", |b| {
         b.iter(|| black_box(codec::etc2::decode_eac_r11(black_box(&r11_input), 64, 64)));
     });
     group.bench_function("eac_r11g11_64x64", |b| {
-        b.iter(|| black_box(codec::etc2::decode_eac_r11g11(black_box(&r11g11_input), 64, 64)));
+        b.iter(|| {
+            black_box(codec::etc2::decode_eac_r11g11(
+                black_box(&r11g11_input),
+                64,
+                64,
+            ))
+        });
     });
     group.finish();
 }
@@ -320,7 +351,7 @@ fn bench_etc2(c: &mut Criterion) {
 // ─── ASTC (codec/astc) — 4x4 / 8x8 / 12x12 block sizes ──────────────────────
 fn bench_astc(c: &mut Criterion) {
     let mut group = c.benchmark_group("astc");
-    let out_bytes = (64u64 * 64 * 4);
+    let out_bytes = 64u64 * 64 * 4;
     let input = vec![0xAAu8; 256 * 16]; // 256 blocks × 16 bytes
     group.throughput(Throughput::Bytes(out_bytes));
     group.bench_function("astc_4x4_64x64", |b| {
@@ -329,12 +360,28 @@ fn bench_astc(c: &mut Criterion) {
     // 64×64 image with 8×8 blocks = 8×8 = 64 blocks (1024 B input).
     let input_8x8 = vec![0xAAu8; 64 * 16];
     group.bench_function("astc_8x8_64x64", |b| {
-        b.iter(|| black_box(codec::astc::decode_astc(black_box(&input_8x8), 64, 64, 8, 8)));
+        b.iter(|| {
+            black_box(codec::astc::decode_astc(
+                black_box(&input_8x8),
+                64,
+                64,
+                8,
+                8,
+            ))
+        });
     });
     // 64×64 with 12×12 blocks: ceil(64/12) = 6, so 6×6 = 36 blocks.
     let input_12x12 = vec![0xAAu8; 36 * 16];
     group.bench_function("astc_12x12_64x64", |b| {
-        b.iter(|| black_box(codec::astc::decode_astc(black_box(&input_12x12), 64, 64, 12, 12)));
+        b.iter(|| {
+            black_box(codec::astc::decode_astc(
+                black_box(&input_12x12),
+                64,
+                64,
+                12,
+                12,
+            ))
+        });
     });
     group.finish();
 }
@@ -381,19 +428,24 @@ fn bench_zstd(c: &mut Criterion) {
 // behind the same internal entry point and gets exercised by tests.
 fn bench_draco_dequantize(c: &mut Criterion) {
     let npoints = 64 * 1024;
-    let nc      = 3;
-    let total   = npoints * nc;
+    let nc = 3;
+    let total = npoints * nc;
     let decoded: Vec<i32> = (0..total).map(|i| (i as i32) & 0xFFF).collect();
     let mut out = vec![0.0f32; total];
     let mut group = c.benchmark_group("draco");
     group.throughput(Throughput::Bytes((total * 4) as u64));
     group.bench_function("attr_dequantize_64K_vertices_nc3", |b| {
         b.iter(|| {
-            for f in out.iter_mut() { *f = 0.0; }
+            for f in out.iter_mut() {
+                *f = 0.0;
+            }
             // Use the SIMD path directly; nc=3 → 4-lane SSE2 body.
             #[cfg(target_arch = "x86_64")]
             codec::draco::bench_dequantize_helper(
-                black_box(&decoded), black_box(&mut out), npoints, nc,
+                black_box(&decoded),
+                black_box(&mut out),
+                npoints,
+                nc,
             );
             black_box(&out);
         });

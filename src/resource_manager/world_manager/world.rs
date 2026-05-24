@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use glam::Affine3A;
-use thin_vec::ThinVec;
-use rayon::prelude::*;
+use super::level::{Level, LevelId};
+use super::stage::StageId;
 use crate::resource_manager::component::{Component, ComponentData};
 use crate::resource_manager::manager::{
     ActorHandle, ActorId, ActorType, Arena, Id, LevelHandle, LevelTag, StageHandle,
 };
-use super::level::{Level, LevelId};
-use super::stage::StageId;
+use glam::Affine3A;
+use rayon::prelude::*;
+use std::sync::Arc;
+use thin_vec::ThinVec;
 
 pub struct WorldMarker;
 pub type WorldId = Id<WorldMarker>;
@@ -22,9 +22,9 @@ pub type WorldId = Id<WorldMarker>;
 //   World → Level → Stage → Actor → SubEntity → Component
 
 pub struct World {
-    pub id:     WorldId,
+    pub id: WorldId,
     pub levels: Arena<LevelTag, Level>,
-    pub roots:  ThinVec<LevelHandle>,
+    pub roots: ThinVec<LevelHandle>,
     /// Compiled-script registry. Owned here so a `.so` outlives every callable
     /// pointer the engine has cached in `Play::active_scripts` (plan §6.3).
     pub scripts: crate::resource_manager::event_manager::script::ScriptManager,
@@ -55,7 +55,7 @@ impl World {
             selection: None,
             tonemap_op: 2, // ACES default
             tick_effects: crate::resource_manager::event_manager::EffectArena::with_capacity(4096),
-            tick_chain:   ThinVec::with_capacity(16),
+            tick_chain: ThinVec::with_capacity(16),
         }
     }
 
@@ -106,7 +106,9 @@ impl World {
         id: ActorId,
         local: Affine3A,
     ) -> Option<ActorHandle> {
-        self.levels.get_mut(level_h)?.spawn_actor(stage_h, id, local)
+        self.levels
+            .get_mut(level_h)?
+            .spawn_actor(stage_h, id, local)
     }
 
     pub fn despawn_actor(
@@ -131,7 +133,9 @@ impl World {
         actor_type: ActorType,
         local: Affine3A,
     ) -> Option<usize> {
-        self.levels.get_mut(level_h)?.spawn_sub_entity(stage_h, actor_h, actor_type, local)
+        self.levels
+            .get_mut(level_h)?
+            .spawn_sub_entity(stage_h, actor_h, actor_type, local)
     }
 
     pub fn despawn_sub_entity(
@@ -161,7 +165,9 @@ impl World {
     where
         Component: From<T>,
     {
-        let Some(level) = self.levels.get_mut(level_h) else { return false };
+        let Some(level) = self.levels.get_mut(level_h) else {
+            return false;
+        };
         level.add_component(stage_h, actor_h, variant_idx, Component::from(data))
     }
 
@@ -235,7 +241,10 @@ impl World {
                     stages.push(stage);
                 }
             }
-            stages.as_mut_slice().par_iter_mut().for_each(|s| s.propagate_transforms());
+            stages
+                .as_mut_slice()
+                .par_iter_mut()
+                .for_each(|s| s.propagate_transforms());
         } else {
             for level in self.levels.values_mut() {
                 for stage in level.stages.values_mut() {
@@ -259,7 +268,7 @@ impl World {
         // full. Capacity preserved across ticks — zero allocator traffic on
         // the steady-state path.
         let mut effects = std::mem::take(&mut self.tick_effects);
-        let mut chain   = std::mem::take(&mut self.tick_chain);
+        let mut chain = std::mem::take(&mut self.tick_chain);
         effects.clear();
         chain.clear();
 
@@ -271,9 +280,8 @@ impl World {
                 if let Some(play) = stage.play.as_mut()
                     && play.wants_tick
                 {
-                    play.queue.push(
-                        crate::resource_manager::event_manager::Event::Tick { dt },
-                    );
+                    play.queue
+                        .push(crate::resource_manager::event_manager::Event::Tick { dt });
                 }
             }
         }
@@ -309,16 +317,27 @@ impl World {
 
         // Restore the (now-empty, but capacity-preserving) buffers.
         self.tick_effects = effects;
-        self.tick_chain   = chain;
+        self.tick_chain = chain;
     }
 
     pub fn apply_effect(&mut self, eff: crate::resource_manager::event_manager::Effect) {
-        use crate::resource_manager::event_manager::{Effect, EventTarget, Event};
+        use crate::resource_manager::event_manager::{Effect, Event, EventTarget};
         match eff {
-            Effect::SetActorLocal { level_h, stage_h, actor_h, local } => {
+            Effect::SetActorLocal {
+                level_h,
+                stage_h,
+                actor_h,
+                local,
+            } => {
                 self.set_actor_local(level_h, stage_h, actor_h, local);
             }
-            Effect::SetSubEntityLocal { level_h, stage_h, actor_h, variant_idx, local } => {
+            Effect::SetSubEntityLocal {
+                level_h,
+                stage_h,
+                actor_h,
+                variant_idx,
+                local,
+            } => {
                 self.set_sub_entity_local(level_h, stage_h, actor_h, variant_idx, local);
             }
             Effect::AddComponent(b) => {
@@ -327,24 +346,42 @@ impl World {
                 // payload — the only field that needs deep-cloning is the
                 // non-Clone `Component`, handled by `clone_component`.
                 use crate::resource_manager::event_manager::AddComponentEffect;
-                let AddComponentEffect { level_h, stage_h, actor_h, variant_idx, component } =
-                    Arc::try_unwrap(b).unwrap_or_else(|arc| AddComponentEffect {
-                        level_h:     arc.level_h,
-                        stage_h:     arc.stage_h,
-                        actor_h:     arc.actor_h,
-                        variant_idx: arc.variant_idx,
-                        component:   crate::resource_manager::event_manager::clone_component_pub(&arc.component),
-                    });
+                let AddComponentEffect {
+                    level_h,
+                    stage_h,
+                    actor_h,
+                    variant_idx,
+                    component,
+                } = Arc::try_unwrap(b).unwrap_or_else(|arc| AddComponentEffect {
+                    level_h: arc.level_h,
+                    stage_h: arc.stage_h,
+                    actor_h: arc.actor_h,
+                    variant_idx: arc.variant_idx,
+                    component: crate::resource_manager::event_manager::clone_component_pub(
+                        &arc.component,
+                    ),
+                });
                 if let Some(level) = self.levels.get_mut(level_h) {
                     level.add_component(stage_h, actor_h, variant_idx, component);
                 }
             }
-            Effect::RemoveComponent { level_h, stage_h, actor_h, variant_idx, component_type } => {
+            Effect::RemoveComponent {
+                level_h,
+                stage_h,
+                actor_h,
+                variant_idx,
+                component_type,
+            } => {
                 if let Some(level) = self.levels.get_mut(level_h) {
                     level.remove_component(stage_h, actor_h, variant_idx, component_type);
                 }
             }
-            Effect::SpawnActor { level_h, stage_h, id, local } => {
+            Effect::SpawnActor {
+                level_h,
+                stage_h,
+                id,
+                local,
+            } => {
                 self.spawn_actor(level_h, stage_h, id, local);
             }
             Effect::SpawnSubEntity(b) => {
@@ -353,17 +390,37 @@ impl World {
                 // means the same handle was scheduled twice — drop the duplicate.
                 use crate::resource_manager::event_manager::SpawnSubEntityEffect;
                 if let Ok(payload) = Arc::try_unwrap(b) {
-                    let SpawnSubEntityEffect { level_h, stage_h, actor_h, actor_type, local } = payload;
+                    let SpawnSubEntityEffect {
+                        level_h,
+                        stage_h,
+                        actor_h,
+                        actor_type,
+                        local,
+                    } = payload;
                     self.spawn_sub_entity(level_h, stage_h, actor_h, actor_type, local);
                 }
             }
-            Effect::DespawnActor { level_h, stage_h, actor_h } => {
+            Effect::DespawnActor {
+                level_h,
+                stage_h,
+                actor_h,
+            } => {
                 self.despawn_actor(level_h, stage_h, actor_h);
             }
-            Effect::DespawnSubEntity { level_h, stage_h, actor_h, variant_idx } => {
+            Effect::DespawnSubEntity {
+                level_h,
+                stage_h,
+                actor_h,
+                variant_idx,
+            } => {
                 self.despawn_sub_entity(level_h, stage_h, actor_h, variant_idx);
             }
-            Effect::CueTroupe { level_h, stage_h, troupe, delta } => {
+            Effect::CueTroupe {
+                level_h,
+                stage_h,
+                troupe,
+                delta,
+            } => {
                 // Direct-write fast path — bypasses per-actor World→Level→Stage
                 // routing. Stage holds a reusable scratch buffer to keep the
                 // fan-out allocation-free.
@@ -373,10 +430,21 @@ impl World {
                     stage.cue_troupe_direct(troupe, delta);
                 }
             }
-            Effect::Emit { level_h, stage_h, target, event } => {
-                let Some(level) = self.levels.get_mut(level_h) else { return };
-                let Some(stage) = level.stages.get_mut(stage_h) else { return };
-                let Some(play) = stage.play.as_mut() else { return };
+            Effect::Emit {
+                level_h,
+                stage_h,
+                target,
+                event,
+            } => {
+                let Some(level) = self.levels.get_mut(level_h) else {
+                    return;
+                };
+                let Some(stage) = level.stages.get_mut(stage_h) else {
+                    return;
+                };
+                let Some(play) = stage.play.as_mut() else {
+                    return;
+                };
                 match target {
                     EventTarget::Play => play.queue.push(event),
                     EventTarget::CurrentScene => {
@@ -392,7 +460,13 @@ impl World {
                 }
                 let _ = Event::Tick { dt: 0.0 }; // keep Event in scope so future variants compile
             }
-            Effect::ScheduleTransition { level_h, stage_h, source, target, mealy } => {
+            Effect::ScheduleTransition {
+                level_h,
+                stage_h,
+                source,
+                target,
+                mealy,
+            } => {
                 if let Some(level) = self.levels.get_mut(level_h)
                     && let Some(stage) = level.stages.get_mut(stage_h)
                     && let Some(play) = stage.play.as_mut()
@@ -401,8 +475,11 @@ impl World {
                     // applied in FIFO order by post_tick_bookkeeping.
                     play.pending_transitions.push(
                         crate::resource_manager::event_manager::TransitionRecord {
-                            source, target, mealy,
-                        });
+                            source,
+                            target,
+                            mealy,
+                        },
+                    );
                 }
             }
             Effect::UiAction { .. } => {
@@ -415,5 +492,7 @@ impl World {
 }
 
 impl Default for World {
-    fn default() -> Self { Self::new(WorldId::new(0)) }
+    fn default() -> Self {
+        Self::new(WorldId::new(0))
+    }
 }

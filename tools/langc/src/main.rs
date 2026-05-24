@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let mut input:  Option<Arc<str>> = None;
+    let mut input: Option<Arc<str>> = None;
     let mut output: Option<Arc<str>> = None;
     let mut opt: OptimizationLevel = OptimizationLevel::Aggressive;
     let mut keep_obj = false;
@@ -37,15 +37,33 @@ fn main() -> ExitCode {
     while i < args.len() {
         match args[i].as_ref() {
             "-o" => {
-                if i + 1 >= args.len() { usage(); return ExitCode::from(1); }
+                if i + 1 >= args.len() {
+                    usage();
+                    return ExitCode::from(1);
+                }
                 output = Some(Arc::clone(&args[i + 1]));
                 i += 2;
             }
-            "--opt=0" => { opt = OptimizationLevel::None;        i += 1; }
-            "--opt=1" => { opt = OptimizationLevel::Less;        i += 1; }
-            "--opt=2" => { opt = OptimizationLevel::Default;     i += 1; }
-            "--opt=3" => { opt = OptimizationLevel::Aggressive;  i += 1; }
-            "--keep-obj" => { keep_obj = true; i += 1; }
+            "--opt=0" => {
+                opt = OptimizationLevel::None;
+                i += 1;
+            }
+            "--opt=1" => {
+                opt = OptimizationLevel::Less;
+                i += 1;
+            }
+            "--opt=2" => {
+                opt = OptimizationLevel::Default;
+                i += 1;
+            }
+            "--opt=3" => {
+                opt = OptimizationLevel::Aggressive;
+                i += 1;
+            }
+            "--keep-obj" => {
+                keep_obj = true;
+                i += 1;
+            }
             other if other.starts_with('-') => {
                 eprintln!("langc: unknown flag `{other}`");
                 usage();
@@ -62,7 +80,10 @@ fn main() -> ExitCode {
         }
     }
 
-    let Some(input) = input else { usage(); return ExitCode::from(1); };
+    let Some(input) = input else {
+        usage();
+        return ExitCode::from(1);
+    };
     // Default output: replace `.lang` with `.so`.  Avoids constructing a
     // PathBuf::with_extension (which would force conversion through OsString)
     // by stripping the extension at the str level.
@@ -87,19 +108,25 @@ fn usage() {
     eprintln!("usage: langc INPUT.lang -o OUTPUT.so [--opt=0|1|2|3] [--keep-obj]");
 }
 
-fn compile(input: &str, output: &str, opt: OptimizationLevel, keep_obj: bool) -> Result<(), Arc<str>> {
-    let input_p  = Path::new(input);
+fn compile(
+    input: &str,
+    output: &str,
+    opt: OptimizationLevel,
+    keep_obj: bool,
+) -> Result<(), Arc<str>> {
+    let input_p = Path::new(input);
     let output_p = Path::new(output);
 
     let src = std::fs::read_to_string(input_p)
         .map_err(|e| Arc::<str>::from(format!("read {input}: {e}").as_str()))?;
 
-    let toks = Lexer::new(&src).tokenise()
+    let toks = Lexer::new(&src)
+        .tokenise()
         .map_err(|e| Arc::<str>::from(format!("{input}: {e}").as_str()))?;
-    let ast = Parser::new(toks).parse_script()
+    let ast = Parser::new(toks)
+        .parse_script()
         .map_err(|e| Arc::<str>::from(format!("{input}: {e}").as_str()))?;
-    let hir = sema::lower(ast)
-        .map_err(|e| Arc::<str>::from(format!("{input}: {e}").as_str()))?;
+    let hir = sema::lower(ast).map_err(|e| Arc::<str>::from(format!("{input}: {e}").as_str()))?;
 
     // .o sibling of the .so.  PathBuf::with_extension touches OsString
     // internally, but it never leaks past this scope, so it's fine for I/O.
@@ -110,6 +137,8 @@ fn compile(input: &str, output: &str, opt: OptimizationLevel, keep_obj: bool) ->
     link::link_shared(&obj_path, output_p)
         .map_err(|e| Arc::<str>::from(format!("{e}").as_str()))?;
 
-    if !keep_obj { let _ = std::fs::remove_file(&obj_path); }
+    if !keep_obj {
+        let _ = std::fs::remove_file(&obj_path);
+    }
     Ok(())
 }

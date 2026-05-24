@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use glam::Affine3A;
-use thin_vec::ThinVec;
+use super::stage::{Stage, StageId};
 use crate::resource_manager::component::{Component, ComponentType};
 use crate::resource_manager::manager::{
     ActorHandle, ActorId, ActorType, Arena, Id, StageHandle, StageTag,
 };
-use super::stage::{Stage, StageId};
+use glam::Affine3A;
+use std::sync::Arc;
+use thin_vec::ThinVec;
 
 pub struct LevelMarker;
 pub type LevelId = Id<LevelMarker>;
@@ -20,20 +20,20 @@ pub type LevelId = Id<LevelMarker>;
 // "Give me all Physics actors across all stages in this Level" = O(matching) read.
 
 pub struct Level {
-    pub id:     LevelId,
-    pub name:   Arc<str>,
+    pub id: LevelId,
+    pub name: Arc<str>,
     pub stages: Arena<StageTag, Stage>,
     // cache[i] = (stage, actor) pairs where the actor has ≥1 sub-entity with ComponentType i
-    pub cache:  [ThinVec<(StageHandle, ActorHandle)>; ComponentType::COUNT],
+    pub cache: [ThinVec<(StageHandle, ActorHandle)>; ComponentType::COUNT],
 }
 
 impl Level {
     pub fn new(id: LevelId, name: impl Into<Arc<str>>) -> Self {
         Self {
             id,
-            name:   name.into(),
+            name: name.into(),
             stages: Arena::new(),
-            cache:  std::array::from_fn(|_| ThinVec::new()),
+            cache: std::array::from_fn(|_| ThinVec::new()),
         }
     }
 
@@ -44,7 +44,9 @@ impl Level {
     }
 
     pub fn despawn_stage(&mut self, stage_h: StageHandle) {
-        if self.stages.remove(stage_h).is_none() { return }
+        if self.stages.remove(stage_h).is_none() {
+            return;
+        }
         // Drop all level-cache entries that belonged to this stage.
         for cache_slot in self.cache.iter_mut() {
             cache_slot.retain(|(sh, _)| *sh != stage_h);
@@ -67,29 +69,33 @@ impl Level {
         actor_type: ActorType,
         local: Affine3A,
     ) -> Option<usize> {
-        self.stages.get_mut(stage_h)?.spawn_sub_entity(actor_h, actor_type, local)
+        self.stages
+            .get_mut(stage_h)?
+            .spawn_sub_entity(actor_h, actor_type, local)
     }
 
     pub fn despawn_actor(&mut self, stage_h: StageHandle, actor_h: ActorHandle) {
         let actor_idx = actor_h.idx as usize;
-        let Some(stage) = self.stages.get_mut(stage_h) else { return };
+        let Some(stage) = self.stages.get_mut(stage_h) else {
+            return;
+        };
         stage.despawn_actor(actor_h);
         // Copy level_cache_pos before the borrow ends (NLL).
         let lpos = stage.level_cache_pos[actor_idx];
         // Borrow of `stage` ends here.
-        for ct_idx in 0..ComponentType::COUNT {
-            let pos = lpos[ct_idx];
-            if pos == u16::MAX { continue; }
+        for (ct_idx, &pos) in lpos.iter().enumerate() {
+            if pos == u16::MAX {
+                continue;
+            }
             self.cache[ct_idx].swap_remove(pos as usize);
             if (pos as usize) < self.cache[ct_idx].len() {
                 let (d_sh, d_ah) = self.cache[ct_idx][pos as usize];
-                self.stages.get_mut(d_sh).unwrap()
-                    .level_cache_pos[d_ah.idx as usize][ct_idx] = pos;
+                self.stages.get_mut(d_sh).unwrap().level_cache_pos[d_ah.idx as usize][ct_idx] = pos;
             }
         }
         // Reset (slot may be reused by the next spawn_actor).
-        self.stages.get_mut(stage_h).unwrap()
-            .level_cache_pos[actor_idx] = [u16::MAX; ComponentType::COUNT];
+        self.stages.get_mut(stage_h).unwrap().level_cache_pos[actor_idx] =
+            [u16::MAX; ComponentType::COUNT];
     }
 
     pub fn despawn_sub_entity(
@@ -99,7 +105,9 @@ impl Level {
         variant_idx: usize,
     ) {
         let actor_idx = actor_h.idx as usize;
-        let Some(stage) = self.stages.get_mut(stage_h) else { return };
+        let Some(stage) = self.stages.get_mut(stage_h) else {
+            return;
+        };
         stage.despawn_sub_entity(actor_h, variant_idx);
         // stage.cache_pos[idx][ct] is u16::MAX if actor was evicted from stage cache.
         // stage.level_cache_pos[idx][ct] tracks position in Level.cache.
@@ -107,17 +115,19 @@ impl Level {
         let lpos = stage.level_cache_pos[actor_idx];
         // Borrow of `stage` ends here.
         for ct_idx in 0..ComponentType::COUNT {
-            if cpos[ct_idx] != u16::MAX { continue; } // still in stage cache
+            if cpos[ct_idx] != u16::MAX {
+                continue;
+            } // still in stage cache
             let pos = lpos[ct_idx];
-            if pos == u16::MAX { continue; }           // not in level cache
+            if pos == u16::MAX {
+                continue;
+            } // not in level cache
             self.cache[ct_idx].swap_remove(pos as usize);
             if (pos as usize) < self.cache[ct_idx].len() {
                 let (d_sh, d_ah) = self.cache[ct_idx][pos as usize];
-                self.stages.get_mut(d_sh).unwrap()
-                    .level_cache_pos[d_ah.idx as usize][ct_idx] = pos;
+                self.stages.get_mut(d_sh).unwrap().level_cache_pos[d_ah.idx as usize][ct_idx] = pos;
             }
-            self.stages.get_mut(stage_h).unwrap()
-                .level_cache_pos[actor_idx][ct_idx] = u16::MAX;
+            self.stages.get_mut(stage_h).unwrap().level_cache_pos[actor_idx][ct_idx] = u16::MAX;
         }
     }
 
@@ -132,16 +142,19 @@ impl Level {
     ) -> bool {
         let ct_idx = comp.component_type().index();
         let actor_idx = actor_h.idx as usize;
-        let Some(stage) = self.stages.get_mut(stage_h) else { return false };
-        if !stage.add_component(actor_h, variant_idx, comp) { return false }
+        let Some(stage) = self.stages.get_mut(stage_h) else {
+            return false;
+        };
+        if !stage.add_component(actor_h, variant_idx, comp) {
+            return false;
+        }
         // O(1) dedup using level_cache_pos: if u16::MAX, actor not yet in level cache.
         let needs_level = stage.level_cache_pos[actor_idx][ct_idx] == u16::MAX;
         // Borrow of `stage` ends here.
         if needs_level {
             let pos = self.cache[ct_idx].len() as u16;
             self.cache[ct_idx].push((stage_h, actor_h));
-            self.stages.get_mut(stage_h).unwrap()
-                .level_cache_pos[actor_idx][ct_idx] = pos;
+            self.stages.get_mut(stage_h).unwrap().level_cache_pos[actor_idx][ct_idx] = pos;
         }
         true
     }
@@ -166,11 +179,10 @@ impl Level {
             self.cache[ct_idx].swap_remove(level_pos as usize);
             if (level_pos as usize) < self.cache[ct_idx].len() {
                 let (d_sh, d_ah) = self.cache[ct_idx][level_pos as usize];
-                self.stages.get_mut(d_sh).unwrap()
-                    .level_cache_pos[d_ah.idx as usize][ct_idx] = level_pos;
+                self.stages.get_mut(d_sh).unwrap().level_cache_pos[d_ah.idx as usize][ct_idx] =
+                    level_pos;
             }
-            self.stages.get_mut(stage_h).unwrap()
-                .level_cache_pos[actor_idx][ct_idx] = u16::MAX;
+            self.stages.get_mut(stage_h).unwrap().level_cache_pos[actor_idx][ct_idx] = u16::MAX;
         }
         Some(removed)
     }

@@ -11,28 +11,132 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux (x86_64)
+            llvm_tarball: clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz
+          - os: macos-latest
+            name: macOS (arm64)
+            llvm_tarball: clang+llvm-18.1.8-arm64-apple-darwin22.0.tar.xz
+          - os: windows-latest
+            name: Windows (x86_64)
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - name: Install LLVM 18 (pre-built tarball)
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ── LLVM 18 ──────────────────────────────────────────────────────────────
+
+      - name: Cache LLVM 18 (Linux / macOS)
+        if: runner.os != 'Windows'
+        id: cache-llvm-unix
+        uses: actions/cache@v4
+        with:
+          path: .llvm/18
+          key: llvm-18.1.8-${{ matrix.os }}
+
+      - name: Install LLVM 18 (Linux / macOS)
+        if: runner.os != 'Windows' && steps.cache-llvm-unix.outputs.cache-hit != 'true'
+        shell: bash
         run: |
           mkdir -p .llvm/18
-          curl -fsSL https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz \
+          curl -fsSL \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/${{ matrix.llvm_tarball }}" \
             | tar xJf - -C .llvm/18 --strip-components=1
-          echo "LLVM_SYS_180_PREFIX=$PWD/.llvm/18" >> $GITHUB_ENV
-          echo "$PWD/.llvm/18/bin" >> $GITHUB_PATH
-      - name: Install Vulkan dev + GLSL compiler + Valgrind
-        run: sudo apt-get install -y libvulkan-dev glslang-tools valgrind
+
+      - name: Set LLVM prefix (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          echo "LLVM_SYS_180_PREFIX=$PWD/.llvm/18" >> "$GITHUB_ENV"
+          echo "$PWD/.llvm/18/bin"                 >> "$GITHUB_PATH"
+
+      # Windows: NSIS installer needs UAC elevation unconditionally — don't run it.
+      # GitHub Actions Windows runners have 7-Zip at a known path, so we extract
+      # the NSIS installer directly (7-Zip treats it as an archive, no scripts run).
+      # This happens here, before cargo build, so the vendor/llvm-sys build.rs
+      # finds llvm-config.exe already present and skips its own download entirely.
+      - name: Cache LLVM 18 (Windows)
+        if: runner.os == 'Windows'
+        id: cache-llvm-windows
+        uses: actions/cache@v4
+        with:
+          path: .llvm\18
+          key: llvm-18.1.8-windows-x86_64
+
+      - name: Extract LLVM 18 (Windows)
+        if: runner.os == 'Windows' && steps.cache-llvm-windows.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $prefix  = "$env:GITHUB_WORKSPACE\.llvm\18"
+          $tmp     = "$env:TEMP\LLVM-18.1.8-win64.exe"
+          $sevenZ  = "C:\Program Files\7-Zip\7z.exe"   # pre-installed on all GHA Windows runners
+
+          New-Item -ItemType Directory -Force $prefix | Out-Null
+          Write-Host "Downloading LLVM 18.1.8 (~600 MB)..."
+          curl.exe -fsSL --retry 3 -o $tmp `
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe"
+          if ($LASTEXITCODE -ne 0) { throw "LLVM download failed (exit $LASTEXITCODE)" }
+
+          Write-Host "Extracting with 7-Zip (no NSIS execution, no admin needed)..."
+          & $sevenZ x $tmp "-o$prefix" -y
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip extraction failed (exit $LASTEXITCODE)" }
+
+          Remove-Item $tmp -Force
+          if (-not (Test-Path "$prefix\bin\llvm-config.exe")) {
+            Write-Host "Contents of $prefix :"
+            Get-ChildItem $prefix -Recurse -Name | Select-Object -First 40
+            throw "llvm-config.exe not found after extraction — check directory listing above"
+          }
+          Write-Host "LLVM 18 extracted to $prefix"
+
+      - name: Set LLVM prefix (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $prefix = "$env:GITHUB_WORKSPACE\.llvm\18"
+          Add-Content $env:GITHUB_ENV  "LLVM_SYS_180_PREFIX=$prefix"
+          Add-Content $env:GITHUB_PATH "$prefix\bin"
+
+      # ── Platform-specific deps ────────────────────────────────────────────────
+
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libvulkan-dev glslang-tools valgrind
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install molten-vk vulkan-headers vulkan-loader glslang
+
+      # Vulkan dev headers are not needed on Windows: ash uses dynamic loading.
+      # valgrind is Linux-only; iai-callgrind benches are skipped automatically
+      # on other platforms.
+
       - name: Install iai-callgrind-runner
+        if: runner.os == 'Linux'
         run: cargo install iai-callgrind-runner --version 0.16.1 --locked
+
+      # ── Checks ───────────────────────────────────────────────────────────────
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Build
         run: cargo build --workspace --verbose
+
       - name: Test
         run: cargo test --workspace --verbose

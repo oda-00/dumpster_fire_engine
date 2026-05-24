@@ -4,11 +4,11 @@
 //
 //   cargo bench --bench effect_dispatch
 
-use std::sync::Arc;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use glam::{Affine3A, Vec3};
-use thin_vec::{ThinVec, thin_vec};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use dumpster_fire_engine::resource_manager::*;
+use glam::{Affine3A, Vec3};
+use std::sync::Arc;
+use thin_vec::{ThinVec, thin_vec};
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -19,31 +19,58 @@ fn build_world_with_play() -> (World, LevelHandle, StageHandle, ActorHandle, Act
     let aid = ActorId::new(1);
     let ah = world.spawn_actor(lh, sh, aid, Affine3A::IDENTITY).unwrap();
     world.spawn_sub_entity(
-        lh, sh, ah,
+        lh,
+        sh,
+        ah,
         ActorType::Character(Character {
-            id: CharacterId::new(1), name: "n".into(),
-            visible: true, physical: true, playable: false, mesh: None,
+            id: CharacterId::new(1),
+            name: "n".into(),
+            visible: true,
+            physical: true,
+            playable: false,
+            mesh: None,
         }),
         Affine3A::IDENTITY,
     );
-    world.add_component(lh, sh, ah, 0, PhysicsComponent {
-        mass: 1.0, velocity: (0.0, 0.0, 0.0), acceleration: (0.0, 0.0, 0.0),
-    });
+    world.add_component(
+        lh,
+        sh,
+        ah,
+        0,
+        PhysicsComponent {
+            mass: 1.0,
+            velocity: (0.0, 0.0, 0.0),
+            acceleration: (0.0, 0.0, 0.0),
+        },
+    );
 
     // Play with one Atomic scene + one troupe (so Emit / Cue have a target).
     let troupe = TroupeId::new(1);
     let scene = SceneDef {
-        id: SceneId::new(1), stage: StageId::new(1), parent: None,
+        id: SceneId::new(1),
+        stage: StageId::new(1),
+        parent: None,
         kind: SceneKind::Atomic,
         troupes: thin_vec![troupe],
-        initial_actors: thin_vec![vec![ActiveActor::new(lh, sh, ah, aid)].into_iter().collect()],
+        initial_actors: thin_vec![
+            vec![ActiveActor::new(lh, sh, ah, aid)]
+                .into_iter()
+                .collect()
+        ],
         root: BtNode::leaf(
             Condition::Never,
-            Effect::CueTroupe { level_h: lh, stage_h: sh, troupe, delta: Affine3A::IDENTITY },
+            Effect::CueTroupe {
+                level_h: lh,
+                stage_h: sh,
+                troupe,
+                delta: Affine3A::IDENTITY,
+            },
             false,
         ),
-        on_enter: thin_vec![], on_exit: thin_vec![],
-        handlers: thin_vec![], transitions: thin_vec![],
+        on_enter: thin_vec![],
+        on_exit: thin_vec![],
+        handlers: thin_vec![],
+        transitions: thin_vec![],
     };
     let mut script = Script::new(ScriptId::new(1), "s", SceneId::new(1));
     script.add_scene(scene);
@@ -65,7 +92,10 @@ fn bench_apply_effect(c: &mut Criterion) {
         let t = Affine3A::from_translation(Vec3::new(1.0, 0.0, 0.0));
         b.iter(|| {
             w.apply_effect(Effect::SetActorLocal {
-                level_h: lh, stage_h: sh, actor_h: ah, local: black_box(t),
+                level_h: lh,
+                stage_h: sh,
+                actor_h: ah,
+                local: black_box(t),
             });
         });
     });
@@ -75,7 +105,11 @@ fn bench_apply_effect(c: &mut Criterion) {
         let t = Affine3A::from_translation(Vec3::new(0.0, 1.0, 0.0));
         b.iter(|| {
             w.apply_effect(Effect::SetSubEntityLocal {
-                level_h: lh, stage_h: sh, actor_h: ah, variant_idx: 0, local: black_box(t),
+                level_h: lh,
+                stage_h: sh,
+                actor_h: ah,
+                variant_idx: 0,
+                local: black_box(t),
             });
         });
     });
@@ -85,9 +119,15 @@ fn bench_apply_effect(c: &mut Criterion) {
         let (mut w, lh, sh, ah, _) = build_world_with_play();
         b.iter(|| {
             let arc = Arc::new(AddComponentEffect {
-                level_h: lh, stage_h: sh, actor_h: ah, variant_idx: 0,
+                level_h: lh,
+                stage_h: sh,
+                actor_h: ah,
+                variant_idx: 0,
                 component: Component::Audio(AudioComponent {
-                    volume: 1.0, pitch: 1.0, _loop: false, _playing: false,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    _loop: false,
+                    _playing: false,
                 }),
             });
             w.apply_effect(Effect::AddComponent(arc));
@@ -99,9 +139,15 @@ fn bench_apply_effect(c: &mut Criterion) {
         let (mut w, lh, sh, ah, _) = build_world_with_play();
         b.iter(|| {
             let arc = Arc::new(AddComponentEffect {
-                level_h: lh, stage_h: sh, actor_h: ah, variant_idx: 0,
+                level_h: lh,
+                stage_h: sh,
+                actor_h: ah,
+                variant_idx: 0,
                 component: Component::Audio(AudioComponent {
-                    volume: 1.0, pitch: 1.0, _loop: false, _playing: false,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    _loop: false,
+                    _playing: false,
                 }),
             });
             let _holder = Arc::clone(&arc); // bump refcount to 2 → forces deep-clone fallback
@@ -113,11 +159,23 @@ fn bench_apply_effect(c: &mut Criterion) {
         let (mut w, lh, sh, ah, _) = build_world_with_play();
         b.iter(|| {
             // Re-add the component each iteration so remove always has work to do.
-            w.add_component(lh, sh, ah, 0, AudioComponent {
-                volume: 1.0, pitch: 1.0, _loop: false, _playing: false,
-            });
+            w.add_component(
+                lh,
+                sh,
+                ah,
+                0,
+                AudioComponent {
+                    volume: 1.0,
+                    pitch: 1.0,
+                    _loop: false,
+                    _playing: false,
+                },
+            );
             w.apply_effect(Effect::RemoveComponent {
-                level_h: lh, stage_h: sh, actor_h: ah, variant_idx: 0,
+                level_h: lh,
+                stage_h: sh,
+                actor_h: ah,
+                variant_idx: 0,
                 component_type: ComponentType::Audio,
             });
         });
@@ -129,8 +187,10 @@ fn bench_apply_effect(c: &mut Criterion) {
         b.iter(|| {
             next_id += 1;
             w.apply_effect(Effect::SpawnActor {
-                level_h: lh, stage_h: sh,
-                id: ActorId::new(next_id), local: Affine3A::IDENTITY,
+                level_h: lh,
+                stage_h: sh,
+                id: ActorId::new(next_id),
+                local: Affine3A::IDENTITY,
             });
         });
     });
@@ -142,8 +202,14 @@ fn bench_apply_effect(c: &mut Criterion) {
         let mut next_id = 99_000i64;
         b.iter(|| {
             next_id += 1;
-            let ah = w.spawn_actor(lh, sh, ActorId::new(next_id), Affine3A::IDENTITY).unwrap();
-            w.apply_effect(Effect::DespawnActor { level_h: lh, stage_h: sh, actor_h: ah });
+            let ah = w
+                .spawn_actor(lh, sh, ActorId::new(next_id), Affine3A::IDENTITY)
+                .unwrap();
+            w.apply_effect(Effect::DespawnActor {
+                level_h: lh,
+                stage_h: sh,
+                actor_h: ah,
+            });
         });
     });
 
@@ -153,21 +219,26 @@ fn bench_apply_effect(c: &mut Criterion) {
         b.iter(|| {
             next_id += 1;
             w.spawn_sub_entity(
-                lh, sh, ah,
+                lh,
+                sh,
+                ah,
                 ActorType::Item(Item {
-                    id:          ItemId::new(next_id),
-                    name:        "i".into(),
-                    quantity:    (1, 1, 1),
+                    id: ItemId::new(next_id),
+                    name: "i".into(),
+                    quantity: (1, 1, 1),
                     description: Arc::from(""),
-                    stackable:   false,
-                    visible:     true,
-                    physical:    false,
-                    mesh:        None,
-        }),
+                    stackable: false,
+                    visible: true,
+                    physical: false,
+                    mesh: None,
+                }),
                 Affine3A::IDENTITY,
             );
             w.apply_effect(Effect::DespawnSubEntity {
-                level_h: lh, stage_h: sh, actor_h: ah, variant_idx: 2,
+                level_h: lh,
+                stage_h: sh,
+                actor_h: ah,
+                variant_idx: 2,
             });
         });
     });
@@ -178,7 +249,10 @@ fn bench_apply_effect(c: &mut Criterion) {
         let delta = Affine3A::from_translation(Vec3::new(0.001, 0.0, 0.0));
         b.iter(|| {
             w.apply_effect(Effect::CueTroupe {
-                level_h: lh, stage_h: sh, troupe, delta: black_box(delta),
+                level_h: lh,
+                stage_h: sh,
+                troupe,
+                delta: black_box(delta),
             });
         });
     });
@@ -187,7 +261,8 @@ fn bench_apply_effect(c: &mut Criterion) {
         let (mut w, lh, sh, _, _) = build_world_with_play();
         b.iter(|| {
             w.apply_effect(Effect::Emit {
-                level_h: lh, stage_h: sh,
+                level_h: lh,
+                stage_h: sh,
                 target: EventTarget::Play,
                 event: Event::Tick { dt: 1.0 / 60.0 },
             });
@@ -198,7 +273,8 @@ fn bench_apply_effect(c: &mut Criterion) {
         let (mut w, lh, sh, _, _) = build_world_with_play();
         b.iter(|| {
             w.apply_effect(Effect::Emit {
-                level_h: lh, stage_h: sh,
+                level_h: lh,
+                stage_h: sh,
                 target: EventTarget::CurrentScene,
                 event: Event::Tick { dt: 1.0 / 60.0 },
             });
@@ -209,7 +285,8 @@ fn bench_apply_effect(c: &mut Criterion) {
         let (mut w, lh, sh, _, _) = build_world_with_play();
         b.iter(|| {
             w.apply_effect(Effect::Emit {
-                level_h: lh, stage_h: sh,
+                level_h: lh,
+                stage_h: sh,
                 target: EventTarget::Scene(SceneId::new(1)),
                 event: Event::Tick { dt: 1.0 / 60.0 },
             });
@@ -221,8 +298,10 @@ fn bench_apply_effect(c: &mut Criterion) {
         let mealy: Arc<[Effect]> = Arc::from(Vec::<Effect>::new());
         b.iter(|| {
             w.apply_effect(Effect::ScheduleTransition {
-                level_h: lh, stage_h: sh,
-                source: SceneId::new(1), target: SceneId::new(1),
+                level_h: lh,
+                stage_h: sh,
+                source: SceneId::new(1),
+                target: SceneId::new(1),
                 mealy: Arc::clone(&mealy),
             });
         });
@@ -236,20 +315,43 @@ fn bench_apply_effect(c: &mut Criterion) {
 fn bench_effect_clone(c: &mut Criterion) {
     let mut g = c.benchmark_group("effect_clone");
 
-    let lh = LevelHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData };
-    let sh = StageHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData };
-    let ah = ActorHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData };
+    let lh = LevelHandle {
+        idx: 0,
+        generation: std::num::NonZeroU32::new(1).unwrap(),
+        _tag: std::marker::PhantomData,
+    };
+    let sh = StageHandle {
+        idx: 0,
+        generation: std::num::NonZeroU32::new(1).unwrap(),
+        _tag: std::marker::PhantomData,
+    };
+    let ah = ActorHandle {
+        idx: 0,
+        generation: std::num::NonZeroU32::new(1).unwrap(),
+        _tag: std::marker::PhantomData,
+    };
 
     g.bench_function("set_actor_local", |b| {
-        let e = Effect::SetActorLocal { level_h: lh, stage_h: sh, actor_h: ah, local: Affine3A::IDENTITY };
+        let e = Effect::SetActorLocal {
+            level_h: lh,
+            stage_h: sh,
+            actor_h: ah,
+            local: Affine3A::IDENTITY,
+        };
         b.iter(|| black_box(e.clone()));
     });
 
     g.bench_function("add_component_arc_bump", |b| {
         let e = Effect::AddComponent(Arc::new(AddComponentEffect {
-            level_h: lh, stage_h: sh, actor_h: ah, variant_idx: 0,
+            level_h: lh,
+            stage_h: sh,
+            actor_h: ah,
+            variant_idx: 0,
             component: Component::Audio(AudioComponent {
-                volume: 1.0, pitch: 1.0, _loop: false, _playing: false,
+                volume: 1.0,
+                pitch: 1.0,
+                _loop: false,
+                _playing: false,
             }),
         }));
         b.iter(|| black_box(e.clone()));
@@ -258,8 +360,10 @@ fn bench_effect_clone(c: &mut Criterion) {
     g.bench_function("schedule_transition_arc_slice_bump", |b| {
         let mealy: Arc<[Effect]> = Arc::from(Vec::<Effect>::new());
         let e = Effect::ScheduleTransition {
-            level_h: lh, stage_h: sh,
-            source: SceneId::new(1), target: SceneId::new(2),
+            level_h: lh,
+            stage_h: sh,
+            source: SceneId::new(1),
+            target: SceneId::new(2),
             mealy,
         };
         b.iter(|| black_box(e.clone()));
@@ -267,7 +371,8 @@ fn bench_effect_clone(c: &mut Criterion) {
 
     g.bench_function("emit", |b| {
         let e = Effect::Emit {
-            level_h: lh, stage_h: sh,
+            level_h: lh,
+            stage_h: sh,
             target: EventTarget::Play,
             event: Event::Tick { dt: 1.0 / 60.0 },
         };
@@ -281,20 +386,49 @@ fn bench_effect_clone(c: &mut Criterion) {
 
 fn bench_effect_clone_batch(c: &mut Criterion) {
     let mut g = c.benchmark_group("effect_clone_batch");
-    let lh = LevelHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData };
-    let sh = StageHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData };
-    let ah = ActorHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData };
+    let lh = LevelHandle {
+        idx: 0,
+        generation: std::num::NonZeroU32::new(1).unwrap(),
+        _tag: std::marker::PhantomData,
+    };
+    let sh = StageHandle {
+        idx: 0,
+        generation: std::num::NonZeroU32::new(1).unwrap(),
+        _tag: std::marker::PhantomData,
+    };
+    let ah = ActorHandle {
+        idx: 0,
+        generation: std::num::NonZeroU32::new(1).unwrap(),
+        _tag: std::marker::PhantomData,
+    };
 
     for &n in &[16usize, 256, 4096] {
-        let effs: ThinVec<Effect> = (0..n).map(|i| {
-            if i % 3 == 0 {
-                Effect::SetActorLocal { level_h: lh, stage_h: sh, actor_h: ah, local: Affine3A::IDENTITY }
-            } else if i % 3 == 1 {
-                Effect::Emit { level_h: lh, stage_h: sh, target: EventTarget::Play, event: Event::Tick { dt: 0.0 } }
-            } else {
-                Effect::CueTroupe { level_h: lh, stage_h: sh, troupe: TroupeId::new(1), delta: Affine3A::IDENTITY }
-            }
-        }).collect();
+        let effs: ThinVec<Effect> = (0..n)
+            .map(|i| {
+                if i % 3 == 0 {
+                    Effect::SetActorLocal {
+                        level_h: lh,
+                        stage_h: sh,
+                        actor_h: ah,
+                        local: Affine3A::IDENTITY,
+                    }
+                } else if i % 3 == 1 {
+                    Effect::Emit {
+                        level_h: lh,
+                        stage_h: sh,
+                        target: EventTarget::Play,
+                        event: Event::Tick { dt: 0.0 },
+                    }
+                } else {
+                    Effect::CueTroupe {
+                        level_h: lh,
+                        stage_h: sh,
+                        troupe: TroupeId::new(1),
+                        delta: Affine3A::IDENTITY,
+                    }
+                }
+            })
+            .collect();
 
         g.bench_with_input(BenchmarkId::from_parameter(n), &effs, |b, effs| {
             b.iter(|| {
@@ -306,5 +440,10 @@ fn bench_effect_clone_batch(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_apply_effect, bench_effect_clone, bench_effect_clone_batch);
+criterion_group!(
+    benches,
+    bench_apply_effect,
+    bench_effect_clone,
+    bench_effect_clone_batch
+);
 criterion_main!(benches);

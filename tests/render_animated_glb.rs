@@ -13,21 +13,20 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use dumpster_fire_engine::forge_master::ore::{GpuMesh, GraphicsOreKind};
-use dumpster_fire_engine::forge_master::FrameId;
-use dumpster_fire_engine::render::VulkanContext;
-use dumpster_fire_engine::resource_manager::asset_manager::{
-    build_compute_ores, build_graphics_plans, build_graphics_plans_with_pose,
-    build_skin_morph_proto, load_asset, asset_to_texture_ores,
-    collect_skin_palette_buffers, pack_primitive_skin_attrs, primitive_is_skinned,
-    register_skin_morph_forges,
-};
 use dumpster_fire_engine::forge_master::ForgeMaster;
-use dumpster_fire_engine::render::factory_master::factory::{Factory, FactoryId};
+use dumpster_fire_engine::forge_master::FrameId;
+use dumpster_fire_engine::forge_master::ore::{GpuMesh, GraphicsOreKind};
 use dumpster_fire_engine::render::ProtoId;
+use dumpster_fire_engine::render::VulkanContext;
+use dumpster_fire_engine::render::factory_master::factory::{Factory, FactoryId};
+use dumpster_fire_engine::resource_manager::asset_manager::{
+    asset_to_texture_ores, build_compute_ores, build_graphics_plans,
+    build_graphics_plans_with_pose, build_skin_morph_proto, collect_skin_palette_buffers,
+    load_asset, pack_primitive_skin_attrs, primitive_is_skinned, register_skin_morph_forges,
+};
 use dumpster_fire_engine::resource_manager::gltf_driver::{
-    GltfCache, GltfSampler, GltfUploadCtx, MaterialUniform,
-    create_material, create_material_pool, upload_texture_rgba, TEXTURE_SLOT_COUNT,
+    GltfCache, GltfSampler, GltfUploadCtx, MaterialUniform, TEXTURE_SLOT_COUNT, create_material,
+    create_material_pool, upload_texture_rgba,
 };
 
 use forge_gltf::{
@@ -38,7 +37,9 @@ use forge_gltf::{
 const ASSETS: &str = "assets/models";
 
 fn asset_path(name: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(ASSETS).join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(ASSETS)
+        .join(name)
 }
 
 fn try_vulkan() -> Option<VulkanContext> {
@@ -61,7 +62,10 @@ fn try_vulkan() -> Option<VulkanContext> {
 #[test]
 fn brainstem_animation_advances_joint_world_matrices() {
     let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
-    assert!(!asset.animations.is_empty(), "BrainStem ships with skeletal animation data");
+    assert!(
+        !asset.animations.is_empty(),
+        "BrainStem ships with skeletal animation data"
+    );
     assert!(!asset.skins.is_empty(), "BrainStem is skinned");
 
     let mut pose = Pose::rest(&asset);
@@ -76,22 +80,35 @@ fn brainstem_animation_advances_joint_world_matrices() {
     pose.sample(&asset, anim, dur * 0.75);
     let late_world = pose.world.clone();
 
-    assert!(world_diff(&mid_world, &rest_world)  > 1e-4, "animation should perturb the rest pose");
-    assert!(world_diff(&late_world, &mid_world) > 1e-4, "different sample times yield different poses");
+    assert!(
+        world_diff(&mid_world, &rest_world) > 1e-4,
+        "animation should perturb the rest pose"
+    );
+    assert!(
+        world_diff(&late_world, &mid_world) > 1e-4,
+        "different sample times yield different poses"
+    );
 
     // Spot-check that the joints — not the mesh node — are the ones moving.
-    let mesh_nodes: Vec<usize> = asset.nodes.iter().enumerate()
-        .filter_map(|(i, n)| n.mesh.map(|_| i)).collect();
+    let mesh_nodes: Vec<usize> = asset
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| n.mesh.map(|_| i))
+        .collect();
     for &i in &mesh_nodes {
         // Mesh-bearing nodes have no animation channel in BrainStem; their
         // world matrix must equal the rest pose at every sample time.
-        assert_eq!(mid_world[i],  rest_world[i]);
+        assert_eq!(mid_world[i], rest_world[i]);
         assert_eq!(late_world[i], rest_world[i]);
     }
     let any_joint_moved = (0..asset.nodes.len())
         .filter(|i| !mesh_nodes.contains(i))
         .any(|i| {
-            mid_world[i].iter().zip(&rest_world[i]).any(|(a, b)| (a - b).abs() > 1e-5)
+            mid_world[i]
+                .iter()
+                .zip(&rest_world[i])
+                .any(|(a, b)| (a - b).abs() > 1e-5)
         });
     assert!(any_joint_moved, "joint nodes should pick up animation");
 }
@@ -99,7 +116,12 @@ fn brainstem_animation_advances_joint_world_matrices() {
 fn world_diff(a: &[[f32; 16]], b: &[[f32; 16]]) -> f64 {
     a.iter()
         .zip(b)
-        .map(|(x, y)| x.iter().zip(y).map(|(p, q)| (p - q).abs() as f64).sum::<f64>())
+        .map(|(x, y)| {
+            x.iter()
+                .zip(y)
+                .map(|(p, q)| (p - q).abs() as f64)
+                .sum::<f64>()
+        })
         .sum()
 }
 
@@ -120,25 +142,38 @@ fn animated_mesh_nodes_emit_distinct_draws_per_frame() {
     let mut pose = Pose::rest(&asset);
     let anim = &asset.animations[0];
 
-    let plans_rest = build_graphics_plans_with_pose(&asset, &pose, &upload_ctx)
-        .expect("rest-pose upload");
+    let plans_rest =
+        build_graphics_plans_with_pose(&asset, &pose, &upload_ctx).expect("rest-pose upload");
 
     pose.sample(&asset, anim, anim.duration() * 0.5);
-    let plans_mid = build_graphics_plans_with_pose(&asset, &pose, &upload_ctx)
-        .expect("mid-anim upload");
+    let plans_mid =
+        build_graphics_plans_with_pose(&asset, &pose, &upload_ctx).expect("mid-anim upload");
 
-    assert_eq!(plans_rest.len(), plans_mid.len(), "draw count is animation-invariant");
-    assert!(!plans_rest.is_empty(), "asset renders at least one primitive");
+    assert_eq!(
+        plans_rest.len(),
+        plans_mid.len(),
+        "draw count is animation-invariant"
+    );
+    assert!(
+        !plans_rest.is_empty(),
+        "asset renders at least one primitive"
+    );
 
     let any_changed = plans_rest
         .iter()
         .zip(&plans_mid)
         .any(|(a, b)| a.mvp.iter().zip(&b.mvp).any(|(x, y)| (x - y).abs() > 1e-5));
-    assert!(any_changed, "animated plans should carry frame-specific MVPs");
+    assert!(
+        any_changed,
+        "animated plans should carry frame-specific MVPs"
+    );
 
     for p in &plans_mid {
         let mesh: &Arc<GpuMesh> = p.mesh.as_ref().expect("mesh attached");
-        assert!(mesh.index_count > 0, "uploaded mesh carries an index buffer");
+        assert!(
+            mesh.index_count > 0,
+            "uploaded mesh carries an index buffer"
+        );
     }
 
     // Distinct FrameIds across the per-frame draw list.
@@ -149,7 +184,9 @@ fn animated_mesh_nodes_emit_distinct_draws_per_frame() {
 
     drop(plans_rest);
     drop(plans_mid);
-    unsafe { ctx.device.device_wait_idle().ok(); }
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+    }
 }
 
 // ── 3. Special-effect asset: KHR_materials_transmission ─────────────────────
@@ -157,13 +194,19 @@ fn animated_mesh_nodes_emit_distinct_draws_per_frame() {
 #[test]
 fn transmission_test_materials_carry_extension_data() {
     let asset = load_asset(asset_path("TransmissionTest.glb")).expect("load TransmissionTest");
-    assert!(!asset.materials.is_empty(), "transmission test ships with materials");
+    assert!(
+        !asset.materials.is_empty(),
+        "transmission test ships with materials"
+    );
 
     let has_transmission = asset
         .materials
         .iter()
         .any(|m| m.transmission.factor > 0.0 || m.transmission.texture.is_some());
-    assert!(has_transmission, "at least one material uses KHR_materials_transmission");
+    assert!(
+        has_transmission,
+        "at least one material uses KHR_materials_transmission"
+    );
 
     // Each material flattens to a 80-byte MaterialBlock; the transmission
     // factor lives in `transmission_volume.x`.
@@ -177,13 +220,15 @@ fn transmission_test_materials_carry_extension_data() {
 
 #[test]
 fn scattering_skull_carries_volume_extension() {
-    let asset = load_asset(asset_path("ScatteringSkull.glb"))
-        .expect("load ScatteringSkull");
+    let asset = load_asset(asset_path("ScatteringSkull.glb")).expect("load ScatteringSkull");
     // ScatteringSkull's `subsurface_material` enables KHR_materials_volume:
     // non-zero thickness, finite attenuation distance, and an IOR override.
     let m = &asset.materials[0];
     assert!(m.volume.thickness_factor > 0.0, "thickness factor enabled");
-    assert!(m.volume.attenuation_distance.is_finite(), "finite attenuation distance");
+    assert!(
+        m.volume.attenuation_distance.is_finite(),
+        "finite attenuation distance"
+    );
     assert!((m.ior - 1.38).abs() < 1e-3, "KHR_materials_ior override");
 }
 
@@ -237,7 +282,9 @@ fn toycar_uploads_to_gpu_and_emits_forward_lit_plans() {
         assert_eq!(p.kind, GraphicsOreKind::ForwardLit);
         assert!(p.mesh.as_ref().unwrap().index_count > 0);
     }
-    unsafe { ctx.device.device_wait_idle().ok(); }
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+    }
 }
 
 // ── 8. Animation evaluator self-check: synthetic ramp, exact values ────────
@@ -260,13 +307,13 @@ fn animation_evaluator_lerps_known_keyframes() {
     pose.sample(&asset, anim, 1.5);
     let three_q = pose.translation[0];
     assert!((three_q[0] - 10.0).abs() < 1e-3);
-    assert!((three_q[1] - 2.5).abs()  < 1e-3, "got y={}", three_q[1]);
+    assert!((three_q[1] - 2.5).abs() < 1e-3, "got y={}", three_q[1]);
 
     // The world matrix for the animated node must carry the sampled translation.
     pose.sample(&asset, anim, 2.0);
     let end_w = pose.world[0];
     assert!((end_w[12] - 10.0).abs() < 1e-3);
-    assert!((end_w[13] - 5.0).abs()  < 1e-3);
+    assert!((end_w[13] - 5.0).abs() < 1e-3);
 
     // The pipeline adapter must see the same world-space draw transform.
     let draws = build_graphics_draws_with_matrices(&asset, &pose.world);
@@ -279,39 +326,58 @@ fn make_translating_box_glb() -> Vec<u8> {
     // animation. The smallest GLB we can hand-encode that exercises the
     // animation channel/sampler readers end-to-end.
     let pos: [[f32; 3]; 8] = [
-        [-0.5, -0.5, -0.5], [ 0.5, -0.5, -0.5],
-        [ 0.5,  0.5, -0.5], [-0.5,  0.5, -0.5],
-        [-0.5, -0.5,  0.5], [ 0.5, -0.5,  0.5],
-        [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5],
+        [-0.5, -0.5, -0.5],
+        [0.5, -0.5, -0.5],
+        [0.5, 0.5, -0.5],
+        [-0.5, 0.5, -0.5],
+        [-0.5, -0.5, 0.5],
+        [0.5, -0.5, 0.5],
+        [0.5, 0.5, 0.5],
+        [-0.5, 0.5, 0.5],
     ];
     let idx: [u32; 36] = [
-        0,1,2, 2,3,0,  4,5,6, 6,7,4,
-        0,1,5, 5,4,0,  2,3,7, 7,6,2,
-        1,2,6, 6,5,1,  0,3,7, 7,4,0,
+        0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4, 0, 1, 5, 5, 4, 0, 2, 3, 7, 7, 6, 2, 1, 2, 6, 6, 5, 1,
+        0, 3, 7, 7, 4, 0,
     ];
 
     let mut bin = Vec::<u8>::new();
-    let pad = |b: &mut Vec<u8>| while b.len() % 4 != 0 { b.push(0); };
+    let pad = |b: &mut Vec<u8>| {
+        while !b.len().is_multiple_of(4) {
+            b.push(0);
+        }
+    };
 
     let pos_off = bin.len();
-    for p in &pos { for v in p { bin.extend_from_slice(&v.to_le_bytes()); } }
+    for p in &pos {
+        for v in p {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+    }
     let pos_len = bin.len() - pos_off;
     pad(&mut bin);
 
     let idx_off = bin.len();
-    for &i in &idx { bin.extend_from_slice(&i.to_le_bytes()); }
+    for &i in &idx {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
     let idx_len = bin.len() - idx_off;
     pad(&mut bin);
 
     let times: [f32; 3] = [0.0, 1.0, 2.0];
     let in_off = bin.len();
-    for t in &times { bin.extend_from_slice(&t.to_le_bytes()); }
+    for t in &times {
+        bin.extend_from_slice(&t.to_le_bytes());
+    }
     let in_len = bin.len() - in_off;
     pad(&mut bin);
 
     let values: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 5.0, 0.0]];
     let out_off = bin.len();
-    for v in &values { for c in v { bin.extend_from_slice(&c.to_le_bytes()); } }
+    for v in &values {
+        for c in v {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
     let out_len = bin.len() - out_off;
     pad(&mut bin);
 
@@ -347,7 +413,9 @@ fn make_translating_box_glb() -> Vec<u8> {
         }}"#
     );
     let mut json_bytes = json.replace(['\n', ' '], "").into_bytes();
-    while json_bytes.len() % 4 != 0 { json_bytes.push(b' '); }
+    while json_bytes.len() % 4 != 0 {
+        json_bytes.push(b' ');
+    }
 
     let total = 12 + 8 + json_bytes.len() + 8 + bin_total;
     let mut glb = Vec::<u8>::with_capacity(total);
@@ -375,9 +443,18 @@ fn toycar_carries_clearcoat_sheen_and_transmission() {
     let asset = load_asset(asset_path("ToyCar.glb")).expect("load ToyCar");
     assert_eq!(asset.materials.len(), 3);
     // ToyCar mat0 = body (clearcoat), mat1 = fabric (sheen), mat2 = glass (transmission)
-    assert!(asset.materials[0].clearcoat.is_some(), "ToyCar body uses clearcoat");
-    assert!(asset.materials[1].sheen.is_some(),    "ToyCar fabric uses sheen");
-    assert!(asset.materials[2].transmission.factor > 0.0, "ToyCar glass uses transmission");
+    assert!(
+        asset.materials[0].clearcoat.is_some(),
+        "ToyCar body uses clearcoat"
+    );
+    assert!(
+        asset.materials[1].sheen.is_some(),
+        "ToyCar fabric uses sheen"
+    );
+    assert!(
+        asset.materials[2].transmission.factor > 0.0,
+        "ToyCar glass uses transmission"
+    );
 
     // Extension block should reflect the ext data.
     let ext = MaterialExtBlock::from_material(&asset.materials[0]);
@@ -394,12 +471,18 @@ fn toycar_carries_clearcoat_sheen_and_transmission() {
 fn scattering_skull_carries_diffuse_transmission_and_dispersion() {
     let asset = load_asset(asset_path("ScatteringSkull.glb")).expect("load ScatteringSkull");
     let m = &asset.materials[0];
-    assert!(m.diffuse_transmission.is_some(), "skull uses diffuse_transmission");
+    assert!(
+        m.diffuse_transmission.is_some(),
+        "skull uses diffuse_transmission"
+    );
     assert!(m.dispersion > 0.0, "skull uses KHR_materials_dispersion");
 
     let ext = MaterialExtBlock::from_material(m);
     assert_eq!(ext.flags2[1], 1, "diffuse_transmission flag set");
-    assert!(ext.anisotropy[2] > 0.0, "dispersion lives in anisotropy.z slot");
+    assert!(
+        ext.anisotropy[2] > 0.0,
+        "dispersion lives in anisotropy.z slot"
+    );
 }
 
 // ── 11. KHR_animation_pointer pre-pass actually loads the file ─────────────
@@ -409,16 +492,20 @@ fn animation_pointer_files_load_and_expose_pointer_channels() {
     let asset = load_asset(asset_path("AnimatedColorsCube.glb"))
         .expect("AnimatedColorsCube must load after KHR_animation_pointer pre-pass");
     let anim = &asset.animations[0];
-    assert!(!anim.pointer_channels.is_empty(),
-        "KHR_animation_pointer channels recorded separately from regular channels");
+    assert!(
+        !anim.pointer_channels.is_empty(),
+        "KHR_animation_pointer channels recorded separately from regular channels"
+    );
     let pc = &anim.pointer_channels[0];
     assert!(pc.pointer.starts_with('/'), "pointer is a JSON path");
 
     let big = load_asset(asset_path("AnimationPointerUVs.glb"))
         .expect("AnimationPointerUVs must load too");
     assert!(!big.animations[0].pointer_channels.is_empty());
-    assert!(big.animations[0].pointer_channels.len() > 50,
-        "AnimationPointerUVs has dozens of pointer channels");
+    assert!(
+        big.animations[0].pointer_channels.len() > 50,
+        "AnimationPointerUVs has dozens of pointer channels"
+    );
 }
 
 // ── 12. MaterialFlattening pipeline now emits ext block in secondary buffer ─
@@ -429,7 +516,7 @@ fn material_flattening_emits_both_base_and_ext_blocks() {
     let up = build_material_input(&asset);
     let n = asset.materials.len();
     assert_eq!(up.element_count, n as u32);
-    assert_eq!(up.primary_bytes.len(),   n * MaterialBlock::BYTES);
+    assert_eq!(up.primary_bytes.len(), n * MaterialBlock::BYTES);
     assert_eq!(up.secondary_bytes.len(), n * MaterialExtBlock::BYTES);
 }
 
@@ -450,16 +537,18 @@ fn material_uniform_from_gltf_packs_flags_correctly() {
         let u = MaterialUniform::from_gltf(m);
         // alphaMode bits 1-2 — Opaque=0, Mask=2, Blend=4.
         let alpha_bits = u.flags & 0x6;
-        assert!(matches!(alpha_bits, 0 | 2 | 4),
-            "alphaMode flag bits must encode one of Opaque/Mask/Blend");
+        assert!(
+            matches!(alpha_bits, 0 | 2 | 4),
+            "alphaMode flag bits must encode one of Opaque/Mask/Blend"
+        );
         // doubleSided bit 0.
         let ds_bit = u.flags & 0x1;
         assert_eq!(ds_bit, m.double_sided as u32);
         // Factors must round-trip exactly.
         assert_eq!(u.base_color_factor, m.pbr.base_color_factor);
-        assert_eq!(u.metallic_factor,   m.pbr.metallic_factor);
-        assert_eq!(u.roughness_factor,  m.pbr.roughness_factor);
-        assert_eq!(u.emissive_factor,   m.emissive_factor);
+        assert_eq!(u.metallic_factor, m.pbr.metallic_factor);
+        assert_eq!(u.roughness_factor, m.pbr.roughness_factor);
+        assert_eq!(u.emissive_factor, m.emissive_factor);
     }
 }
 
@@ -468,31 +557,42 @@ fn material_uniform_from_gltf_packs_flags_correctly() {
 #[test]
 fn gltf_driver_uploads_dummy_white_texture() {
     let Some(ctx) = try_vulkan() else { return };
-    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(&ctx.device)
-        .expect("material set layout");
+    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(
+        &ctx.device,
+    )
+    .expect("material set layout");
     let pool = create_material_pool(&ctx.device, 16).expect("material pool");
-    let instance_layout = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(&ctx.device)
+    let instance_layout =
+        dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(
+            &ctx.device,
+        )
         .expect("instance set layout");
-    let instance_pool = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
-        .expect("instance pool");
+    let instance_pool =
+        dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
+            .expect("instance pool");
     let upload = GltfUploadCtx {
-        device:              &ctx.device,
-        memory_properties:   &ctx.memory_properties,
-        graphics_queue:      ctx.queue,
-        command_pool:        ctx.command_pool,
+        device: &ctx.device,
+        memory_properties: &ctx.memory_properties,
+        graphics_queue: ctx.queue,
+        command_pool: ctx.command_pool,
         material_set_layout: layout,
-        material_pool:       pool,
+        material_pool: pool,
         instance_set_layout: instance_layout,
         instance_pool,
     };
     use ash::vk::Handle;
     let tex = upload_texture_rgba(
-        &upload, 1, 1, &[255, 255, 255, 255], &GltfSampler::default(),
+        &upload,
+        1,
+        1,
+        &[255, 255, 255, 255],
+        &GltfSampler::default(),
         ash::vk::Format::R8G8B8A8_UNORM,
-    ).expect("upload 1x1 white");
+    )
+    .expect("upload 1x1 white");
     assert!(tex.image.handle.as_raw() != 0);
-    assert!(tex.image.view.as_raw()   != 0);
-    assert!(tex.sampler.as_raw()      != 0);
+    assert!(tex.image.view.as_raw() != 0);
+    assert!(tex.sampler.as_raw() != 0);
     // 1×1 input has only one mip level — 1 + floor(log2(1)) == 1.
     assert_eq!(tex.image.mip_levels, 1);
 
@@ -508,29 +608,40 @@ fn gltf_driver_uploads_dummy_white_texture() {
 #[test]
 fn upload_texture_generates_full_mip_chain_on_64x64() {
     let Some(ctx) = try_vulkan() else { return };
-    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(&ctx.device)
-        .expect("material set layout");
+    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(
+        &ctx.device,
+    )
+    .expect("material set layout");
     let pool = create_material_pool(&ctx.device, 4).expect("material pool");
-    let instance_layout = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(&ctx.device)
+    let instance_layout =
+        dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(
+            &ctx.device,
+        )
         .expect("instance set layout");
-    let instance_pool = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
-        .expect("instance pool");
+    let instance_pool =
+        dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
+            .expect("instance pool");
     let upload = GltfUploadCtx {
-        device:              &ctx.device,
-        memory_properties:   &ctx.memory_properties,
-        graphics_queue:      ctx.queue,
-        command_pool:        ctx.command_pool,
+        device: &ctx.device,
+        memory_properties: &ctx.memory_properties,
+        graphics_queue: ctx.queue,
+        command_pool: ctx.command_pool,
         material_set_layout: layout,
-        material_pool:       pool,
+        material_pool: pool,
         instance_set_layout: instance_layout,
         instance_pool,
     };
     // 64×64 RGBA — 64 = 2^6, so we expect 7 mip levels (64, 32, 16, 8, 4, 2, 1).
     let rgba = vec![128u8; 64 * 64 * 4];
     let tex = upload_texture_rgba(
-        &upload, 64, 64, &rgba, &GltfSampler::default(),
+        &upload,
+        64,
+        64,
+        &rgba,
+        &GltfSampler::default(),
         ash::vk::Format::R8G8B8A8_UNORM,
-    ).expect("upload 64x64");
+    )
+    .expect("upload 64x64");
     assert_eq!(tex.image.mip_levels, 7);
 
     unsafe {
@@ -548,21 +659,27 @@ fn gltf_driver_creates_material_descriptor_set_for_toycar() {
     let asset = load_asset(asset_path("ToyCar.glb")).expect("load ToyCar");
     assert!(!asset.materials.is_empty());
 
-    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(&ctx.device)
-        .expect("material set layout");
+    let layout = dumpster_fire_engine::resource_manager::gltf_driver::create_material_set_layout(
+        &ctx.device,
+    )
+    .expect("material set layout");
     // ToyCar has ~5 materials and ~5 textures — 64 sets is plenty.
     let pool = create_material_pool(&ctx.device, 64).expect("material pool");
-    let instance_layout = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(&ctx.device)
+    let instance_layout =
+        dumpster_fire_engine::resource_manager::gltf_driver::create_instance_set_layout(
+            &ctx.device,
+        )
         .expect("instance set layout");
-    let instance_pool = dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
-        .expect("instance pool");
+    let instance_pool =
+        dumpster_fire_engine::resource_manager::gltf_driver::create_instance_pool(&ctx.device, 64)
+            .expect("instance pool");
     let upload = GltfUploadCtx {
-        device:              &ctx.device,
-        memory_properties:   &ctx.memory_properties,
-        graphics_queue:      ctx.queue,
-        command_pool:        ctx.command_pool,
+        device: &ctx.device,
+        memory_properties: &ctx.memory_properties,
+        graphics_queue: ctx.queue,
+        command_pool: ctx.command_pool,
         material_set_layout: layout,
-        material_pool:       pool,
+        material_pool: pool,
         instance_set_layout: instance_layout,
         instance_pool,
     };
@@ -570,21 +687,41 @@ fn gltf_driver_creates_material_descriptor_set_for_toycar() {
 
     // Upload every image (skip on error so the test still runs against
     // partial assets).
-    let img_handles: Vec<Option<_>> = asset.images.iter().map(|img| {
-        let fmt = match img.format {
-            forge_gltf::ImageFormatHint::Srgb   => ash::vk::Format::R8G8B8A8_SRGB,
-            forge_gltf::ImageFormatHint::Linear => ash::vk::Format::R8G8B8A8_UNORM,
-        };
-        upload_texture_rgba(&upload, img.width, img.height, &img.rgba, &GltfSampler::default(), fmt)
-            .ok().map(|t| cache.textures.insert(t))
-    }).collect();
+    let img_handles: Vec<Option<_>> = asset
+        .images
+        .iter()
+        .map(|img| {
+            let fmt = match img.format {
+                forge_gltf::ImageFormatHint::Srgb => ash::vk::Format::R8G8B8A8_SRGB,
+                forge_gltf::ImageFormatHint::Linear => ash::vk::Format::R8G8B8A8_UNORM,
+            };
+            upload_texture_rgba(
+                &upload,
+                img.width,
+                img.height,
+                &img.rgba,
+                &GltfSampler::default(),
+                fmt,
+            )
+            .ok()
+            .map(|t| cache.textures.insert(t))
+        })
+        .collect();
 
     // Create one descriptor set per material.
     use ash::vk::Handle;
-    let mat = create_material(&asset.materials[0], &asset, &img_handles, &upload, &mut cache)
-        .expect("create material");
-    assert!(mat.descriptor_set.as_raw() != 0,
-        "material's descriptor set must be a real Vulkan handle");
+    let mat = create_material(
+        &asset.materials[0],
+        &asset,
+        &img_handles,
+        &upload,
+        &mut cache,
+    )
+    .expect("create material");
+    assert!(
+        mat.descriptor_set.as_raw() != 0,
+        "material's descriptor set must be a real Vulkan handle"
+    );
     assert_eq!(mat.textures.len(), TEXTURE_SLOT_COUNT);
     let _h = cache.materials.insert(mat);
 
@@ -617,7 +754,8 @@ fn brainstem_skin_palette_dispatches_and_produces_finite_ingot() {
         ctx.queue,
         ctx.command_pool,
         ctx.memory_properties,
-    ).expect("ForgeMaster");
+    )
+    .expect("ForgeMaster");
     register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
 
     let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(101), 0)
@@ -627,13 +765,17 @@ fn brainstem_skin_palette_dispatches_and_produces_finite_ingot() {
 
     // Every plan must have produced at least one Ingot.
     let total_ingots: usize = factory.frames().map(|f| f.ingots.len()).sum();
-    assert!(total_ingots >= asset.skins.len(),
-        "every skin should produce a palette ingot");
+    assert!(
+        total_ingots >= asset.skins.len(),
+        "every skin should produce a palette ingot"
+    );
     // Palette ingot output must be at least joint_count × 64 bytes.
     for frame in factory.frames() {
         for ing in &frame.ingots {
-            assert!(ing.as_bytes().len() >= 64,
-                "palette ingot must hold at least one mat4 worth of bytes");
+            assert!(
+                ing.as_bytes().len() >= 64,
+                "palette ingot must hold at least one mat4 worth of bytes"
+            );
         }
     }
     unsafe {
@@ -654,16 +796,21 @@ fn diffuse_transmission_plant_morph_blend_dispatches_finite_ingot() {
     }
 
     // Skip cleanly when the asset doesn't actually carry morph targets.
-    let any_morph = asset.meshes.iter()
+    let any_morph = asset
+        .meshes
+        .iter()
         .any(|m| m.primitives.iter().any(|p| !p.morph_targets.is_empty()));
-    if !any_morph { return; }
+    if !any_morph {
+        return;
+    }
 
     let mut forge = ForgeMaster::new(
         ctx.device.clone(),
         ctx.queue,
         ctx.command_pool,
         ctx.memory_properties,
-    ).expect("ForgeMaster");
+    )
+    .expect("ForgeMaster");
     register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
 
     let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(102), 0)
@@ -673,7 +820,10 @@ fn diffuse_transmission_plant_morph_blend_dispatches_finite_ingot() {
 
     // At least one ingot for the morphed primitive.
     let total_ingots: usize = factory.frames().map(|f| f.ingots.len()).sum();
-    assert!(total_ingots >= 1, "morphed primitive must produce a posed vertex ingot");
+    assert!(
+        total_ingots >= 1,
+        "morphed primitive must produce a posed vertex ingot"
+    );
     unsafe {
         ctx.device.device_wait_idle().ok();
         let mut factory = factory;
@@ -695,11 +845,15 @@ fn diffuse_transmission_plant_morph_blend_dispatches_finite_ingot() {
 fn brainstem_skin_palette_matches_cpu_reference_at_rest() {
     let Some(ctx) = try_vulkan() else { return };
     let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
-    let pose  = forge_gltf::Pose::rest(&asset);
+    let pose = forge_gltf::Pose::rest(&asset);
 
     let mut forge = ForgeMaster::new(
-        ctx.device.clone(), ctx.queue, ctx.command_pool, ctx.memory_properties,
-    ).expect("ForgeMaster");
+        ctx.device.clone(),
+        ctx.queue,
+        ctx.command_pool,
+        ctx.memory_properties,
+    )
+    .expect("ForgeMaster");
     register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
 
     let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(120), 0)
@@ -712,8 +866,11 @@ fn brainstem_skin_palette_matches_cpu_reference_at_rest() {
     let bytes = ingot.as_bytes();
     assert_eq!(bytes.len() % 64, 0, "ingot must be whole number of mat4s");
     let n_joints = asset.skins[0].joints.len();
-    assert!(bytes.len() / 64 >= n_joints,
-        "ingot has {} mat4s, expected ≥ {n_joints}", bytes.len() / 64);
+    assert!(
+        bytes.len() / 64 >= n_joints,
+        "ingot has {} mat4s, expected ≥ {n_joints}",
+        bytes.len() / 64
+    );
 
     let cpu = pose.skin_palette(&asset, 0);
     assert_eq!(cpu.len(), n_joints);
@@ -721,15 +878,18 @@ fn brainstem_skin_palette_matches_cpu_reference_at_rest() {
     for j in 0..n_joints {
         let base = j * 64;
         let mut gpu = [0f32; 16];
-        for k in 0..16 {
+        for (k, slot) in gpu.iter_mut().enumerate() {
             let off = base + k * 4;
-            gpu[k] = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+            *slot = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
         }
         let ref_mat = cpu[j];
-        let max_err = (0..16).map(|k| (gpu[k] - ref_mat[k]).abs())
+        let max_err = (0..16)
+            .map(|k| (gpu[k] - ref_mat[k]).abs())
             .fold(0f32, f32::max);
-        assert!(max_err < 1e-3,
-            "joint {j} GPU palette differs from CPU: max_err={max_err}\n  gpu={gpu:?}\n  cpu={ref_mat:?}");
+        assert!(
+            max_err < 1e-3,
+            "joint {j} GPU palette differs from CPU: max_err={max_err}\n  gpu={gpu:?}\n  cpu={ref_mat:?}"
+        );
     }
 
     unsafe {
@@ -744,14 +904,15 @@ fn brainstem_skin_palette_buffer_is_bindable_as_storage_buffer() {
     use ash::vk::Handle;
     let Some(ctx) = try_vulkan() else { return };
     let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
-    let pose  = forge_gltf::Pose::rest(&asset);
+    let pose = forge_gltf::Pose::rest(&asset);
 
     let mut forge = ForgeMaster::new(
         ctx.device.clone(),
         ctx.queue,
         ctx.command_pool,
         ctx.memory_properties,
-    ).expect("ForgeMaster");
+    )
+    .expect("ForgeMaster");
     register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
 
     let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(104), 0)
@@ -760,12 +921,16 @@ fn brainstem_skin_palette_buffer_is_bindable_as_storage_buffer() {
         .expect("compute dispatch");
 
     let palette_buffers = collect_skin_palette_buffers(&asset, &factory);
-    assert!(!palette_buffers.is_empty(),
-        "at least one skin palette buffer must be harvested");
+    assert!(
+        !palette_buffers.is_empty(),
+        "at least one skin palette buffer must be harvested"
+    );
 
     for (skin_idx, buf) in &palette_buffers {
-        assert!(buf.as_raw() != 0,
-            "skin palette buffer for skin {skin_idx} must be a real Vulkan handle");
+        assert!(
+            buf.as_raw() != 0,
+            "skin palette buffer for skin {skin_idx} must be a real Vulkan handle"
+        );
     }
 
     unsafe {
@@ -782,7 +947,10 @@ fn brainstem_skin_vertex_attrs_pack_correctly() {
     assert!(primitive_is_skinned(&asset, 0, 0));
     let bytes = pack_primitive_skin_attrs(&asset, 0, 0);
     // 24 bytes per vertex; non-empty for a skinned primitive.
-    assert!(!bytes.is_empty(), "skin attrs must produce bytes for skinned primitive");
+    assert!(
+        !bytes.is_empty(),
+        "skin attrs must produce bytes for skinned primitive"
+    );
     assert_eq!(bytes.len() % 24, 0, "stride must be 24 bytes per vertex");
 
     let n_verts = bytes.len() / 24;
@@ -795,7 +963,10 @@ fn brainstem_skin_vertex_attrs_pack_correctly() {
     let w2 = f32::from_le_bytes(bytes[16..20].try_into().unwrap());
     let w3 = f32::from_le_bytes(bytes[20..24].try_into().unwrap());
     let sum = w0 + w1 + w2 + w3;
-    assert!((sum - 1.0).abs() < 1e-3, "weights sum should be ~1.0, got {sum}");
+    assert!(
+        (sum - 1.0).abs() < 1e-3,
+        "weights sum should be ~1.0, got {sum}"
+    );
 }
 
 #[test]
@@ -803,7 +974,10 @@ fn unskinned_box_skin_attrs_are_empty() {
     let asset = load_asset(asset_path("Box.glb")).expect("load Box");
     assert!(!primitive_is_skinned(&asset, 0, 0));
     let bytes = pack_primitive_skin_attrs(&asset, 0, 0);
-    assert!(bytes.is_empty(), "unskinned primitive must produce zero skin bytes");
+    assert!(
+        bytes.is_empty(),
+        "unskinned primitive must produce zero skin bytes"
+    );
 }
 
 // ── 16b. Full GPU loop closure — compute output feeds graphics override ───
@@ -814,19 +988,24 @@ fn morph_compute_output_buffer_is_bindable_as_vertex_source() {
     let Some(ctx) = try_vulkan() else { return };
     let asset = load_asset(asset_path("DiffuseTransmissionPlant.glb"))
         .expect("load DiffuseTransmissionPlant");
-    let pose  = forge_gltf::Pose::rest(&asset);
+    let pose = forge_gltf::Pose::rest(&asset);
 
     // Skip when the asset has no morph targets.
-    let any_morph = asset.meshes.iter()
+    let any_morph = asset
+        .meshes
+        .iter()
         .any(|m| m.primitives.iter().any(|p| !p.morph_targets.is_empty()));
-    if !any_morph { return; }
+    if !any_morph {
+        return;
+    }
 
     let mut forge = ForgeMaster::new(
         ctx.device.clone(),
         ctx.queue,
         ctx.command_pool,
         ctx.memory_properties,
-    ).expect("ForgeMaster");
+    )
+    .expect("ForgeMaster");
     register_skin_morph_forges(&mut forge).expect("register skin/morph forges");
 
     let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(103), 0)
@@ -836,13 +1015,18 @@ fn morph_compute_output_buffer_is_bindable_as_vertex_source() {
 
     use dumpster_fire_engine::resource_manager::asset_manager::collect_morph_output_buffers;
     let morph_buffers = collect_morph_output_buffers(&asset, &factory);
-    assert!(!morph_buffers.is_empty(),
-        "at least one morph-blended primitive must produce a vertex buffer");
+    assert!(
+        !morph_buffers.is_empty(),
+        "at least one morph-blended primitive must produce a vertex buffer"
+    );
 
     // Every harvested buffer handle must be a real (non-null) Vulkan handle.
     use ash::vk::Handle;
-    for (key, buf) in &morph_buffers {
-        assert!(buf.as_raw() != 0, "morph output for {key:?} must be a real buffer");
+    for (mesh_idx, prim_idx, buf) in &morph_buffers {
+        assert!(
+            buf.as_raw() != 0,
+            "morph output for ({mesh_idx}, {prim_idx}) must be a real buffer"
+        );
     }
 
     // Sanity: the harvested buffer is the same one the Ingot owns —
@@ -862,7 +1046,7 @@ fn morph_compute_output_buffer_is_bindable_as_vertex_source() {
 #[test]
 fn skin_morph_proto_produces_one_plan_per_skin_for_brainstem() {
     let asset = load_asset(asset_path("BrainStem.glb")).expect("load BrainStem");
-    let pose  = forge_gltf::Pose::rest(&asset);
+    let pose = forge_gltf::Pose::rest(&asset);
     let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(99), 0)
         .expect("BrainStem is skinned — proto must be Some");
     // BrainStem has exactly 1 skin and no morph targets.
@@ -873,10 +1057,12 @@ fn skin_morph_proto_produces_one_plan_per_skin_for_brainstem() {
 #[test]
 fn skin_morph_proto_is_none_for_unskinned_unmorphed_asset() {
     let asset = load_asset(asset_path("Box.glb")).expect("load Box");
-    let pose  = forge_gltf::Pose::rest(&asset);
+    let pose = forge_gltf::Pose::rest(&asset);
     let proto = build_skin_morph_proto(&asset, &pose, ProtoId::new(99), 0);
-    assert!(proto.is_none(),
-        "Box has no skins and no morph targets — nothing to dispatch");
+    assert!(
+        proto.is_none(),
+        "Box has no skins and no morph targets — nothing to dispatch"
+    );
 }
 
 #[test]
@@ -893,18 +1079,22 @@ fn build_graphics_plans_attaches_material_sets() {
     let sets: Vec<Option<ash::vk::DescriptorSet>> =
         (0..asset.materials.len()).map(|_| Some(fake)).collect();
 
-    let plans = build_graphics_plans_with_pose_and_materials(
-        &asset, &pose, &upload_ctx, &sets,
-    ).expect("build plans with materials");
+    let plans = build_graphics_plans_with_pose_and_materials(&asset, &pose, &upload_ctx, &sets)
+        .expect("build plans with materials");
     assert!(!plans.is_empty(), "ToyCar has draws");
 
     // Every draw whose primitive carried a material index must have a set.
     let with_material = plans.iter().filter(|p| p.material_set.is_some()).count();
-    assert!(with_material > 0, "at least one draw must carry the fake material set");
+    assert!(
+        with_material > 0,
+        "at least one draw must carry the fake material set"
+    );
     for p in &plans {
         if let Some(s) = p.material_set {
             assert_eq!(s.as_raw(), 0xDEADBEEFu64);
         }
     }
-    unsafe { ctx.device.device_wait_idle().ok(); }
+    unsafe {
+        ctx.device.device_wait_idle().ok();
+    }
 }

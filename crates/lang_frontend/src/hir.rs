@@ -1,62 +1,76 @@
 //! HIR — flat, fully-resolved program representation. `ThinVec` + `Arc<str>` only.
 
+use crate::ast::{BinOp, CmpOp, Ty};
 use std::sync::Arc;
 use thin_vec::ThinVec;
-use crate::ast::{BinOp, CmpOp, Ty};
 
 pub struct HirScript {
-    pub name:          Arc<str>,
-    pub state_size:    u32,
-    pub state_align:   u32,
+    pub name: Arc<str>,
+    pub state_size: u32,
+    pub state_align: u32,
     pub state_version: u32,
-    pub fields:        ThinVec<HirField>,
-    pub migrations:    ThinVec<HirMigration>,
-    pub scenes:        ThinVec<HirScene>,
+    pub fields: ThinVec<HirField>,
+    pub migrations: ThinVec<HirMigration>,
+    pub scenes: ThinVec<HirScene>,
     /// Raw `SceneId` of the entry scene (FNV-1a of `name::entry_scene_name`).
-    pub entry_raw_id:  i64,
+    pub entry_raw_id: i64,
 }
 
 pub struct HirField {
-    pub name:    Arc<str>,
-    pub ty:      Ty,
-    pub offset:  u32,
+    pub name: Arc<str>,
+    pub ty: Ty,
+    pub offset: u32,
     pub default: Option<HirExpr>,
 }
 
 pub struct HirMigration {
     pub from_version: u32,
-    pub stmts:        ThinVec<HirAssign>,
+    pub stmts: ThinVec<HirAssign>,
 }
 
 pub struct HirAssign {
     pub new_offset: u32,
-    pub ty:         Ty,
-    pub value:      HirExpr,
+    pub ty: Ty,
+    pub value: HirExpr,
 }
 
 pub struct HirScene {
-    pub name:        Arc<str>,
-    pub raw_id:      i64,
-    pub on_enter:    ThinVec<HirEffect>,
-    pub on_exit:     ThinVec<HirEffect>,
+    pub name: Arc<str>,
+    pub raw_id: i64,
+    pub on_enter: ThinVec<HirEffect>,
+    pub on_exit: ThinVec<HirEffect>,
     pub transitions: ThinVec<HirTransition>,
-    pub behavior:    Option<HirBtNode>,
+    pub behavior: Option<HirBtNode>,
 }
 
 pub struct HirTransition {
     pub target_raw_id: i64,
-    pub condition:     HirCondition,
+    pub condition: HirCondition,
 }
 
 pub enum HirBtNode {
     Sequence(ThinVec<HirBtNode>),
     Selector(ThinVec<HirBtNode>),
     Parallel(ThinVec<HirBtNode>),
-    Repeat   { count: u32, child: Box<HirBtNode> },
-    Inverter { child: Box<HirBtNode> },
-    Guard    { cond: HirCondition, child: Box<HirBtNode> },
-    Cooldown { duration: f32, child: Box<HirBtNode> },
-    Leaf     { condition: Option<HirCondition>, action: Option<HirEffect> },
+    Repeat {
+        count: u32,
+        child: Box<HirBtNode>,
+    },
+    Inverter {
+        child: Box<HirBtNode>,
+    },
+    Guard {
+        cond: HirCondition,
+        child: Box<HirBtNode>,
+    },
+    Cooldown {
+        duration: f32,
+        child: Box<HirBtNode>,
+    },
+    Leaf {
+        condition: Option<HirCondition>,
+        action: Option<HirEffect>,
+    },
 }
 
 pub enum HirCondition {
@@ -65,7 +79,7 @@ pub enum HirCondition {
     /// when unknown (diagnostic emitted at sema time).
     Intrinsic(IntrinsicPredicate, ThinVec<HirExpr>),
     And(Box<HirCondition>, Box<HirCondition>),
-    Or (Box<HirCondition>, Box<HirCondition>),
+    Or(Box<HirCondition>, Box<HirCondition>),
     Not(Box<HirCondition>),
     Cmp(Box<HirExpr>, CmpOp, Box<HirExpr>),
     Bool(bool),
@@ -85,9 +99,15 @@ pub enum HirExpr {
     Float(f64),
     Bool(bool),
     /// State-field read.  `offset` + `ty` baked at compile time.
-    StateLoad { offset: u32, ty: Ty },
+    StateLoad {
+        offset: u32,
+        ty: Ty,
+    },
     /// `old.<offset>` read inside a migration block.
-    OldStateLoad { offset: u32, ty: Ty },
+    OldStateLoad {
+        offset: u32,
+        ty: Ty,
+    },
     Neg(Box<HirExpr>),
     Bin(Box<HirExpr>, BinOp, Box<HirExpr>),
     /// Intrinsic that returns a numeric value.

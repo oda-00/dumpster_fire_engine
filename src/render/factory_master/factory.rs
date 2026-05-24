@@ -2,7 +2,7 @@ use std::sync::Arc;
 use thin_vec::ThinVec;
 
 use crate::forge_master::{
-    Frame, FrameHandle, FrameId, FrameTag, ForgeMaster, ForgeResult, GraphicsFrame,
+    ForgeMaster, ForgeResult, Frame, FrameHandle, FrameId, FrameTag, GraphicsFrame,
 };
 use crate::resource_manager::manager::{Arena, Handle, Id};
 
@@ -89,7 +89,11 @@ impl Factory {
 
         // Capture each plan's (id, name) + ore count so we can rebuild
         // the per-frame ingot lists from the flat batched-output vector.
-        let mut plan_headers: Vec<(super::super::super::forge_master::frame::FrameId, std::sync::Arc<str>, usize)> = Vec::with_capacity(proto.plans.len());
+        let mut plan_headers: Vec<(
+            super::super::super::forge_master::frame::FrameId,
+            std::sync::Arc<str>,
+            usize,
+        )> = Vec::with_capacity(proto.plans.len());
         let mut all_ores: Vec<super::super::super::forge_master::ore::Ore> = Vec::new();
         for plan in proto.plans {
             let (fid, fname, ores) = plan.into_ores();
@@ -188,6 +192,9 @@ impl Factory {
         Some(frame)
     }
 
+    /// # Safety
+    /// `device` must be the device used to create all frames and GPU work must
+    /// have completed before this is called.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         for frame in self.frames.values_mut() {
             unsafe { frame.destroy(device) };
@@ -197,10 +204,10 @@ impl Factory {
         // is the primary owner; Arc::try_unwrap succeeds unless someone leaked
         // a clone (in which case the Vulkan memory leaks — document this).
         for mut call in self.graphics_calls.drain(..) {
-            if let Some(arc) = call.mesh.take() {
-                if let Ok(mut mesh) = Arc::try_unwrap(arc) {
-                    unsafe { mesh.destroy(device) };
-                }
+            if let Some(arc) = call.mesh.take()
+                && let Ok(mut mesh) = Arc::try_unwrap(arc)
+            {
+                unsafe { mesh.destroy(device) };
             }
         }
     }

@@ -16,9 +16,9 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
-use rustix::event::{eventfd, EventfdFlags, PollFd, PollFlags};
+use rustix::event::{EventfdFlags, PollFd, PollFlags, eventfd};
 use rustix::fs::inotify;
 use rustix::io;
 use thin_vec::ThinVec;
@@ -37,12 +37,12 @@ pub enum WatchCmd {
 
 /// Owned by the daemon's main thread. Drop sends `Shutdown`.
 pub struct WatchHandle {
-    pub cmd_tx:  Sender<WatchCmd>,
+    pub cmd_tx: Sender<WatchCmd>,
     pub wake_fd: OwnedFd,
 }
 
 impl WatchHandle {
-    pub fn watch(&self, p: Arc<str>)   -> Result<(), std::io::Error> {
+    pub fn watch(&self, p: Arc<str>) -> Result<(), std::io::Error> {
         self.send(WatchCmd::Watch(p))
     }
     pub fn unwatch(&self, p: Arc<str>) -> Result<(), std::io::Error> {
@@ -50,7 +50,8 @@ impl WatchHandle {
     }
 
     fn send(&self, cmd: WatchCmd) -> Result<(), std::io::Error> {
-        self.cmd_tx.send(cmd)
+        self.cmd_tx
+            .send(cmd)
             .map_err(|_| std::io::Error::other("watcher thread gone"))?;
         kick(self.wake_fd.as_fd())
     }
@@ -70,24 +71,30 @@ pub fn spawn() -> Result<(WatchHandle, Receiver<WatchEvent>), std::io::Error> {
     // Two fds we need: the inotify fd (owned by the worker) and an eventfd
     // (one copy in the worker's poll set, one copy in the handle for kicks).
     let watcher = Watcher::new()?;
-    let wake_a  = eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?;
-    let wake_b  = dup_fd(wake_a.as_fd())?;
+    let wake_a = eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?;
+    let wake_b = dup_fd(wake_a.as_fd())?;
 
     let (cmd_tx, cmd_rx) = channel::<WatchCmd>();
     let (event_tx, event_rx) = channel::<WatchEvent>();
 
     std::thread::spawn(move || worker(watcher, wake_a, cmd_rx, event_tx));
 
-    Ok((WatchHandle { cmd_tx, wake_fd: wake_b }, event_rx))
+    Ok((
+        WatchHandle {
+            cmd_tx,
+            wake_fd: wake_b,
+        },
+        event_rx,
+    ))
 }
 
 // ── Worker ────────────────────────────────────────────────────────────────────
 
 fn worker(
     mut watcher: Watcher,
-    wake_fd:     OwnedFd,
-    cmd_rx:      Receiver<WatchCmd>,
-    event_tx:    Sender<WatchEvent>,
+    wake_fd: OwnedFd,
+    cmd_rx: Receiver<WatchCmd>,
+    event_tx: Sender<WatchEvent>,
 ) {
     let mut pending_events: ThinVec<WatchEvent> = ThinVec::new();
 
@@ -98,27 +105,38 @@ fn worker(
         let mut shutdown = false;
         loop {
             match cmd_rx.try_recv() {
-                Ok(WatchCmd::Watch(p))   => { let _ = watcher.watch(p); }
-                Ok(WatchCmd::Unwatch(p)) => { watcher.unwatch(p.as_ref()); }
-                Ok(WatchCmd::Shutdown)   => { shutdown = true; break; }
+                Ok(WatchCmd::Watch(p)) => {
+                    let _ = watcher.watch(p);
+                }
+                Ok(WatchCmd::Unwatch(p)) => {
+                    watcher.unwatch(p.as_ref());
+                }
+                Ok(WatchCmd::Shutdown) => {
+                    shutdown = true;
+                    break;
+                }
                 Err(_) => break,
             }
         }
-        if shutdown { return; }
+        if shutdown {
+            return;
+        }
         drain_eventfd(wake_fd.as_fd());
 
         // 2. Read any inotify events that are already queued (non-blocking).
         pending_events.clear();
         let _ = watcher.read_events(&mut pending_events);
         for ev in pending_events.drain(..) {
-            if event_tx.send(ev).is_err() { return; }
+            if event_tx.send(ev).is_err() {
+                return;
+            }
         }
 
         // 3. Park on poll() until inotify or wake_fd has something.
         //    Negative timeout = block indefinitely.
         let mut pollfds = [
             PollFd::new(&watcher.fd, PollFlags::IN),
-            PollFd::new(&wake_fd,    PollFlags::IN),
+            PollFd::new(&wake_fd, PollFlags::IN),
         ];
         match rustix::event::poll(&mut pollfds, -1) {
             Ok(_) | Err(io::Errno::INTR) => {}
@@ -152,12 +170,12 @@ fn dup_fd(fd: BorrowedFd<'_>) -> std::io::Result<OwnedFd> {
 // ── Watcher (single-owner; lives in the worker thread) ────────────────────────
 
 struct Watcher {
-    fd:      OwnedFd,
+    fd: OwnedFd,
     /// Sorted ascending by `wd`; binary-search lookup on inotify-event decode.
-    wds:     ThinVec<(i32, Arc<str>)>,
+    wds: ThinVec<(i32, Arc<str>)>,
     /// Sorted ascending by path; binary-search lookup on watch / unwatch.
     by_path: ThinVec<(Arc<str>, i32)>,
-    buf:     Box<[MaybeUninit<u8>; 8192]>,
+    buf: Box<[MaybeUninit<u8>; 8192]>,
 }
 
 impl Watcher {
@@ -165,44 +183,51 @@ impl Watcher {
         let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)?;
         Ok(Watcher {
             fd,
-            wds:     ThinVec::new(),
+            wds: ThinVec::new(),
             by_path: ThinVec::new(),
-            buf:     Box::new([MaybeUninit::uninit(); 8192]),
+            buf: Box::new([MaybeUninit::uninit(); 8192]),
         })
     }
 
     fn lookup_by_path(&self, p: &str) -> Option<i32> {
         let i = self.by_path.partition_point(|(k, _)| k.as_ref() < p);
-        self.by_path.get(i)
+        self.by_path
+            .get(i)
             .filter(|(k, _)| k.as_ref() == p)
             .map(|(_, wd)| *wd)
     }
 
     fn lookup_by_wd(&self, wd: i32) -> Option<&Arc<str>> {
         let i = self.wds.partition_point(|(k, _)| *k < wd);
-        self.wds.get(i)
-            .filter(|(k, _)| *k == wd)
-            .map(|(_, p)| p)
+        self.wds.get(i).filter(|(k, _)| *k == wd).map(|(_, p)| p)
     }
 
     fn watch(&mut self, path: Arc<str>) -> std::io::Result<()> {
-        if self.lookup_by_path(path.as_ref()).is_some() { return Ok(()); }
+        if self.lookup_by_path(path.as_ref()).is_some() {
+            return Ok(());
+        }
         let flags = inotify::WatchFlags::CLOSE_WRITE
-                  | inotify::WatchFlags::MOVED_TO
-                  | inotify::WatchFlags::MODIFY;
+            | inotify::WatchFlags::MOVED_TO
+            | inotify::WatchFlags::MODIFY;
         let wd = inotify::add_watch(self.fd.as_fd(), Path::new(path.as_ref()), flags)? as i32;
 
         let pp = self.wds.partition_point(|(k, _)| *k < wd);
         self.wds.insert(pp, (wd, path.clone()));
-        let qp = self.by_path.partition_point(|(k, _)| k.as_ref() < path.as_ref());
+        let qp = self
+            .by_path
+            .partition_point(|(k, _)| k.as_ref() < path.as_ref());
         self.by_path.insert(qp, (path, wd));
         Ok(())
     }
 
     fn unwatch(&mut self, path: &str) {
         let qp = self.by_path.partition_point(|(k, _)| k.as_ref() < path);
-        let Some(entry) = self.by_path.get(qp) else { return };
-        if entry.0.as_ref() != path { return; }
+        let Some(entry) = self.by_path.get(qp) else {
+            return;
+        };
+        if entry.0.as_ref() != path {
+            return;
+        }
         let wd = entry.1;
         self.by_path.remove(qp);
         let _ = inotify::remove_watch(self.fd.as_fd(), wd);
@@ -223,9 +248,11 @@ impl Watcher {
                 match reader.next() {
                     Ok(ev) => wd_buf.push(ev.wd()),
                     Err(io::Errno::AGAIN) => break,
-                    Err(io::Errno::INTR)  => continue,
+                    Err(io::Errno::INTR) => continue,
                     Err(_) => {
-                        if !wd_buf.is_empty() { break; }
+                        if !wd_buf.is_empty() {
+                            break;
+                        }
                         return Ok(0);
                     }
                 }
@@ -245,5 +272,7 @@ impl Watcher {
 // AsRawFd implementation kept for future debugging hooks; not used directly.
 impl Watcher {
     #[allow(dead_code)]
-    fn raw_fd(&self) -> i32 { self.fd.as_raw_fd() }
+    fn raw_fd(&self) -> i32 {
+        self.fd.as_raw_fd()
+    }
 }

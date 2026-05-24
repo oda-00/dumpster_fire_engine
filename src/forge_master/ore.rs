@@ -1,5 +1,4 @@
 use ash::vk;
-use std::mem::size_of;
 use std::path::PathBuf;
 use thin_vec::ThinVec;
 
@@ -32,9 +31,9 @@ pub enum GraphicsOreKind {
     GaussianSplat,
     /// Procedural wire grid + world-axis emphasis + per-pane ortho overlays
     /// + light/camera gizmos. Geometry is generated in the vertex shader
-    /// from `gl_VertexIndex` — zero vertex bindings, one `cmd_draw` per
-    /// pane in the overlay pass. See `assets/shaders/debug_lines.vert.glsl`
-    /// and the `DebugLinesPush` host-side struct in `render::debug_lines`.
+    ///   from `gl_VertexIndex` — zero vertex bindings, one `cmd_draw` per
+    ///   pane in the overlay pass. See `assets/shaders/debug_lines.vert.glsl`
+    ///   and the `DebugLinesPush` host-side struct in `render::debug_lines`.
     DebugLines,
     /// Full-screen HDR→sRGB tonemap (Linear / Reinhard / ACES). Runs in
     /// its own pass between the scene pass and the overlay pass; reads the
@@ -166,21 +165,21 @@ impl OreKind {
     /// `0..COMPUTE_COUNT`; graphics sub-kinds extend the range past that.
     pub const fn index(self) -> usize {
         match self {
-            OreKind::RayTrace            => 0,
-            OreKind::Denoise             => 1,
+            OreKind::RayTrace => 0,
+            OreKind::Denoise => 1,
             OreKind::SignedDistanceField => 2,
-            OreKind::SdfVoxelization     => 3,
-            OreKind::LightClustering     => 4,
-            OreKind::OcclusionCulling    => 5,
-            OreKind::MaterialFlattening  => 6,
-            OreKind::AmbientOcclusion    => 7,
-            OreKind::VisibilityPass      => 8,
-            OreKind::SkinPalette         => 9,
-            OreKind::MorphBlend          => 10,
-            OreKind::SplatSort           => 11,
-            OreKind::SplatBillboard      => 12,
-            OreKind::InstanceTransforms  => 13,
-            OreKind::Graphics(g)         => Self::COMPUTE_COUNT + g.index(),
+            OreKind::SdfVoxelization => 3,
+            OreKind::LightClustering => 4,
+            OreKind::OcclusionCulling => 5,
+            OreKind::MaterialFlattening => 6,
+            OreKind::AmbientOcclusion => 7,
+            OreKind::VisibilityPass => 8,
+            OreKind::SkinPalette => 9,
+            OreKind::MorphBlend => 10,
+            OreKind::SplatSort => 11,
+            OreKind::SplatBillboard => 12,
+            OreKind::InstanceTransforms => 13,
+            OreKind::Graphics(g) => Self::COMPUTE_COUNT + g.index(),
         }
     }
 
@@ -263,7 +262,10 @@ pub enum OreInput {
     /// neither an index list nor mesh-shaped (e.g. SkinPalette: primary =
     /// joint world matrices, secondary = inverse-bind matrices; both are
     /// `mat4[]` SSBOs, neither matches the `MeshOre` shape).
-    DualBytes { primary: ThinVec<u8>, secondary: ThinVec<u8> },
+    DualBytes {
+        primary: ThinVec<u8>,
+        secondary: ThinVec<u8>,
+    },
     Empty,
 }
 
@@ -391,6 +393,9 @@ pub struct StagedOre {
 }
 
 impl StagedOre {
+    /// # Safety
+    /// `command_buffer` must be in the recording state. The staging buffer must
+    /// remain valid until the submitted command buffer has finished executing.
     pub unsafe fn record_upload(&self, device: &ash::Device, command_buffer: vk::CommandBuffer) {
         let copies = [vk::BufferCopy::default()
             .src_offset(0)
@@ -422,13 +427,15 @@ impl StagedOre {
             storage_buffer_upload_barrier(self.primary.handle, self.primary.size),
             storage_buffer_upload_barrier(self.secondary.handle, self.secondary.size),
         ];
-        let dep_info = vk::DependencyInfo::default()
-            .buffer_memory_barriers(&barriers);
+        let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&barriers);
         unsafe {
             device.cmd_pipeline_barrier2(command_buffer, &dep_info);
         }
     }
 
+    /// # Safety
+    /// `device` must be the device used to create this staged ore and all GPU
+    /// work using its buffers must have completed.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         unsafe {
             self.primary_staging.destroy(device);
@@ -468,8 +475,8 @@ impl ForgeBuffer {
         // DEVICE_ADDRESS when allocating its memory (Vulkan spec
         // VUID-vkGetBufferDeviceAddress-bufferDeviceAddress-03324).
         let needs_addr = usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
-        let mut flags_info = vk::MemoryAllocateFlagsInfo::default()
-            .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        let mut flags_info =
+            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
         let mut alloc = vk::MemoryAllocateInfo::default()
             .allocation_size(req.size)
             .memory_type_index(memory_type_index);
@@ -504,7 +511,11 @@ impl ForgeBuffer {
         Ok(())
     }
 
-    pub fn read_bytes(&self, device: &ash::Device, len: vk::DeviceSize) -> ForgeResult<ThinVec<u8>> {
+    pub fn read_bytes(
+        &self,
+        device: &ash::Device,
+        len: vk::DeviceSize,
+    ) -> ForgeResult<ThinVec<u8>> {
         let len = len.min(self.size) as usize;
         if len == 0 {
             return Ok(ThinVec::new());
@@ -524,6 +535,9 @@ impl ForgeBuffer {
         Ok(bytes)
     }
 
+    /// # Safety
+    /// `device` must be the device that created this buffer and all GPU work
+    /// using it must have completed before this is called.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         unsafe {
             if self.handle != vk::Buffer::null() {
@@ -556,9 +570,9 @@ pub struct ForgeImage {
 /// everything else (colour, storage) → COLOR.
 pub fn aspect_mask_for_format(format: vk::Format) -> vk::ImageAspectFlags {
     match format {
-        vk::Format::D16_UNORM
-        | vk::Format::D32_SFLOAT
-        | vk::Format::X8_D24_UNORM_PACK32 => vk::ImageAspectFlags::DEPTH,
+        vk::Format::D16_UNORM | vk::Format::D32_SFLOAT | vk::Format::X8_D24_UNORM_PACK32 => {
+            vk::ImageAspectFlags::DEPTH
+        }
         vk::Format::D16_UNORM_S8_UINT
         | vk::Format::D24_UNORM_S8_UINT
         | vk::Format::D32_SFLOAT_S8_UINT => {
@@ -634,6 +648,7 @@ impl ForgeImage {
     /// `samples == TYPE_1` this is identical to `create_2d`; otherwise the
     /// resulting image is multi-sampled (no mips, one array layer). Used
     /// for MSAA colour + depth render-pass attachments.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_2d_msaa(
         device: &ash::Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
@@ -644,7 +659,11 @@ impl ForgeImage {
         properties: vk::MemoryPropertyFlags,
         samples: vk::SampleCountFlags,
     ) -> ForgeResult<Self> {
-        let extent = vk::Extent3D { width: width.max(1), height: height.max(1), depth: 1 };
+        let extent = vk::Extent3D {
+            width: width.max(1),
+            height: height.max(1),
+            depth: 1,
+        };
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -658,7 +677,8 @@ impl ForgeImage {
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let handle = unsafe { device.create_image(&info, None)? };
         let req = unsafe { device.get_image_memory_requirements(handle) };
-        let memory_type_index = find_memory_type(memory_properties, req.memory_type_bits, properties)?;
+        let memory_type_index =
+            find_memory_type(memory_properties, req.memory_type_bits, properties)?;
         let alloc = vk::MemoryAllocateInfo::default()
             .allocation_size(req.size)
             .memory_type_index(memory_type_index);
@@ -678,7 +698,14 @@ impl ForgeImage {
                     .layer_count(1),
             );
         let view = unsafe { device.create_image_view(&view_info, None)? };
-        Ok(Self { handle, view, memory, format, extent, mip_levels: 1 })
+        Ok(Self {
+            handle,
+            view,
+            memory,
+            format,
+            extent,
+            mip_levels: 1,
+        })
     }
 
     /// Same as `create_2d` but allocates the full mip chain
@@ -698,7 +725,11 @@ impl ForgeImage {
         let w = width.max(1);
         let h = height.max(1);
         let mip_levels = 1 + (w.max(h) as f32).log2().floor() as u32;
-        let extent = vk::Extent3D { width: w, height: h, depth: 1 };
+        let extent = vk::Extent3D {
+            width: w,
+            height: h,
+            depth: 1,
+        };
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -746,6 +777,9 @@ impl ForgeImage {
         })
     }
 
+    /// # Safety
+    /// `device` must be the device that created this image and all GPU work
+    /// referencing it must have completed.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         unsafe {
             if self.view != vk::ImageView::null() {
@@ -773,10 +807,7 @@ impl ForgeImage {
 
 /// Column-major identity mat4 (64 bytes) for use as a push-constant default.
 pub const MAT4_IDENTITY: [f32; 16] = [
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 1.0, 0.0,
-    0.0, 0.0, 0.0, 1.0,
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
 /// Everything `GpuMesh::upload` needs in one bundle.
@@ -792,14 +823,14 @@ pub const MAT4_IDENTITY: [f32; 16] = [
 /// path collapses to a normal single-queue submit — barriers degrade to a
 /// pipeline barrier without an ownership transfer.
 pub struct MeshUploadCtx<'a> {
-    pub device:             &'a ash::Device,
-    pub memory_properties:  &'a vk::PhysicalDeviceMemoryProperties,
+    pub device: &'a ash::Device,
+    pub memory_properties: &'a vk::PhysicalDeviceMemoryProperties,
     /// Queue used to perform the staging→device copy.
-    pub transfer_queue:        vk::Queue,
+    pub transfer_queue: vk::Queue,
     pub transfer_queue_family: u32,
     pub transfer_command_pool: vk::CommandPool,
     /// Queue family the buffer will eventually be read on (vertex shader).
-    pub graphics_queue:        vk::Queue,
+    pub graphics_queue: vk::Queue,
     pub graphics_queue_family: u32,
     /// Used to record the matching acquire barrier when families differ.
     /// May equal `transfer_command_pool` when families are equal.
@@ -809,8 +840,8 @@ pub struct MeshUploadCtx<'a> {
 #[derive(Debug)]
 pub struct GpuMesh {
     pub vertex_buffer: ForgeBuffer,
-    pub index_buffer:  ForgeBuffer,
-    pub index_count:   u32,
+    pub index_buffer: ForgeBuffer,
+    pub index_count: u32,
 }
 
 impl GpuMesh {
@@ -821,7 +852,7 @@ impl GpuMesh {
     /// boot; for streaming, batch many meshes per submit and use a fence
     /// instead of `queue_wait_idle`).
     pub fn upload(ctx: &MeshUploadCtx, ore: &MeshOre) -> ForgeResult<Self> {
-        let device            = ctx.device;
+        let device = ctx.device;
         let memory_properties = ctx.memory_properties;
         let vb_bytes = vertices_as_bytes(&ore.vertices);
         let ib_bytes = indices_as_bytes(&ore.indices);
@@ -831,14 +862,18 @@ impl GpuMesh {
 
         // Staging buffers (host-visible).
         let mut vb_stage = ForgeBuffer::create(
-            device, memory_properties, vb_size,
+            device,
+            memory_properties,
+            vb_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
         vb_stage.write_bytes(device, vb_bytes)?;
 
         let mut ib_stage = ForgeBuffer::create(
-            device, memory_properties, ib_size,
+            device,
+            memory_properties,
+            ib_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
@@ -849,22 +884,27 @@ impl GpuMesh {
         // BLAS construction without a second upload. Flags are no-ops on
         // pre-RT drivers; cheap.
         let vertex_buffer = ForgeBuffer::create(
-            device, memory_properties, vb_size,
-            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST
+            device,
+            memory_properties,
+            vb_size,
+            vk::BufferUsageFlags::VERTEX_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                 | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
         let index_buffer = ForgeBuffer::create(
-            device, memory_properties, ib_size,
-            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST
+            device,
+            memory_properties,
+            ib_size,
+            vk::BufferUsageFlags::INDEX_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                 | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
 
-        let need_ownership_xfer =
-            ctx.transfer_queue_family != ctx.graphics_queue_family;
+        let need_ownership_xfer = ctx.transfer_queue_family != ctx.graphics_queue_family;
 
         // ── Transfer queue: copy + (optional) release barriers ──────────────
         unsafe {
@@ -873,22 +913,36 @@ impl GpuMesh {
                     .command_pool(ctx.transfer_command_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1);
-                device.allocate_command_buffers(&alloc).map_err(ForgeError::Vk)?[0]
+                device
+                    .allocate_command_buffers(&alloc)
+                    .map_err(ForgeError::Vk)?[0]
             };
 
-            device.begin_command_buffer(
-                transfer_cb,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            ).map_err(ForgeError::Vk)?;
+            device
+                .begin_command_buffer(
+                    transfer_cb,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(ForgeError::Vk)?;
 
             device.cmd_copy_buffer(
-                transfer_cb, vb_stage.handle, vertex_buffer.handle,
-                &[vk::BufferCopy::default().src_offset(0).dst_offset(0).size(vb_size)],
+                transfer_cb,
+                vb_stage.handle,
+                vertex_buffer.handle,
+                &[vk::BufferCopy::default()
+                    .src_offset(0)
+                    .dst_offset(0)
+                    .size(vb_size)],
             );
             device.cmd_copy_buffer(
-                transfer_cb, ib_stage.handle, index_buffer.handle,
-                &[vk::BufferCopy::default().src_offset(0).dst_offset(0).size(ib_size)],
+                transfer_cb,
+                ib_stage.handle,
+                index_buffer.handle,
+                &[vk::BufferCopy::default()
+                    .src_offset(0)
+                    .dst_offset(0)
+                    .size(ib_size)],
             );
 
             // Release ownership to graphics family if they differ.
@@ -904,7 +958,8 @@ impl GpuMesh {
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(vertex_buffer.handle)
-                        .offset(0).size(vb_size),
+                        .offset(0)
+                        .size(vb_size),
                     vk::BufferMemoryBarrier2::default()
                         .src_stage_mask(vk::PipelineStageFlags2::COPY)
                         .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -913,26 +968,30 @@ impl GpuMesh {
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(index_buffer.handle)
-                        .offset(0).size(ib_size),
+                        .offset(0)
+                        .size(ib_size),
                 ];
-                let dep_info = vk::DependencyInfo::default()
-                    .buffer_memory_barriers(&release);
+                let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&release);
                 device.cmd_pipeline_barrier2(transfer_cb, &dep_info);
             }
 
-            device.end_command_buffer(transfer_cb).map_err(ForgeError::Vk)?;
+            device
+                .end_command_buffer(transfer_cb)
+                .map_err(ForgeError::Vk)?;
 
             // Submit transfer; signal a semaphore if we need an acquire.
             let transfer_cbs = [transfer_cb];
 
             // Fence so we can free staging deterministically.
-            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)
+            let fence = device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
                 .map_err(ForgeError::Vk)?;
 
             // Semaphore only needed when the graphics queue must wait on
             // the transfer queue (i.e. different families OR different queues).
             let (sem, gfx_cb) = if need_ownership_xfer {
-                let sem = device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                let sem = device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                     .map_err(ForgeError::Vk)?;
 
                 // Build graphics-side acquire command buffer.
@@ -940,13 +999,17 @@ impl GpuMesh {
                     .command_pool(ctx.graphics_command_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1);
-                let gfx_cb = device.allocate_command_buffers(&alloc).map_err(ForgeError::Vk)?[0];
+                let gfx_cb = device
+                    .allocate_command_buffers(&alloc)
+                    .map_err(ForgeError::Vk)?[0];
 
-                device.begin_command_buffer(
-                    gfx_cb,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                ).map_err(ForgeError::Vk)?;
+                device
+                    .begin_command_buffer(
+                        gfx_cb,
+                        &vk::CommandBufferBeginInfo::default()
+                            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                    )
+                    .map_err(ForgeError::Vk)?;
 
                 let acquire = [
                     vk::BufferMemoryBarrier2::default()
@@ -957,7 +1020,8 @@ impl GpuMesh {
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(vertex_buffer.handle)
-                        .offset(0).size(vb_size),
+                        .offset(0)
+                        .size(vb_size),
                     vk::BufferMemoryBarrier2::default()
                         .src_stage_mask(vk::PipelineStageFlags2::NONE)
                         .src_access_mask(vk::AccessFlags2::NONE)
@@ -966,10 +1030,10 @@ impl GpuMesh {
                         .src_queue_family_index(ctx.transfer_queue_family)
                         .dst_queue_family_index(ctx.graphics_queue_family)
                         .buffer(index_buffer.handle)
-                        .offset(0).size(ib_size),
+                        .offset(0)
+                        .size(ib_size),
                 ];
-                let dep_info = vk::DependencyInfo::default()
-                    .buffer_memory_barriers(&acquire);
+                let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&acquire);
                 device.cmd_pipeline_barrier2(gfx_cb, &dep_info);
 
                 device.end_command_buffer(gfx_cb).map_err(ForgeError::Vk)?;
@@ -984,7 +1048,8 @@ impl GpuMesh {
                 let submit = vk::SubmitInfo::default()
                     .command_buffers(&transfer_cbs)
                     .signal_semaphores(&signal);
-                device.queue_submit(ctx.transfer_queue, &[submit], vk::Fence::null())
+                device
+                    .queue_submit(ctx.transfer_queue, &[submit], vk::Fence::null())
                     .map_err(ForgeError::Vk)?;
 
                 // Graphics-side acquire submit; signal the fence.
@@ -995,18 +1060,24 @@ impl GpuMesh {
                     .wait_semaphores(&wait)
                     .wait_dst_stage_mask(&wait_stages)
                     .command_buffers(&gfx_cbs);
-                device.queue_submit(ctx.graphics_queue, &[submit_g], fence)
+                device
+                    .queue_submit(ctx.graphics_queue, &[submit_g], fence)
                     .map_err(ForgeError::Vk)?;
             } else {
                 let submit = vk::SubmitInfo::default().command_buffers(&transfer_cbs);
-                device.queue_submit(ctx.transfer_queue, &[submit], fence)
+                device
+                    .queue_submit(ctx.transfer_queue, &[submit], fence)
                     .map_err(ForgeError::Vk)?;
             }
 
             // Wait for completion before freeing staging.
-            device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+            device
+                .wait_for_fences(&[fence], true, u64::MAX)
+                .map_err(ForgeError::Vk)?;
             device.destroy_fence(fence, None);
-            if let Some(sem) = sem { device.destroy_semaphore(sem, None); }
+            if let Some(sem) = sem {
+                device.destroy_semaphore(sem, None);
+            }
 
             device.free_command_buffers(ctx.transfer_command_pool, &transfer_cbs);
             if let Some(gfx_cb) = gfx_cb {
@@ -1017,9 +1088,16 @@ impl GpuMesh {
             ib_stage.destroy(device);
         }
 
-        Ok(Self { vertex_buffer, index_buffer, index_count: ore.indices.len() as u32 })
+        Ok(Self {
+            vertex_buffer,
+            index_buffer,
+            index_count: ore.indices.len() as u32,
+        })
     }
 
+    /// # Safety
+    /// `device` must be the device that created this geometry and all GPU work
+    /// referencing the buffers must have completed.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
         unsafe {
             self.vertex_buffer.destroy(device);
@@ -1033,7 +1111,7 @@ impl GpuMesh {
 /// 4 × u16 joint indices packed into a uvec2, followed by 4 × f32 weights.
 #[derive(Debug)]
 pub struct GpuSkinBuffer {
-    pub buffer:       ForgeBuffer,
+    pub buffer: ForgeBuffer,
     pub vertex_count: u32,
 }
 
@@ -1042,16 +1120,14 @@ impl GpuSkinBuffer {
     /// described above. The buffer is created with `VERTEX_BUFFER |
     /// TRANSFER_DST` usage and DEVICE_LOCAL memory; bytes are staged through
     /// a HOST_VISIBLE buffer and copied via a one-shot transfer cmd.
-    pub fn upload(
-        ctx:          &MeshUploadCtx,
-        bytes:        &[u8],
-        vertex_count: u32,
-    ) -> ForgeResult<Self> {
+    pub fn upload(ctx: &MeshUploadCtx, bytes: &[u8], vertex_count: u32) -> ForgeResult<Self> {
         let size = bytes.len() as vk::DeviceSize;
         let size = if size == 0 { 24 } else { size };
 
         let mut staging = ForgeBuffer::create(
-            ctx.device, ctx.memory_properties, size,
+            ctx.device,
+            ctx.memory_properties,
+            size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
@@ -1059,7 +1135,9 @@ impl GpuSkinBuffer {
             staging.write_bytes(ctx.device, bytes)?;
         }
         let buffer = ForgeBuffer::create(
-            ctx.device, ctx.memory_properties, size,
+            ctx.device,
+            ctx.memory_properties,
+            size,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
@@ -1069,32 +1147,55 @@ impl GpuSkinBuffer {
                 .command_pool(ctx.transfer_command_pool)
                 .level(vk::CommandBufferLevel::PRIMARY)
                 .command_buffer_count(1);
-            let cbs = ctx.device.allocate_command_buffers(&info)
+            let cbs = ctx
+                .device
+                .allocate_command_buffers(&info)
                 .map_err(ForgeError::Vk)?;
             let cb = cbs[0];
-            ctx.device.begin_command_buffer(cb,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            ).map_err(ForgeError::Vk)?;
-            let copy = vk::BufferCopy::default().src_offset(0).dst_offset(0).size(size);
-            ctx.device.cmd_copy_buffer(cb, staging.handle, buffer.handle, &[copy]);
+            ctx.device
+                .begin_command_buffer(
+                    cb,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(ForgeError::Vk)?;
+            let copy = vk::BufferCopy::default()
+                .src_offset(0)
+                .dst_offset(0)
+                .size(size);
+            ctx.device
+                .cmd_copy_buffer(cb, staging.handle, buffer.handle, &[copy]);
             ctx.device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
-            let fence = ctx.device.create_fence(&vk::FenceCreateInfo::default(), None)
+            let fence = ctx
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
                 .map_err(ForgeError::Vk)?;
             let submit = vk::SubmitInfo::default().command_buffers(&cbs);
-            ctx.device.queue_submit(ctx.transfer_queue, &[submit], fence)
+            ctx.device
+                .queue_submit(ctx.transfer_queue, &[submit], fence)
                 .map_err(ForgeError::Vk)?;
-            ctx.device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+            ctx.device
+                .wait_for_fences(&[fence], true, u64::MAX)
+                .map_err(ForgeError::Vk)?;
             ctx.device.destroy_fence(fence, None);
-            ctx.device.free_command_buffers(ctx.transfer_command_pool, &cbs);
+            ctx.device
+                .free_command_buffers(ctx.transfer_command_pool, &cbs);
             staging.destroy(ctx.device);
         }
 
-        Ok(Self { buffer, vertex_count })
+        Ok(Self {
+            buffer,
+            vertex_count,
+        })
     }
 
+    /// # Safety
+    /// `device` must be the device that created this skin buffer and all GPU
+    /// work using it must have completed.
     pub unsafe fn destroy(&mut self, device: &ash::Device) {
-        unsafe { self.buffer.destroy(device); }
+        unsafe {
+            self.buffer.destroy(device);
+        }
     }
 }
 
@@ -1131,7 +1232,9 @@ pub fn storage_buffer_upload_barrier(
         .src_stage_mask(vk::PipelineStageFlags2::COPY)
         .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
         .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-        .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)
+        .dst_access_mask(
+            vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        )
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .buffer(buffer)
@@ -1159,7 +1262,7 @@ fn vertices_as_bytes(vertices: &[ForgeVertex]) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(
             vertices.as_ptr().cast::<u8>(),
-            vertices.len() * size_of::<ForgeVertex>(),
+            std::mem::size_of_val(vertices),
         )
     }
 }

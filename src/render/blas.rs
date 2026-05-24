@@ -24,51 +24,53 @@
 
 use ash::vk;
 
-use crate::forge_master::ore::ForgeBuffer;
 use crate::forge_master::master::{ForgeError, ForgeResult};
+use crate::forge_master::ore::ForgeBuffer;
 
 /// Inputs to `build_blas`. Names mirror the Vulkan calls one-to-one.
 pub struct BlasBuildInputs<'a> {
-    pub device:          &'a ash::Device,
-    pub accel_ext:       &'a ash::khr::acceleration_structure::Device,
-    pub memory_props:    &'a vk::PhysicalDeviceMemoryProperties,
-    pub command_pool:    vk::CommandPool,
-    pub queue:           vk::Queue,
+    pub device: &'a ash::Device,
+    pub accel_ext: &'a ash::khr::acceleration_structure::Device,
+    pub memory_props: &'a vk::PhysicalDeviceMemoryProperties,
+    pub command_pool: vk::CommandPool,
+    pub queue: vk::Queue,
 
     /// Vertex buffer handle; must have been created with
     /// `SHADER_DEVICE_ADDRESS | ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR`.
-    pub vertex_buffer:   vk::Buffer,
+    pub vertex_buffer: vk::Buffer,
     /// Byte offset into `vertex_buffer` where the position-bearing vertex
     /// array begins. Usually 0.
-    pub vertex_offset:   vk::DeviceSize,
+    pub vertex_offset: vk::DeviceSize,
     /// Total vertex count in the array (used as `max_vertex` — Vulkan spec
     /// requires "the highest index of any vertex" which is `count - 1`).
-    pub vertex_count:    u32,
+    pub vertex_count: u32,
     /// Stride in bytes between consecutive vertices.
-    pub vertex_stride:   vk::DeviceSize,
+    pub vertex_stride: vk::DeviceSize,
     /// Format of the position component. Typically `R32G32B32_SFLOAT`.
-    pub vertex_format:   vk::Format,
+    pub vertex_format: vk::Format,
 
-    pub index_buffer:    vk::Buffer,
-    pub index_offset:    vk::DeviceSize,
-    pub index_count:     u32,
+    pub index_buffer: vk::Buffer,
+    pub index_offset: vk::DeviceSize,
+    pub index_count: u32,
     /// Usually `vk::IndexType::UINT32`. Triangle count = index_count / 3.
-    pub index_type:      vk::IndexType,
+    pub index_type: vk::IndexType,
 
     /// 3×4 row-major transform applied to vertices at build time. Pass
     /// `None` to use the identity (the common case — instance transforms
     /// live on the TLAS side via `VkAccelerationStructureInstanceKHR`).
-    pub transform:       Option<vk::TransformMatrixKHR>,
+    pub transform: Option<vk::TransformMatrixKHR>,
 }
 
 /// Build one BLAS. Blocks on a fence; transient scratch buffer is freed.
 /// Returns `(handle, backing_buffer)` — caller owns both. Destroy via:
 ///   `accel_ext.destroy_acceleration_structure(handle, None);`
 ///   `backing_buffer.destroy(device);`
-pub fn build_blas(input: &BlasBuildInputs<'_>) -> ForgeResult<(vk::AccelerationStructureKHR, ForgeBuffer)> {
-    let device      = input.device;
-    let accel       = input.accel_ext;
-    let mem_props   = input.memory_props;
+pub fn build_blas(
+    input: &BlasBuildInputs<'_>,
+) -> ForgeResult<(vk::AccelerationStructureKHR, ForgeBuffer)> {
+    let device = input.device;
+    let accel = input.accel_ext;
+    let mem_props = input.memory_props;
 
     // ── 1. Geometry description ───────────────────────────────────────────
     let vb_addr = unsafe {
@@ -162,12 +164,16 @@ pub fn build_blas(input: &BlasBuildInputs<'_>) -> ForgeResult<(vk::AccelerationS
         .size(sizes.acceleration_structure_size)
         .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL);
     let as_handle = unsafe {
-        accel.create_acceleration_structure(&create_info, None).map_err(ForgeError::Vk)?
+        accel
+            .create_acceleration_structure(&create_info, None)
+            .map_err(ForgeError::Vk)?
     };
 
     build_info = build_info
         .dst_acceleration_structure(as_handle)
-        .scratch_data(vk::DeviceOrHostAddressKHR { device_address: scratch_addr });
+        .scratch_data(vk::DeviceOrHostAddressKHR {
+            device_address: scratch_addr,
+        });
 
     // ── 5. Record + submit the build ─────────────────────────────────────
     let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -175,12 +181,18 @@ pub fn build_blas(input: &BlasBuildInputs<'_>) -> ForgeResult<(vk::AccelerationS
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
     let cb = unsafe {
-        device.allocate_command_buffers(&alloc_info).map_err(ForgeError::Vk)?[0]
+        device
+            .allocate_command_buffers(&alloc_info)
+            .map_err(ForgeError::Vk)?[0]
     };
 
-    let begin = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-    unsafe { device.begin_command_buffer(cb, &begin).map_err(ForgeError::Vk)?; }
+    let begin =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    unsafe {
+        device
+            .begin_command_buffer(cb, &begin)
+            .map_err(ForgeError::Vk)?;
+    }
 
     let range = vk::AccelerationStructureBuildRangeInfoKHR::default()
         .primitive_count(triangle_count)
@@ -201,17 +213,25 @@ pub fn build_blas(input: &BlasBuildInputs<'_>) -> ForgeResult<(vk::AccelerationS
         );
     }
 
-    unsafe { device.end_command_buffer(cb).map_err(ForgeError::Vk)?; }
+    unsafe {
+        device.end_command_buffer(cb).map_err(ForgeError::Vk)?;
+    }
 
     let cbs = [cb];
     let submit = vk::SubmitInfo::default().command_buffers(&cbs);
     let fence = unsafe {
-        device.create_fence(&vk::FenceCreateInfo::default(), None).map_err(ForgeError::Vk)?
+        device
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+            .map_err(ForgeError::Vk)?
     };
 
     unsafe {
-        device.queue_submit(input.queue, &[submit], fence).map_err(ForgeError::Vk)?;
-        device.wait_for_fences(&[fence], true, u64::MAX).map_err(ForgeError::Vk)?;
+        device
+            .queue_submit(input.queue, &[submit], fence)
+            .map_err(ForgeError::Vk)?;
+        device
+            .wait_for_fences(&[fence], true, u64::MAX)
+            .map_err(ForgeError::Vk)?;
         device.destroy_fence(fence, None);
         device.free_command_buffers(input.command_pool, &cbs);
         scratch_buffer.destroy(device);
@@ -224,9 +244,9 @@ pub fn build_blas(input: &BlasBuildInputs<'_>) -> ForgeResult<(vk::AccelerationS
 /// records (`VkAccelerationStructureInstanceKHR.accelerationStructureReference`).
 pub fn blas_device_address(
     accel_ext: &ash::khr::acceleration_structure::Device,
-    handle:    vk::AccelerationStructureKHR,
+    handle: vk::AccelerationStructureKHR,
 ) -> u64 {
-    let info = vk::AccelerationStructureDeviceAddressInfoKHR::default()
-        .acceleration_structure(handle);
+    let info =
+        vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(handle);
     unsafe { accel_ext.get_acceleration_structure_device_address(&info) }
 }

@@ -7,8 +7,8 @@
 
 pub const GLYPH_W: u32 = 8;
 pub const GLYPH_H: u32 = 16;
-pub const COLS:    u32 = 16;
-pub const ROWS:    u32 = 6;
+pub const COLS: u32 = 16;
+pub const ROWS: u32 = 6;
 pub const ATLAS_W: u32 = GLYPH_W * COLS;
 pub const ATLAS_H: u32 = GLYPH_H * ROWS;
 
@@ -16,7 +16,9 @@ pub const ATLAS_H: u32 = GLYPH_H * ROWS;
 /// outside the printable range (treated as zero-width / skipped).
 pub fn glyph_rect(c: char) -> [f32; 4] {
     let cu = c as u32;
-    if !(0x20..0x80).contains(&cu) { return [0.0; 4]; }
+    if !(0x20..0x80).contains(&cu) {
+        return [0.0; 4];
+    }
     let idx = cu - 0x20;
     let col = idx % COLS;
     let row = idx / COLS;
@@ -38,10 +40,12 @@ pub fn bake_atlas() -> thin_vec::ThinVec<u8> {
         let idx = cu - 0x20;
         let col = idx % COLS;
         let row = idx / COLS;
-        let x0  = col * GLYPH_W;
-        let y0  = row * GLYPH_H;
+        let x0 = col * GLYPH_W;
+        let y0 = row * GLYPH_H;
         // Solid 6x12 stamp inset by (1,2). Space char (0x20) stays blank.
-        if cu == 0x20 { continue; }
+        if cu == 0x20 {
+            continue;
+        }
         for gy in 2..14 {
             for gx in 1..7 {
                 let off = ((y0 + gy) * ATLAS_W + (x0 + gx)) as usize;

@@ -91,7 +91,9 @@ fn expand5(v: u8) -> u8 {
 #[inline]
 pub fn decode_etc1s_block(ep: &EndpointEntry, sel: &SelectorEntry) -> [u8; 64] {
     #[cfg(target_arch = "x86_64")]
-    unsafe { return decode_etc1s_block_sse2(ep, sel); }
+    unsafe {
+        decode_etc1s_block_sse2(ep, sel)
+    }
     #[cfg(not(target_arch = "x86_64"))]
     decode_etc1s_block_scalar(ep, sel)
 }
@@ -140,7 +142,7 @@ unsafe fn decode_etc1s_block_sse2(ep: &EndpointEntry, sel: &SelectorEntry) -> [u
         let base_r = expand5(ep.r5) as i16;
         let base_g = expand5(ep.g5) as i16;
         let base_b = expand5(ep.b5) as i16;
-        let row    = &INTENSITY_TABLE[(ep.inten_table & 7) as usize];
+        let row = &INTENSITY_TABLE[(ep.inten_table & 7) as usize];
 
         // Broadcast the base RGB into i16x8 registers — we'll only use
         // the first four lanes per row but `_mm_set1_epi16` is fine.
@@ -171,9 +173,12 @@ unsafe fn decode_etc1s_block_sse2(ep: &EndpointEntry, sel: &SelectorEntry) -> [u
             let pr = _mm_packus_epi16(row_r, _mm_setzero_si128());
             let pg = _mm_packus_epi16(row_g, _mm_setzero_si128());
             let pb = _mm_packus_epi16(row_b, _mm_setzero_si128());
-            let mut tmpr = [0u8; 16]; _mm_storeu_si128(tmpr.as_mut_ptr() as *mut __m128i, pr);
-            let mut tmpg = [0u8; 16]; _mm_storeu_si128(tmpg.as_mut_ptr() as *mut __m128i, pg);
-            let mut tmpb = [0u8; 16]; _mm_storeu_si128(tmpb.as_mut_ptr() as *mut __m128i, pb);
+            let mut tmpr = [0u8; 16];
+            _mm_storeu_si128(tmpr.as_mut_ptr() as *mut __m128i, pr);
+            let mut tmpg = [0u8; 16];
+            _mm_storeu_si128(tmpg.as_mut_ptr() as *mut __m128i, pg);
+            let mut tmpb = [0u8; 16];
+            _mm_storeu_si128(tmpb.as_mut_ptr() as *mut __m128i, pb);
 
             // Scatter to RGBA8 layout. (Interleaving 4 i16 channels into
             // RGBA8 inline would need pshufb / SSSE3; we keep this path
@@ -181,7 +186,7 @@ unsafe fn decode_etc1s_block_sse2(ep: &EndpointEntry, sel: &SelectorEntry) -> [u
             // stores.)
             for x in 0..4 {
                 let dst = (y * 4 + x) * 4;
-                out[dst]     = tmpr[x];
+                out[dst] = tmpr[x];
                 out[dst + 1] = tmpg[x];
                 out[dst + 2] = tmpb[x];
                 out[dst + 3] = 255;
@@ -602,8 +607,8 @@ fn transcode_slice(
     sgd: &Sgd,
     out: &mut ThinVec<u8>,
 ) -> GltfResult<()> {
-    let bw = ((width + 3) / 4) as usize;
-    let bh = ((height + 3) / 4) as usize;
+    let bw = width.div_ceil(4) as usize;
+    let bh = height.div_ceil(4) as usize;
     let total_blocks = bw * bh;
 
     let out_len = (width as usize) * (height as usize) * 4;
@@ -1073,11 +1078,16 @@ mod tests {
         let patterns: [[u8; 4]; 4] = [[0, 1, 2, 3], [3, 3, 3, 3], [0, 0, 0, 0], [1, 2, 1, 2]];
         for &(r, g, b, t) in &cases {
             for &pat in &patterns {
-                let sel = SelectorEntry { selectors: [pat, pat, pat, pat] };
+                let sel = SelectorEntry {
+                    selectors: [pat, pat, pat, pat],
+                };
                 let endpoint = ep(r, g, b, t);
                 let scalar = decode_etc1s_block_scalar(&endpoint, &sel);
                 let simd = unsafe { decode_etc1s_block_sse2(&endpoint, &sel) };
-                assert_eq!(scalar, simd, "SIMD vs scalar mismatch for ep ({r},{g},{b},{t}) pat {pat:?}");
+                assert_eq!(
+                    scalar, simd,
+                    "SIMD vs scalar mismatch for ep ({r},{g},{b},{t}) pat {pat:?}"
+                );
             }
         }
     }

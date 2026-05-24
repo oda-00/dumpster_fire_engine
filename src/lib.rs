@@ -1,3 +1,9 @@
+// These lints require extensive refactoring to address correctly; suppress
+// project-wide until a dedicated cleanup pass.
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::module_inception)]
+#![allow(clippy::large_enum_variant)]
+
 pub mod forge_master;
 pub mod render;
 pub mod resource_manager;

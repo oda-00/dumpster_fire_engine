@@ -2,14 +2,16 @@
 //
 //   cargo bench --bench bt_nodes
 
+use divan::{Bencher, black_box};
+use dumpster_fire_engine::resource_manager::*;
+use glam::Affine3A;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use divan::{black_box, Bencher};
-use glam::Affine3A;
 use thin_vec::{ThinVec, thin_vec};
-use dumpster_fire_engine::resource_manager::*;
 
-fn main() { divan::main(); }
+fn main() {
+    divan::main();
+}
 
 // ── Fixture (no sink — keep it local in each bench to dodge borrow conflicts) ──
 
@@ -33,7 +35,8 @@ fn build_fixture() -> Fixture {
     let actives: ThinVec<ActiveActor> = thin_vec![ActiveActor::new(lh, sh, ah, aid)];
     Fixture {
         world,
-        lh, sh,
+        lh,
+        sh,
         actors: Troupe(thin_vec![actives]),
         troupes: thin_vec![TroupeId::new(1)],
         events: ThinVec::new(),
@@ -42,28 +45,41 @@ fn build_fixture() -> Fixture {
 
 fn ctx<'a>(f: &'a Fixture, elapsed: f32) -> EvalCtx<'a> {
     EvalCtx {
-        world:       &f.world,
-        level_h:     f.lh,
-        stage_h:     f.sh,
-        scene_id:    SceneId::new(1),
+        world: &f.world,
+        level_h: f.lh,
+        stage_h: f.sh,
+        scene_id: SceneId::new(1),
         elapsed,
-        tick_count:  0,
+        tick_count: 0,
         events_seen: &f.events,
-        actors:      &f.actors,
-        troupes:     &f.troupes,
+        actors: &f.actors,
+        troupes: &f.troupes,
     }
 }
 
 fn dummy_effect() -> Effect {
     Effect::SpawnActor {
-        level_h: LevelHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData },
-        stage_h: StageHandle { idx: 0, generation: std::num::NonZeroU32::new(1).unwrap(), _tag: std::marker::PhantomData },
-        id: ActorId::new(0), local: Affine3A::IDENTITY,
+        level_h: LevelHandle {
+            idx: 0,
+            generation: std::num::NonZeroU32::new(1).unwrap(),
+            _tag: std::marker::PhantomData,
+        },
+        stage_h: StageHandle {
+            idx: 0,
+            generation: std::num::NonZeroU32::new(1).unwrap(),
+            _tag: std::marker::PhantomData,
+        },
+        id: ActorId::new(0),
+        local: Affine3A::IDENTITY,
     }
 }
 
-fn pass_leaf() -> BtNode { BtNode::leaf(Condition::Always, dummy_effect(), false) }
-fn fail_leaf() -> BtNode { BtNode::leaf(Condition::Never,  dummy_effect(), false) }
+fn pass_leaf() -> BtNode {
+    BtNode::leaf(Condition::Always, dummy_effect(), false)
+}
+fn fail_leaf() -> BtNode {
+    BtNode::leaf(Condition::Never, dummy_effect(), false)
+}
 
 // ── Leaf ───────────────────────────────────────────────────────────────────
 
@@ -131,7 +147,9 @@ fn selector_all_fail(b: Bencher, n: usize) {
 fn selector_first_succeeds(b: Bencher, n: usize) {
     let f = build_fixture();
     let mut nodes: ThinVec<BtNode> = thin_vec![pass_leaf()];
-    for _ in 1..n { nodes.push(fail_leaf()); }
+    for _ in 1..n {
+        nodes.push(fail_leaf());
+    }
     let sel = BtNode::Selector(nodes);
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(64);
     b.bench_local(|| {
@@ -145,8 +163,13 @@ fn selector_first_succeeds(b: Bencher, n: usize) {
 #[divan::bench]
 fn parallel_all_succeed(b: Bencher) {
     let f = build_fixture();
-    let children: ThinVec<BtNode> = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
-    let par = BtNode::Parallel { children, policy: ParallelPolicy::AllSucceed };
+    let children: ThinVec<BtNode> = (0..8)
+        .map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() })
+        .collect();
+    let par = BtNode::Parallel {
+        children,
+        policy: ParallelPolicy::AllSucceed,
+    };
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(16);
     b.bench_local(|| {
         sink.clear();
@@ -157,8 +180,13 @@ fn parallel_all_succeed(b: Bencher) {
 #[divan::bench]
 fn parallel_any_succeed(b: Bencher) {
     let f = build_fixture();
-    let children: ThinVec<BtNode> = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
-    let par = BtNode::Parallel { children, policy: ParallelPolicy::AnySucceed };
+    let children: ThinVec<BtNode> = (0..8)
+        .map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() })
+        .collect();
+    let par = BtNode::Parallel {
+        children,
+        policy: ParallelPolicy::AnySucceed,
+    };
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(16);
     b.bench_local(|| {
         sink.clear();
@@ -169,8 +197,13 @@ fn parallel_any_succeed(b: Bencher) {
 #[divan::bench]
 fn parallel_all_complete(b: Bencher) {
     let f = build_fixture();
-    let children: ThinVec<BtNode> = (0..8).map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() }).collect();
-    let par = BtNode::Parallel { children, policy: ParallelPolicy::AllComplete };
+    let children: ThinVec<BtNode> = (0..8)
+        .map(|i| if i % 2 == 0 { pass_leaf() } else { fail_leaf() })
+        .collect();
+    let par = BtNode::Parallel {
+        children,
+        policy: ParallelPolicy::AllComplete,
+    };
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(16);
     b.bench_local(|| {
         sink.clear();
@@ -215,7 +248,10 @@ fn repeat_finite(b: Bencher) {
 #[divan::bench]
 fn decorator_inverter(b: Bencher) {
     let f = build_fixture();
-    let d = BtNode::Decorator { decorator: Decorator::Inverter, child: Arc::new(fail_leaf()) };
+    let d = BtNode::Decorator {
+        decorator: Decorator::Inverter,
+        child: Arc::new(fail_leaf()),
+    };
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(8);
     b.bench_local(|| {
         sink.clear();
@@ -292,7 +328,13 @@ fn decorator_cooldown_ready(b: Bencher) {
     let mut sink: ThinVec<Effect> = ThinVec::with_capacity(8);
     b.bench_local(|| {
         sink.clear();
-        if let BtNode::Decorator { decorator: Decorator::Cooldown { last_success_at, .. }, .. } = &d {
+        if let BtNode::Decorator {
+            decorator: Decorator::Cooldown {
+                last_success_at, ..
+            },
+            ..
+        } = &d
+        {
             last_success_at.store(f32::NEG_INFINITY.to_bits(), Ordering::Relaxed);
         }
         black_box(d.tick(&ctx(&f, 5.0), &mut sink))
@@ -319,5 +361,8 @@ fn reset_full_tree(b: Bencher) {
             policy: ParallelPolicy::AllComplete,
         },
     ]);
-    b.bench_local(|| black_box(tree.reset()));
+    b.bench_local(|| {
+        tree.reset();
+        black_box(())
+    });
 }

@@ -38,16 +38,18 @@ use ipc::{DaemonMsg, EngineMsg};
 use watch::WatchEvent;
 
 // Re-use langc's codegen module so there's exactly one LLVM pipeline.
-#[path = "../../langc/src/engine_api.rs"] mod engine_api;
-#[path = "../../langc/src/codegen.rs"]    mod codegen;
+#[path = "../../langc/src/codegen.rs"]
+mod codegen;
+#[path = "../../langc/src/engine_api.rs"]
+mod engine_api;
 
 // ── Sorted-array map: path → WatchEntry ──────────────────────────────────────
 
 struct WatchEntry {
-    script_id:          i64,
-    last_hash:          u64,
-    last_o:             Option<Arc<str>>,
-    last_state_size:    u32,
+    script_id: i64,
+    last_hash: u64,
+    last_o: Option<Arc<str>>,
+    last_state_size: u32,
     last_state_version: u32,
 }
 
@@ -61,7 +63,9 @@ fn map_get<'a>(m: &'a WatchedMap, p: &str) -> Option<&'a WatchEntry> {
 fn map_get_mut<'a>(m: &'a mut WatchedMap, p: &str) -> Option<&'a mut WatchEntry> {
     let i = m.partition_point(|(k, _)| k.as_ref() < p);
     let m_at = m.get_mut(i)?;
-    if m_at.0.as_ref() != p { return None; }
+    if m_at.0.as_ref() != p {
+        return None;
+    }
     Some(&mut m_at.1)
 }
 fn map_insert(m: &mut WatchedMap, path: Arc<str>, entry: WatchEntry) {
@@ -89,7 +93,10 @@ fn main() {
 
     let (watch_handle, fs_rx) = match watch::spawn() {
         Ok(p) => p,
-        Err(e) => { eprintln!("langcd: inotify init: {e}"); return; }
+        Err(e) => {
+            eprintln!("langcd: inotify init: {e}");
+            return;
+        }
     };
 
     eprintln!("langcd: ready (pid {})", std::process::id());
@@ -101,7 +108,9 @@ fn main() {
         let tx = tx.clone();
         std::thread::spawn(move || {
             while let Ok(ev) = fs_rx.recv() {
-                if tx.send(DaemonEvent::Fs(ev)).is_err() { break; }
+                if tx.send(DaemonEvent::Fs(ev)).is_err() {
+                    break;
+                }
             }
         });
     }
@@ -113,9 +122,15 @@ fn main() {
         let mut reader = BufReader::new(stdin);
         loop {
             match ipc::read_engine_msg(&mut reader) {
-                Ok(m)  => if tx_io.send(DaemonEvent::Engine(m)).is_err() { break; },
+                Ok(m) => {
+                    if tx_io.send(DaemonEvent::Engine(m)).is_err() {
+                        break;
+                    }
+                }
                 Err(e) => {
-                    if matches!(e.kind(), std::io::ErrorKind::UnexpectedEof) { break; }
+                    if matches!(e.kind(), std::io::ErrorKind::UnexpectedEof) {
+                        break;
+                    }
                     eprintln!("langcd: ipc read: {e}");
                     break;
                 }
@@ -137,23 +152,30 @@ fn main() {
             DaemonEvent::Engine(EngineMsg::Shutdown) => break,
             DaemonEvent::Engine(EngineMsg::Watch { script_id, path }) => {
                 let was_watched = map_get(&watched, path.as_ref()).is_some();
-                if !was_watched {
-                    if let Err(e) = watch_handle.watch(Arc::clone(&path)) {
-                        eprintln!("langcd: watch({}) failed: {e}", path);
-                        continue;
-                    }
+                if !was_watched && let Err(e) = watch_handle.watch(Arc::clone(&path)) {
+                    eprintln!("langcd: watch({}) failed: {e}", path);
+                    continue;
                 }
-                map_insert(&mut watched, Arc::clone(&path), WatchEntry {
-                    script_id, last_hash: 0, last_o: None,
-                    last_state_size: 0, last_state_version: 0,
-                });
+                map_insert(
+                    &mut watched,
+                    Arc::clone(&path),
+                    WatchEntry {
+                        script_id,
+                        last_hash: 0,
+                        last_o: None,
+                        last_state_size: 0,
+                        last_state_version: 0,
+                    },
+                );
                 let (lh, lo, lss, lsv) = (0u64, None, 0u32, 0u32);
                 dispatch_compile(path, script_id, lh, lo, lss, lsv, tx.clone());
             }
             DaemonEvent::Engine(EngineMsg::Unwatch { script_id }) => {
                 let mut to_drop: ThinVec<Arc<str>> = ThinVec::new();
                 for (p, v) in watched.iter() {
-                    if v.script_id == script_id { to_drop.push(Arc::clone(p)); }
+                    if v.script_id == script_id {
+                        to_drop.push(Arc::clone(p));
+                    }
                 }
                 for p in to_drop.iter() {
                     let _ = watch_handle.unwatch(Arc::clone(p));
@@ -176,13 +198,20 @@ fn main() {
                     && let Some(entry) = map_get(&watched, k.as_ref())
                 {
                     let (id, lh, lo, lss, lsv) = (
-                        entry.script_id, entry.last_hash, entry.last_o.clone(),
-                        entry.last_state_size, entry.last_state_version,
+                        entry.script_id,
+                        entry.last_hash,
+                        entry.last_o.clone(),
+                        entry.last_state_size,
+                        entry.last_state_version,
                     );
                     dispatch_compile(k, id, lh, lo, lss, lsv, tx.clone());
                 }
             }
-            DaemonEvent::CompileDone { path, script_id, result } => {
+            DaemonEvent::CompileDone {
+                path,
+                script_id,
+                result,
+            } => {
                 apply_compile_outcome(path, script_id, result, &mut watched, &writer);
             }
         }
@@ -198,24 +227,24 @@ enum DaemonEvent {
     /// A worker thread finished a compile job.  The main thread folds the
     /// result back into the watched-cache and writes the IPC reply.
     CompileDone {
-        path:      Arc<str>,
+        path: Arc<str>,
         script_id: i64,
-        result:    CompileOutcome,
+        result: CompileOutcome,
     },
 }
 
 enum CompileOutcome {
     /// File content hash matched the cache — reuse the prior `.o`.
     Cached {
-        o_path:        Arc<str>,
-        state_size:    u32,
+        o_path: Arc<str>,
+        state_size: u32,
         state_version: u32,
     },
     /// Fresh compile succeeded.  `hash` is the new content hash to cache.
     Compiled {
-        hash:          u64,
-        o_path:        Arc<str>,
-        state_size:    u32,
+        hash: u64,
+        o_path: Arc<str>,
+        state_size: u32,
         state_version: u32,
     },
     /// Frontend, IO, or codegen failure.  `diagnostics` is the wire-form list.
@@ -227,17 +256,21 @@ enum CompileOutcome {
 /// and posts the outcome back through the main event channel so cache
 /// updates and stdout writes stay single-threaded.
 fn dispatch_compile(
-    path:        Arc<str>,
-    script_id:   i64,
-    last_hash:   u64,
-    last_o:      Option<Arc<str>>,
-    last_ss:     u32,
-    last_sv:     u32,
-    result_tx:   Sender<DaemonEvent>,
+    path: Arc<str>,
+    script_id: i64,
+    last_hash: u64,
+    last_o: Option<Arc<str>>,
+    last_ss: u32,
+    last_sv: u32,
+    result_tx: Sender<DaemonEvent>,
 ) {
     rayon::spawn(move || {
         let outcome = compile_worker(&path, script_id, last_hash, last_o, last_ss, last_sv);
-        let _ = result_tx.send(DaemonEvent::CompileDone { path, script_id, result: outcome });
+        let _ = result_tx.send(DaemonEvent::CompileDone {
+            path,
+            script_id,
+            result: outcome,
+        });
     });
 }
 
@@ -245,12 +278,12 @@ fn dispatch_compile(
 /// state, no IO except the file read and `.o` write that the user already
 /// paid for in the synchronous version.
 fn compile_worker(
-    path:      &Arc<str>,
+    path: &Arc<str>,
     script_id: i64,
     last_hash: u64,
-    last_o:    Option<Arc<str>>,
-    last_ss:   u32,
-    last_sv:   u32,
+    last_o: Option<Arc<str>>,
+    last_ss: u32,
+    last_sv: u32,
 ) -> CompileOutcome {
     let src = match std::fs::read_to_string(path.as_ref()) {
         Ok(s) => s,
@@ -261,33 +294,47 @@ fn compile_worker(
         }
     };
     let hash = sema::fnv1a(src.as_bytes());
-    if hash == last_hash && last_hash != 0 {
-        if let Some(o) = last_o {
-            return CompileOutcome::Cached {
-                o_path: o, state_size: last_ss, state_version: last_sv,
-            };
-        }
+    if hash == last_hash
+        && last_hash != 0
+        && let Some(o) = last_o
+    {
+        return CompileOutcome::Cached {
+            o_path: o,
+            state_size: last_ss,
+            state_version: last_sv,
+        };
     }
 
     let mut diags: ThinVec<Arc<str>> = ThinVec::new();
     let toks = match Lexer::new(&src).tokenise() {
         Ok(t) => t,
-        Err(e) => { push_err(&mut diags, e); return CompileOutcome::Failed { diagnostics: diags }; }
+        Err(e) => {
+            push_err(&mut diags, e);
+            return CompileOutcome::Failed { diagnostics: diags };
+        }
     };
     let ast = match Parser::new(toks).parse_script() {
         Ok(a) => a,
-        Err(e) => { push_err(&mut diags, e); return CompileOutcome::Failed { diagnostics: diags }; }
+        Err(e) => {
+            push_err(&mut diags, e);
+            return CompileOutcome::Failed { diagnostics: diags };
+        }
     };
     let hir = match sema::lower(ast) {
         Ok(h) => h,
-        Err(e) => { push_err(&mut diags, e); return CompileOutcome::Failed { diagnostics: diags }; }
+        Err(e) => {
+            push_err(&mut diags, e);
+            return CompileOutcome::Failed { diagnostics: diags };
+        }
     };
 
     let dir = std::env::temp_dir()
         .join("dfe_langcd_cache")
         .join(format!("script_{script_id}"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        diags.push(Arc::<str>::from(format!("mkdir {}: {e}", dir.display()).as_str()));
+        diags.push(Arc::<str>::from(
+            format!("mkdir {}: {e}", dir.display()).as_str(),
+        ));
         return CompileOutcome::Failed { diagnostics: diags };
     }
     let obj = dir.join(format!("{}.o", hir.name));
@@ -299,8 +346,8 @@ fn compile_worker(
 
     CompileOutcome::Compiled {
         hash,
-        o_path:        Arc::<str>::from(obj.to_string_lossy().as_ref()),
-        state_size:    hir.state_size,
+        o_path: Arc::<str>::from(obj.to_string_lossy().as_ref()),
+        state_size: hir.state_size,
         state_version: hir.state_version,
     }
 }
@@ -309,21 +356,30 @@ fn compile_worker(
 /// Stays on the main thread — `watched` is single-owner, `writer` is the
 /// shared stdout mutex.
 fn apply_compile_outcome(
-    path:      Arc<str>,
+    path: Arc<str>,
     script_id: i64,
-    outcome:   CompileOutcome,
-    watched:   &mut WatchedMap,
-    writer:    &std::sync::Mutex<BufWriter<std::io::StdoutLock<'_>>>,
+    outcome: CompileOutcome,
+    watched: &mut WatchedMap,
+    writer: &std::sync::Mutex<BufWriter<std::io::StdoutLock<'_>>>,
 ) {
     match outcome {
-        CompileOutcome::Cached { o_path, state_size, state_version } => {
+        CompileOutcome::Cached {
+            o_path,
+            state_size,
+            state_version,
+        } => {
             send_ok(writer, script_id, o_path, state_size, state_version);
         }
-        CompileOutcome::Compiled { hash, o_path, state_size, state_version } => {
+        CompileOutcome::Compiled {
+            hash,
+            o_path,
+            state_size,
+            state_version,
+        } => {
             if let Some(entry) = map_get_mut(watched, path.as_ref()) {
-                entry.last_hash          = hash;
-                entry.last_o             = Some(Arc::clone(&o_path));
-                entry.last_state_size    = state_size;
+                entry.last_hash = hash;
+                entry.last_o = Some(Arc::clone(&o_path));
+                entry.last_state_size = state_size;
                 entry.last_state_version = state_version;
             }
             send_ok(writer, script_id, o_path, state_size, state_version);
@@ -339,7 +395,8 @@ fn push_err<E: core::fmt::Display>(diags: &mut ThinVec<Arc<str>>, e: E) {
 }
 
 fn canon_str(p: &str) -> Option<Arc<str>> {
-    std::fs::canonicalize(p).ok()
+    std::fs::canonicalize(p)
+        .ok()
         .map(|cp| Arc::<str>::from(cp.to_string_lossy().as_ref()))
 }
 
@@ -350,7 +407,12 @@ fn send_ok(
     state_size: u32,
     state_version: u32,
 ) {
-    let msg = DaemonMsg::CompileOk { script_id, o_path, state_size, state_version };
+    let msg = DaemonMsg::CompileOk {
+        script_id,
+        o_path,
+        state_size,
+        state_version,
+    };
     let mut w = writer.lock().unwrap();
     let _ = ipc::write_daemon_msg(&mut *w, &msg);
     let _ = w.flush();
@@ -362,8 +424,13 @@ fn send_err(
     diags: &ThinVec<Arc<str>>,
 ) {
     let mut copy: ThinVec<Arc<str>> = ThinVec::with_capacity(diags.len());
-    for d in diags { copy.push(Arc::clone(d)); }
-    let msg = DaemonMsg::CompileErr { script_id, diagnostics: copy };
+    for d in diags {
+        copy.push(Arc::clone(d));
+    }
+    let msg = DaemonMsg::CompileErr {
+        script_id,
+        diagnostics: copy,
+    };
     let mut w = writer.lock().unwrap();
     let _ = ipc::write_daemon_msg(&mut *w, &msg);
     let _ = w.flush();

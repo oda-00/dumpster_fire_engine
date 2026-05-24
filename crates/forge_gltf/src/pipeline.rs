@@ -17,10 +17,7 @@ use crate::mesh::{Mesh, Primitive, PrimitiveTopology};
 use crate::pose::Pose;
 
 pub const IDENTITY_M4: [f32; 16] = [
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 1.0, 0.0,
-    0.0, 0.0, 0.0, 1.0,
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
 /// Mirrors `crate::forge_master::ore::GraphicsOreKind`.
@@ -59,14 +56,14 @@ pub enum GltfPipelineKind {
 /// dispatch count we recommend — callers can override.
 #[derive(Debug, Clone)]
 pub struct PipelineUpload {
-    pub kind:            GltfPipelineKind,
-    pub primary_bytes:   ThinVec<u8>,
+    pub kind: GltfPipelineKind,
+    pub primary_bytes: ThinVec<u8>,
     pub secondary_bytes: ThinVec<u8>,
-    pub element_count:   u32,
-    pub element_stride:  u32,
-    pub workgroups:      [u32; 3],
+    pub element_count: u32,
+    pub element_stride: u32,
+    pub workgroups: [u32; 3],
     /// True when this payload describes a triangle mesh (vertex+index pair).
-    pub is_mesh:         bool,
+    pub is_mesh: bool,
 }
 
 impl PipelineUpload {
@@ -75,12 +72,12 @@ impl PipelineUpload {
     pub fn empty(kind: GltfPipelineKind) -> Self {
         Self {
             kind,
-            primary_bytes:   ThinVec::new(),
+            primary_bytes: ThinVec::new(),
             secondary_bytes: ThinVec::new(),
-            element_count:   0,
-            element_stride:  0,
-            workgroups:      [1, 1, 1],
-            is_mesh:         false,
+            element_count: 0,
+            element_stride: 0,
+            workgroups: [1, 1, 1],
+            is_mesh: false,
         }
     }
 }
@@ -90,21 +87,21 @@ impl PipelineUpload {
 /// graphics-pipeline kind that should bind it.
 #[derive(Debug, Clone)]
 pub struct GraphicsDraw {
-    pub kind:           GltfGraphicsKind,
+    pub kind: GltfGraphicsKind,
     /// Index into `GltfAsset.meshes`.
-    pub mesh:           u32,
+    pub mesh: u32,
     /// Index into `mesh.primitives`.
-    pub primitive:      u32,
+    pub primitive: u32,
     /// Index into the node array — the source of this draw's world matrix.
-    pub node:           u32,
+    pub node: u32,
     /// Column-major world matrix to push as model-or-MVP constant.
     /// For instanced draws this is the base node world matrix; the
     /// per-instance offset matrices live in `instance_matrices`.
-    pub world_matrix:   [f32; 16],
-    pub topology:       PrimitiveTopology,
-    pub material:       Option<u32>,
-    pub vertex_count:   u32,
-    pub index_count:    u32,
+    pub world_matrix: [f32; 16],
+    pub topology: PrimitiveTopology,
+    pub material: Option<u32>,
+    pub vertex_count: u32,
+    pub index_count: u32,
     /// `EXT_mesh_gpu_instancing`: when populated, the draw uses
     /// `vkCmdDrawIndexed(idx, instance_count = matrices.len(), ...)`
     /// and `instance_matrices[i] * world_matrix` is the per-instance
@@ -120,16 +117,24 @@ pub struct GraphicsDraw {
 const VERT_BYTES: usize = 4 * (3 + 3 + 4 + 2);
 
 fn encode_vertex(
-    pos:     [f32; 3],
-    normal:  [f32; 3],
+    pos: [f32; 3],
+    normal: [f32; 3],
     tangent: [f32; 4],
-    uv:      [f32; 2],
-    out:     &mut Vec<u8>,
+    uv: [f32; 2],
+    out: &mut Vec<u8>,
 ) {
-    for v in pos     { out.extend_from_slice(&v.to_le_bytes()); }
-    for v in normal  { out.extend_from_slice(&v.to_le_bytes()); }
-    for v in tangent { out.extend_from_slice(&v.to_le_bytes()); }
-    for v in uv      { out.extend_from_slice(&v.to_le_bytes()); }
+    for v in pos {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in normal {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in tangent {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in uv {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
 }
 
 /// Pack a single primitive's vertex streams to the engine `ForgeVertex` layout.
@@ -139,8 +144,18 @@ pub fn pack_primitive_vertices(prim: &Primitive) -> ThinVec<u8> {
     let uv0 = prim.streams.uv_sets.first();
     for i in 0..n {
         let p = prim.streams.positions[i];
-        let no = prim.streams.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
-        let ta = prim.streams.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]);
+        let no = prim
+            .streams
+            .normals
+            .get(i)
+            .copied()
+            .unwrap_or([0.0, 1.0, 0.0]);
+        let ta = prim
+            .streams
+            .tangents
+            .get(i)
+            .copied()
+            .unwrap_or([1.0, 0.0, 0.0, 1.0]);
         let uv = uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]);
         encode_vertex(p, no, ta, uv, &mut out);
     }
@@ -150,7 +165,9 @@ pub fn pack_primitive_vertices(prim: &Primitive) -> ThinVec<u8> {
 /// Pack a primitive's indices as u32 LE bytes.
 pub fn pack_primitive_indices(prim: &Primitive) -> ThinVec<u8> {
     let mut out = Vec::with_capacity(prim.indices.len() * 4);
-    for i in &prim.indices { out.extend_from_slice(&i.to_le_bytes()); }
+    for i in &prim.indices {
+        out.extend_from_slice(&i.to_le_bytes());
+    }
     out.into_iter().collect()
 }
 
@@ -160,8 +177,8 @@ pub fn pack_primitive_indices(prim: &Primitive) -> ThinVec<u8> {
 /// triangle-shaped compute pipelines (raytrace BVH input, SDF, visibility).
 fn flatten_all_triangle_data(asset: &GltfAsset) -> (ThinVec<u8>, ThinVec<u8>, u32) {
     let mut verts: Vec<u8> = Vec::new();
-    let mut inds:  Vec<u8> = Vec::new();
-    let mut base:  u32     = 0;
+    let mut inds: Vec<u8> = Vec::new();
+    let mut base: u32 = 0;
     let mut tri_count: u32 = 0;
     for mesh in &asset.meshes {
         for prim in &mesh.primitives {
@@ -186,7 +203,7 @@ fn flatten_all_triangle_data(asset: &GltfAsset) -> (ThinVec<u8>, ThinVec<u8>, u3
 
 /// Dispatch volumes: `(n_x, n_y, n_z)` where `n_x = ceil(elements/64)`.
 fn workgroups_1d(elements: u32) -> [u32; 3] {
-    [((elements + 63) / 64).max(1), 1, 1]
+    [elements.div_ceil(64).max(1), 1, 1]
 }
 
 // ── ForwardLit / Ui — graphics ──────────────────────────────────────────────
@@ -226,8 +243,12 @@ pub fn build_graphics_draws_with_matrices(
                 let mut v: ThinVec<[f32; 16]> = ThinVec::with_capacity(count);
                 for i in 0..count {
                     let t = inst.translation.get(i).copied().unwrap_or([0.0, 0.0, 0.0]);
-                    let r = inst.rotation   .get(i).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]);
-                    let s = inst.scale      .get(i).copied().unwrap_or([1.0, 1.0, 1.0]);
+                    let r = inst
+                        .rotation
+                        .get(i)
+                        .copied()
+                        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                    let s = inst.scale.get(i).copied().unwrap_or([1.0, 1.0, 1.0]);
                     v.push(crate::scene::compose_trs(t, r, s));
                 }
                 v
@@ -237,15 +258,15 @@ pub fn build_graphics_draws_with_matrices(
 
         for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
             out.push(GraphicsDraw {
-                kind:         GltfGraphicsKind::ForwardLit,
-                mesh:         mesh_idx,
-                primitive:    prim_idx as u32,
-                node:         node_idx as u32,
+                kind: GltfGraphicsKind::ForwardLit,
+                mesh: mesh_idx,
+                primitive: prim_idx as u32,
+                node: node_idx as u32,
                 world_matrix: world_m,
-                topology:     prim.topology,
-                material:     prim.material,
+                topology: prim.topology,
+                material: prim.material,
                 vertex_count: prim.streams.positions.len() as u32,
-                index_count:  prim.indices.len() as u32,
+                index_count: prim.indices.len() as u32,
                 instance_matrices: instance_matrices.clone(),
             });
         }
@@ -258,7 +279,9 @@ pub fn build_graphics_draws_with_matrices(
 /// reuse the glTF node tree still get correct offsets.
 pub fn build_ui_draws(asset: &GltfAsset) -> ThinVec<GraphicsDraw> {
     let mut draws = build_graphics_draws(asset);
-    for d in &mut draws { d.kind = GltfGraphicsKind::Ui; }
+    for d in &mut draws {
+        d.kind = GltfGraphicsKind::Ui;
+    }
     draws
 }
 
@@ -270,13 +293,13 @@ pub fn build_ui_draws(asset: &GltfAsset) -> ThinVec<GraphicsDraw> {
 pub fn build_raytrace_input(asset: &GltfAsset) -> PipelineUpload {
     let (verts, inds, tri_count) = flatten_all_triangle_data(asset);
     PipelineUpload {
-        kind:            GltfPipelineKind::RayTrace,
-        primary_bytes:   verts,
+        kind: GltfPipelineKind::RayTrace,
+        primary_bytes: verts,
         secondary_bytes: inds,
-        element_count:   tri_count,
-        element_stride:  VERT_BYTES as u32,
-        workgroups:      workgroups_1d(tri_count),
-        is_mesh:         true,
+        element_count: tri_count,
+        element_stride: VERT_BYTES as u32,
+        workgroups: workgroups_1d(tri_count),
+        is_mesh: true,
     }
 }
 
@@ -290,13 +313,13 @@ pub fn build_raytrace_input(asset: &GltfAsset) -> PipelineUpload {
 pub fn build_denoise_input(_asset: &GltfAsset, image_size: [u32; 2]) -> PipelineUpload {
     let [w, h] = image_size;
     PipelineUpload {
-        kind:            GltfPipelineKind::Denoise,
-        primary_bytes:   ThinVec::new(),
+        kind: GltfPipelineKind::Denoise,
+        primary_bytes: ThinVec::new(),
         secondary_bytes: ThinVec::new(),
-        element_count:   w * h,
-        element_stride:  0,
-        workgroups:      [(w + 7) / 8, (h + 7) / 8, 1],
-        is_mesh:         false,
+        element_count: w * h,
+        element_stride: 0,
+        workgroups: [w.div_ceil(8), h.div_ceil(8), 1],
+        is_mesh: false,
     }
 }
 
@@ -305,13 +328,13 @@ pub fn build_denoise_input(_asset: &GltfAsset, image_size: [u32; 2]) -> Pipeline
 pub fn build_sdf_input(asset: &GltfAsset) -> PipelineUpload {
     let (verts, inds, tri_count) = flatten_all_triangle_data(asset);
     PipelineUpload {
-        kind:            GltfPipelineKind::SignedDistanceField,
-        primary_bytes:   verts,
+        kind: GltfPipelineKind::SignedDistanceField,
+        primary_bytes: verts,
         secondary_bytes: inds,
-        element_count:   tri_count,
-        element_stride:  VERT_BYTES as u32,
-        workgroups:      workgroups_1d(tri_count),
-        is_mesh:         true,
+        element_count: tri_count,
+        element_stride: VERT_BYTES as u32,
+        workgroups: workgroups_1d(tri_count),
+        is_mesh: true,
     }
 }
 
@@ -323,13 +346,13 @@ pub fn build_sdf_voxel_input(asset: &GltfAsset, grid_size: u32) -> PipelineUploa
     let (verts, inds, tri_count) = flatten_all_triangle_data(asset);
     let g = grid_size.max(1);
     PipelineUpload {
-        kind:            GltfPipelineKind::SdfVoxelization,
-        primary_bytes:   verts,
+        kind: GltfPipelineKind::SdfVoxelization,
+        primary_bytes: verts,
         secondary_bytes: inds,
-        element_count:   tri_count,
-        element_stride:  VERT_BYTES as u32,
-        workgroups:      [(g + 3) / 4, (g + 3) / 4, (g + 3) / 4],
-        is_mesh:         true,
+        element_count: tri_count,
+        element_stride: VERT_BYTES as u32,
+        workgroups: [g.div_ceil(4), g.div_ceil(4), g.div_ceil(4)],
+        is_mesh: true,
     }
 }
 
@@ -344,7 +367,9 @@ pub fn build_light_cluster_input(asset: &GltfAsset) -> PipelineUpload {
     let mut bytes: Vec<u8> = Vec::new();
     let mut count = 0u32;
     for (node_idx, node) in asset.nodes.iter().enumerate() {
-        let Some(light_idx) = node.light else { continue };
+        let Some(light_idx) = node.light else {
+            continue;
+        };
         let light = &asset.lights[light_idx as usize];
         let m = world.get(node_idx).copied().unwrap_or(IDENTITY_M4);
         let pos = [m[12], m[13], m[14]];
@@ -359,20 +384,20 @@ pub fn build_light_cluster_input(asset: &GltfAsset) -> PipelineUpload {
         count += 1;
     }
     PipelineUpload {
-        kind:            GltfPipelineKind::LightClustering,
-        primary_bytes:   bytes.into_iter().collect(),
+        kind: GltfPipelineKind::LightClustering,
+        primary_bytes: bytes.into_iter().collect(),
         secondary_bytes: ThinVec::new(),
-        element_count:   count,
-        element_stride:  LightBlock::BYTES as u32,
-        workgroups:      workgroups_1d(count),
-        is_mesh:         false,
+        element_count: count,
+        element_stride: LightBlock::BYTES as u32,
+        workgroups: workgroups_1d(count),
+        is_mesh: false,
     }
 }
 
 fn mat4_mul_dir(m: &[f32; 16], d: [f32; 3]) -> [f32; 3] {
     [
-        m[0] * d[0] + m[4] * d[1] + m[8]  * d[2],
-        m[1] * d[0] + m[5] * d[1] + m[9]  * d[2],
+        m[0] * d[0] + m[4] * d[1] + m[8] * d[2],
+        m[1] * d[0] + m[5] * d[1] + m[9] * d[2],
         m[2] * d[0] + m[6] * d[1] + m[10] * d[2],
     ]
 }
@@ -399,13 +424,13 @@ pub fn build_occlusion_input(asset: &GltfAsset) -> PipelineUpload {
         }
     }
     PipelineUpload {
-        kind:            GltfPipelineKind::OcclusionCulling,
-        primary_bytes:   bytes.into_iter().collect(),
+        kind: GltfPipelineKind::OcclusionCulling,
+        primary_bytes: bytes.into_iter().collect(),
         secondary_bytes: ThinVec::new(),
-        element_count:   count,
-        element_stride:  32,
-        workgroups:      workgroups_1d(count),
-        is_mesh:         false,
+        element_count: count,
+        element_stride: 32,
+        workgroups: workgroups_1d(count),
+        is_mesh: false,
     }
 }
 
@@ -425,8 +450,12 @@ fn aabb_world(m: &[f32; 16], mn: [f32; 3], mx: [f32; 3]) -> ([f32; 3], [f32; 3])
     for c in corners {
         let w = mat4_mul_point(m, c);
         for i in 0..3 {
-            if w[i] < out_min[i] { out_min[i] = w[i]; }
-            if w[i] > out_max[i] { out_max[i] = w[i]; }
+            if w[i] < out_min[i] {
+                out_min[i] = w[i];
+            }
+            if w[i] > out_max[i] {
+                out_max[i] = w[i];
+            }
         }
     }
     (out_min, out_max)
@@ -434,8 +463,8 @@ fn aabb_world(m: &[f32; 16], mn: [f32; 3], mx: [f32; 3]) -> ([f32; 3], [f32; 3])
 
 fn mat4_mul_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
     [
-        m[0] * p[0] + m[4] * p[1] + m[8]  * p[2] + m[12],
-        m[1] * p[0] + m[5] * p[1] + m[9]  * p[2] + m[13],
+        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
         m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
     ]
 }
@@ -451,7 +480,7 @@ fn mat4_mul_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
 pub fn build_material_input(asset: &GltfAsset) -> PipelineUpload {
     let n = asset.materials.len();
     let mut base: Vec<u8> = Vec::with_capacity(n * MaterialBlock::BYTES);
-    let mut ext:  Vec<u8> = Vec::with_capacity(n * MaterialExtBlock::BYTES);
+    let mut ext: Vec<u8> = Vec::with_capacity(n * MaterialExtBlock::BYTES);
     for m in &asset.materials {
         let b = MaterialBlock::from_material(m);
         base.extend_from_slice(unsafe {
@@ -469,13 +498,13 @@ pub fn build_material_input(asset: &GltfAsset) -> PipelineUpload {
         });
     }
     PipelineUpload {
-        kind:            GltfPipelineKind::MaterialFlattening,
-        primary_bytes:   base.into_iter().collect(),
+        kind: GltfPipelineKind::MaterialFlattening,
+        primary_bytes: base.into_iter().collect(),
         secondary_bytes: ext.into_iter().collect(),
-        element_count:   n as u32,
-        element_stride:  MaterialBlock::BYTES as u32,
-        workgroups:      workgroups_1d(n as u32),
-        is_mesh:         false,
+        element_count: n as u32,
+        element_stride: MaterialBlock::BYTES as u32,
+        workgroups: workgroups_1d(n as u32),
+        is_mesh: false,
     }
 }
 
@@ -489,13 +518,13 @@ pub fn build_ao_input(asset: &GltfAsset) -> PipelineUpload {
     let (verts, inds, tri_count) = flatten_all_triangle_data(asset);
     let elements = (verts.len() / VERT_BYTES) as u32;
     PipelineUpload {
-        kind:            GltfPipelineKind::AmbientOcclusion,
-        primary_bytes:   verts,
+        kind: GltfPipelineKind::AmbientOcclusion,
+        primary_bytes: verts,
         secondary_bytes: inds,
-        element_count:   elements,
-        element_stride:  VERT_BYTES as u32,
-        workgroups:      workgroups_1d(elements.max(tri_count)),
-        is_mesh:         true,
+        element_count: elements,
+        element_stride: VERT_BYTES as u32,
+        workgroups: workgroups_1d(elements.max(tri_count)),
+        is_mesh: true,
     }
 }
 
@@ -504,13 +533,13 @@ pub fn build_ao_input(asset: &GltfAsset) -> PipelineUpload {
 pub fn build_visibility_input(asset: &GltfAsset) -> PipelineUpload {
     let (verts, inds, tri_count) = flatten_all_triangle_data(asset);
     PipelineUpload {
-        kind:            GltfPipelineKind::VisibilityPass,
-        primary_bytes:   verts,
+        kind: GltfPipelineKind::VisibilityPass,
+        primary_bytes: verts,
         secondary_bytes: inds,
-        element_count:   tri_count,
-        element_stride:  VERT_BYTES as u32,
-        workgroups:      workgroups_1d(tri_count),
-        is_mesh:         true,
+        element_count: tri_count,
+        element_stride: VERT_BYTES as u32,
+        workgroups: workgroups_1d(tri_count),
+        is_mesh: true,
     }
 }
 
@@ -527,8 +556,8 @@ pub fn build_visibility_input(asset: &GltfAsset) -> PipelineUpload {
 /// `pose.world` must be up-to-date (call `Pose::sample` before this).
 /// Returns `None` when `skin_idx` is out of range.
 pub fn build_skin_palette_input(
-    asset:    &GltfAsset,
-    pose:     &Pose,
+    asset: &GltfAsset,
+    pose: &Pose,
     skin_idx: usize,
 ) -> Option<PipelineUpload> {
     let skin = asset.skins.get(skin_idx)?;
@@ -540,29 +569,39 @@ pub fn build_skin_palette_input(
     // Primary: world matrices for each joint (node index from skin.joints).
     let mut primary: Vec<u8> = Vec::with_capacity(joint_count * 64);
     for &node_idx in &skin.joints {
-        let m = pose.world.get(node_idx as usize).copied().unwrap_or(IDENTITY_M4);
-        for v in m { primary.extend_from_slice(&v.to_le_bytes()); }
+        let m = pose
+            .world
+            .get(node_idx as usize)
+            .copied()
+            .unwrap_or(IDENTITY_M4);
+        for v in m {
+            primary.extend_from_slice(&v.to_le_bytes());
+        }
     }
 
     // Secondary: inverse bind matrices (one per joint).
     let mut secondary: Vec<u8> = Vec::with_capacity(joint_count * 64);
     for ibm in &skin.inverse_bind_matrices {
-        for v in ibm { secondary.extend_from_slice(&v.to_le_bytes()); }
+        for v in ibm {
+            secondary.extend_from_slice(&v.to_le_bytes());
+        }
     }
     // Pad secondary to same length as primary if IBMs are missing.
     while secondary.len() < primary.len() {
-        for v in IDENTITY_M4 { secondary.extend_from_slice(&v.to_le_bytes()); }
+        for v in IDENTITY_M4 {
+            secondary.extend_from_slice(&v.to_le_bytes());
+        }
     }
 
     let wg = workgroups_1d(joint_count as u32);
     Some(PipelineUpload {
-        kind:            GltfPipelineKind::SkinPalette,
-        primary_bytes:   primary.into_iter().collect(),
+        kind: GltfPipelineKind::SkinPalette,
+        primary_bytes: primary.into_iter().collect(),
         secondary_bytes: secondary.into_iter().collect(),
-        element_count:   joint_count as u32,
-        element_stride:  64,
-        workgroups:      wg,
-        is_mesh:         false,
+        element_count: joint_count as u32,
+        element_stride: 64,
+        workgroups: wg,
+        is_mesh: false,
     })
 }
 
@@ -581,15 +620,17 @@ pub fn build_skin_palette_input(
 /// Returns `None` when the primitive has no morph targets or when `node_idx`
 /// is not found in the asset.
 pub fn build_morph_blend_input(
-    asset:    &GltfAsset,
+    asset: &GltfAsset,
     mesh_idx: usize,
     prim_idx: usize,
-    pose:     &Pose,
+    pose: &Pose,
     node_idx: usize,
 ) -> Option<PipelineUpload> {
     let mesh = asset.meshes.get(mesh_idx)?;
     let prim = mesh.primitives.get(prim_idx)?;
-    if prim.morph_targets.is_empty() { return None; }
+    if prim.morph_targets.is_empty() {
+        return None;
+    }
 
     let vertex_count = prim.streams.positions.len();
     let target_count = prim.morph_targets.len();
@@ -614,7 +655,7 @@ pub fn build_morph_blend_input(
 
     // Header.
     sec.extend_from_slice(&(target_count as u32).to_ne_bytes()); // bit-cast to float later
-    sec.extend_from_slice(&(vertex_count  as u32).to_ne_bytes());
+    sec.extend_from_slice(&(vertex_count as u32).to_ne_bytes());
 
     // Weights (padded or truncated to target_count).
     for t in 0..target_count {
@@ -627,23 +668,29 @@ pub fn build_morph_blend_input(
         let mt = &prim.morph_targets[t];
         for v in 0..vertex_count {
             let dp = mt.positions.get(v).copied().unwrap_or([0.0; 3]);
-            let dn = mt.normals  .get(v).copied().unwrap_or([0.0; 3]);
-            let dt = mt.tangents .get(v).copied().unwrap_or([0.0; 3]);
-            for f in dp { sec.extend_from_slice(&f.to_le_bytes()); }
-            for f in dn { sec.extend_from_slice(&f.to_le_bytes()); }
-            for f in dt { sec.extend_from_slice(&f.to_le_bytes()); }
+            let dn = mt.normals.get(v).copied().unwrap_or([0.0; 3]);
+            let dt = mt.tangents.get(v).copied().unwrap_or([0.0; 3]);
+            for f in dp {
+                sec.extend_from_slice(&f.to_le_bytes());
+            }
+            for f in dn {
+                sec.extend_from_slice(&f.to_le_bytes());
+            }
+            for f in dt {
+                sec.extend_from_slice(&f.to_le_bytes());
+            }
         }
     }
 
     let wg = workgroups_1d(vertex_count as u32);
     Some(PipelineUpload {
-        kind:            GltfPipelineKind::MorphBlend,
-        primary_bytes:   primary,
+        kind: GltfPipelineKind::MorphBlend,
+        primary_bytes: primary,
         secondary_bytes: sec.into_iter().collect(),
-        element_count:   vertex_count as u32,
-        element_stride:  VERT_BYTES as u32,
-        workgroups:      wg,
-        is_mesh:         false,
+        element_count: vertex_count as u32,
+        element_stride: VERT_BYTES as u32,
+        workgroups: wg,
+        is_mesh: false,
     })
 }
 
@@ -655,15 +702,20 @@ pub fn build_morph_blend_input(
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineParams {
     pub denoise_image_size: [u32; 2],
-    pub sdf_voxel_grid:     u32,
+    pub sdf_voxel_grid: u32,
 }
 
 impl Default for PipelineParams {
-    fn default() -> Self { Self { denoise_image_size: [1, 1], sdf_voxel_grid: 16 } }
+    fn default() -> Self {
+        Self {
+            denoise_image_size: [1, 1],
+            sdf_voxel_grid: 16,
+        }
+    }
 }
 
 pub fn build_all_compute_uploads(
-    asset:  &GltfAsset,
+    asset: &GltfAsset,
     params: PipelineParams,
 ) -> ThinVec<PipelineUpload> {
     let mut out = ThinVec::new();
@@ -691,25 +743,148 @@ pub fn build_all_graphics_draws(asset: &GltfAsset) -> ThinVec<GraphicsDraw> {
 impl GltfPipelineKind {
     pub fn build(self, asset: &GltfAsset, params: PipelineParams) -> Option<PipelineUpload> {
         match self {
-            GltfPipelineKind::RayTrace            => Some(build_raytrace_input(asset)),
-            GltfPipelineKind::Denoise             => Some(build_denoise_input(asset, params.denoise_image_size)),
+            GltfPipelineKind::RayTrace => Some(build_raytrace_input(asset)),
+            GltfPipelineKind::Denoise => {
+                Some(build_denoise_input(asset, params.denoise_image_size))
+            }
             GltfPipelineKind::SignedDistanceField => Some(build_sdf_input(asset)),
-            GltfPipelineKind::SdfVoxelization     => Some(build_sdf_voxel_input(asset, params.sdf_voxel_grid)),
-            GltfPipelineKind::LightClustering     => Some(build_light_cluster_input(asset)),
-            GltfPipelineKind::OcclusionCulling    => Some(build_occlusion_input(asset)),
-            GltfPipelineKind::MaterialFlattening  => Some(build_material_input(asset)),
-            GltfPipelineKind::AmbientOcclusion    => Some(build_ao_input(asset)),
-            GltfPipelineKind::VisibilityPass      => Some(build_visibility_input(asset)),
+            GltfPipelineKind::SdfVoxelization => {
+                Some(build_sdf_voxel_input(asset, params.sdf_voxel_grid))
+            }
+            GltfPipelineKind::LightClustering => Some(build_light_cluster_input(asset)),
+            GltfPipelineKind::OcclusionCulling => Some(build_occlusion_input(asset)),
+            GltfPipelineKind::MaterialFlattening => Some(build_material_input(asset)),
+            GltfPipelineKind::AmbientOcclusion => Some(build_ao_input(asset)),
+            GltfPipelineKind::VisibilityPass => Some(build_visibility_input(asset)),
             // SkinPalette / MorphBlend require a Pose — use the dedicated builders.
-            GltfPipelineKind::SkinPalette         => None,
-            GltfPipelineKind::MorphBlend          => None,
+            GltfPipelineKind::SkinPalette => None,
+            GltfPipelineKind::MorphBlend => None,
             // Splat compute Ores: use build_splat_sort_input / build_splat_billboard_input.
             // InstanceTransforms: use build_instance_transforms_input (needs the full asset).
-            GltfPipelineKind::SplatSort           => None,
-            GltfPipelineKind::SplatBillboard      => None,
-            GltfPipelineKind::InstanceTransforms  => build_instance_transforms_input(asset),
-            GltfPipelineKind::Graphics(_)         => None,
+            GltfPipelineKind::SplatSort => None,
+            GltfPipelineKind::SplatBillboard => None,
+            GltfPipelineKind::InstanceTransforms => build_instance_transforms_input(asset),
+            GltfPipelineKind::Graphics(_) => None,
         }
+    }
+}
+
+// ── InstanceTransforms / SplatSort / SplatBillboard input builders ─────────
+
+/// Flatten every `EXT_mesh_gpu_instancing` node's per-instance TRS into a
+/// 48-byte/instance std430 stream the `instance_transforms.comp.glsl`
+/// shader consumes. Returns `None` when no node carries instances.
+///
+/// Std430 layout per instance:
+///   `vec4 translation_pad` (xyz = T, w pad), `vec4 rotation` (quat xyzw),
+///   `vec4 scale_pad` (xyz = S, w pad) = 48 bytes.
+pub fn build_instance_transforms_input(asset: &GltfAsset) -> Option<PipelineUpload> {
+    let mut primary: Vec<u8> = Vec::new();
+    let mut total = 0u32;
+    for node in &asset.nodes {
+        let Some(inst) = &node.instances else {
+            continue;
+        };
+        let n = inst.len();
+        for i in 0..n {
+            let t = inst.translation.get(i).copied().unwrap_or([0.0, 0.0, 0.0]);
+            let r = inst
+                .rotation
+                .get(i)
+                .copied()
+                .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            let s = inst.scale.get(i).copied().unwrap_or([1.0, 1.0, 1.0]);
+            for v in t {
+                primary.extend_from_slice(&v.to_le_bytes());
+            }
+            primary.extend_from_slice(&0f32.to_le_bytes()); // pad
+            for v in r {
+                primary.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in s {
+                primary.extend_from_slice(&v.to_le_bytes());
+            }
+            primary.extend_from_slice(&0f32.to_le_bytes()); // pad
+        }
+        total += n as u32;
+    }
+    if total == 0 {
+        return None;
+    }
+    Some(PipelineUpload {
+        kind: GltfPipelineKind::InstanceTransforms,
+        primary_bytes: primary.into_iter().collect(),
+        secondary_bytes: ThinVec::new(),
+        element_count: total,
+        element_stride: 48,
+        workgroups: [total.div_ceil(64).max(1), 1, 1],
+        is_mesh: false,
+    })
+}
+
+/// SplatSort input: 8-byte (key, splat_index) pairs initialised with
+/// `f32::INFINITY` keys so the first sort puts them all at the tail until
+/// the per-frame view_z is computed and written.
+pub fn build_splat_sort_input(set: &crate::splat::GaussianSplatSet) -> PipelineUpload {
+    let n = set.len();
+    let mut primary: ThinVec<u8> = ThinVec::with_capacity(n * 8);
+    for i in 0..n {
+        let key = f32::INFINITY.to_bits();
+        primary.extend_from_slice(&key.to_le_bytes());
+        primary.extend_from_slice(&(i as u32).to_le_bytes());
+    }
+    PipelineUpload {
+        kind: GltfPipelineKind::SplatSort,
+        primary_bytes: primary,
+        secondary_bytes: ThinVec::new(),
+        element_count: n as u32,
+        element_stride: 8,
+        workgroups: [(n as u32).div_ceil(256).max(1), 1, 1],
+        is_mesh: false,
+    }
+}
+
+/// SplatBillboard input: 68-byte/splat packed stream (pos vec4 + scale
+/// vec4 + rot vec4 + colour vec4 + opacity scalar) — matches the
+/// `splat_billboard.comp.glsl` 6-binding read pattern when split out
+/// engine-side into individual SSBO sub-ranges.
+pub fn build_splat_billboard_input(set: &crate::splat::GaussianSplatSet) -> PipelineUpload {
+    let n = set.len();
+    let mut primary: ThinVec<u8> = ThinVec::with_capacity(n * 68);
+    for i in 0..n {
+        let p = set.positions.get(i).copied().unwrap_or([0.0; 3]);
+        let s = set.scales.get(i).copied().unwrap_or([1.0; 3]);
+        let r = set
+            .rotations
+            .get(i)
+            .copied()
+            .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        let c = set.colors.get(i).copied().unwrap_or([1.0; 4]);
+        let o = set.opacities.get(i).copied().unwrap_or(1.0);
+        for v in p {
+            primary.extend_from_slice(&v.to_le_bytes());
+        }
+        primary.extend_from_slice(&0f32.to_le_bytes());
+        for v in s {
+            primary.extend_from_slice(&v.to_le_bytes());
+        }
+        primary.extend_from_slice(&0f32.to_le_bytes());
+        for v in r {
+            primary.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in c {
+            primary.extend_from_slice(&v.to_le_bytes());
+        }
+        primary.extend_from_slice(&o.to_le_bytes());
+    }
+    PipelineUpload {
+        kind: GltfPipelineKind::SplatBillboard,
+        primary_bytes: primary,
+        secondary_bytes: ThinVec::new(),
+        element_count: n as u32,
+        element_stride: 68,
+        workgroups: [(n as u32).div_ceil(256).max(1), 1, 1],
+        is_mesh: false,
     }
 }
 
@@ -732,41 +907,46 @@ mod tests {
         // matrix is non-identity (translation only); the skinned-draw
         // path should ignore that and emit identity.
         let mut asset = GltfAsset {
-            asset_metadata:      Default::default(),
-            extensions_used:     ThinVec::new(),
+            asset_metadata: Default::default(),
+            extensions_used: ThinVec::new(),
             extensions_required: ThinVec::new(),
-            material_variants:   ThinVec::new(),
-            scenes:              ThinVec::new(),
-            default_scene:       None,
-            nodes:               ThinVec::new(),
-            meshes:              ThinVec::new(),
-            materials:           ThinVec::new(),
-            textures:            ThinVec::new(),
-            images:              ThinVec::new(),
-            samplers:            ThinVec::new(),
-            skins:               ThinVec::new(),
-            animations:          ThinVec::new(),
-            cameras:             ThinVec::new(),
-            lights:              ThinVec::new(),
-            gaussian_splats:     ThinVec::new(),
+            material_variants: ThinVec::new(),
+            scenes: ThinVec::new(),
+            default_scene: None,
+            nodes: ThinVec::new(),
+            meshes: ThinVec::new(),
+            materials: ThinVec::new(),
+            textures: ThinVec::new(),
+            images: ThinVec::new(),
+            samplers: ThinVec::new(),
+            skins: ThinVec::new(),
+            animations: ThinVec::new(),
+            cameras: ThinVec::new(),
+            lights: ThinVec::new(),
+            gaussian_splats: ThinVec::new(),
         };
 
-        let mut streams = crate::mesh::VertexStreams::default();
-        streams.positions = ThinVec::from(&[[0.0_f32, 0.0, 0.0]][..]);
+        let streams = crate::mesh::VertexStreams {
+            positions: ThinVec::from(&[[0.0_f32, 0.0, 0.0]][..]),
+            ..crate::mesh::VertexStreams::default()
+        };
         let prim = crate::mesh::Primitive {
-            topology:        crate::mesh::PrimitiveTopology::Triangles,
+            topology: crate::mesh::PrimitiveTopology::Triangles,
             streams,
-            indices:         ThinVec::new(),
-            material:        None,
-            morph_targets:   ThinVec::new(),
-            bounds:          crate::mesh::Aabb { min: [0.0; 3], max: [0.0; 3] },
-            custom_attrs:    ThinVec::new(),
+            indices: ThinVec::new(),
+            material: None,
+            morph_targets: ThinVec::new(),
+            bounds: crate::mesh::Aabb {
+                min: [0.0; 3],
+                max: [0.0; 3],
+            },
+            custom_attrs: ThinVec::new(),
             variant_mappings: ThinVec::new(),
         };
         let mesh = crate::mesh::Mesh {
-            name:       None,
+            name: None,
             primitives: ThinVec::from(&[prim][..]),
-            weights:    ThinVec::new(),
+            weights: ThinVec::new(),
         };
         asset.meshes.push(mesh);
 
@@ -778,24 +958,21 @@ mod tests {
         });
 
         let node = Node {
-            name:        None,
-            parent:      None,
-            children:    ThinVec::new(),
+            name: None,
+            parent: None,
+            children: ThinVec::new(),
             translation: [10.0, 20.0, 30.0], // non-identity translation
-            rotation:    [0.0, 0.0, 0.0, 1.0],
-            scale:       [1.0, 1.0, 1.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
             local_matrix: [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                10.0, 20.0, 30.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 10.0, 20.0, 30.0, 1.0,
             ],
-            mesh:        Some(0),
-            camera:      None,
-            skin:        Some(0),
-            light:       None,
-            weights:     ThinVec::new(),
-            instances:   None,
+            mesh: Some(0),
+            camera: None,
+            skin: Some(0),
+            light: None,
+            weights: ThinVec::new(),
+            instances: None,
         };
         asset.nodes.push(node);
 
@@ -808,101 +985,10 @@ mod tests {
         let draws = build_graphics_draws(&asset);
         assert_eq!(draws.len(), 1, "expected 1 draw, got {}", draws.len());
         // Per spec §3.7.3.2 the skinned draw's world_matrix MUST be identity.
-        assert_eq!(draws[0].world_matrix, IDENTITY_M4,
+        assert_eq!(
+            draws[0].world_matrix, IDENTITY_M4,
             "skinned-node world matrix should be identity (spec §3.7.3.2); got {:?}",
-            draws[0].world_matrix);
-    }
-}
-
-// ── InstanceTransforms / SplatSort / SplatBillboard input builders ─────────
-
-/// Flatten every `EXT_mesh_gpu_instancing` node's per-instance TRS into a
-/// 48-byte/instance std430 stream the `instance_transforms.comp.glsl`
-/// shader consumes. Returns `None` when no node carries instances.
-///
-/// Std430 layout per instance:
-///   `vec4 translation_pad` (xyz = T, w pad), `vec4 rotation` (quat xyzw),
-///   `vec4 scale_pad` (xyz = S, w pad) = 48 bytes.
-pub fn build_instance_transforms_input(asset: &GltfAsset) -> Option<PipelineUpload> {
-    let mut primary: Vec<u8> = Vec::new();
-    let mut total = 0u32;
-    for node in &asset.nodes {
-        let Some(inst) = &node.instances else { continue };
-        let n = inst.len();
-        for i in 0..n {
-            let t = inst.translation.get(i).copied().unwrap_or([0.0, 0.0, 0.0]);
-            let r = inst.rotation.get(i).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]);
-            let s = inst.scale.get(i).copied().unwrap_or([1.0, 1.0, 1.0]);
-            for v in t { primary.extend_from_slice(&v.to_le_bytes()); }
-            primary.extend_from_slice(&0f32.to_le_bytes());           // pad
-            for v in r { primary.extend_from_slice(&v.to_le_bytes()); }
-            for v in s { primary.extend_from_slice(&v.to_le_bytes()); }
-            primary.extend_from_slice(&0f32.to_le_bytes());           // pad
-        }
-        total += n as u32;
-    }
-    if total == 0 { return None; }
-    Some(PipelineUpload {
-        kind:            GltfPipelineKind::InstanceTransforms,
-        primary_bytes:   primary.into_iter().collect(),
-        secondary_bytes: ThinVec::new(),
-        element_count:   total,
-        element_stride:  48,
-        workgroups:      [((total + 63) / 64).max(1), 1, 1],
-        is_mesh:         false,
-    })
-}
-
-/// SplatSort input: 8-byte (key, splat_index) pairs initialised with
-/// `f32::INFINITY` keys so the first sort puts them all at the tail until
-/// the per-frame view_z is computed and written.
-pub fn build_splat_sort_input(set: &crate::splat::GaussianSplatSet) -> PipelineUpload {
-    let n = set.len();
-    let mut primary: ThinVec<u8> = ThinVec::with_capacity(n * 8);
-    for i in 0..n {
-        let key = f32::INFINITY.to_bits();
-        primary.extend_from_slice(&key.to_le_bytes());
-        primary.extend_from_slice(&(i as u32).to_le_bytes());
-    }
-    PipelineUpload {
-        kind:            GltfPipelineKind::SplatSort,
-        primary_bytes:   primary,
-        secondary_bytes: ThinVec::new(),
-        element_count:   n as u32,
-        element_stride:  8,
-        workgroups:      [((n as u32 + 255) / 256).max(1), 1, 1],
-        is_mesh:         false,
-    }
-}
-
-/// SplatBillboard input: 68-byte/splat packed stream (pos vec4 + scale
-/// vec4 + rot vec4 + colour vec4 + opacity scalar) — matches the
-/// `splat_billboard.comp.glsl` 6-binding read pattern when split out
-/// engine-side into individual SSBO sub-ranges.
-pub fn build_splat_billboard_input(set: &crate::splat::GaussianSplatSet) -> PipelineUpload {
-    let n = set.len();
-    let mut primary: ThinVec<u8> = ThinVec::with_capacity(n * 68);
-    for i in 0..n {
-        let p = set.positions.get(i).copied().unwrap_or([0.0; 3]);
-        let s = set.scales.get(i).copied().unwrap_or([1.0; 3]);
-        let r = set.rotations.get(i).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]);
-        let c = set.colors.get(i).copied().unwrap_or([1.0; 4]);
-        let o = set.opacities.get(i).copied().unwrap_or(1.0);
-        for v in p { primary.extend_from_slice(&v.to_le_bytes()); }
-        primary.extend_from_slice(&0f32.to_le_bytes());
-        for v in s { primary.extend_from_slice(&v.to_le_bytes()); }
-        primary.extend_from_slice(&0f32.to_le_bytes());
-        for v in r { primary.extend_from_slice(&v.to_le_bytes()); }
-        for v in c { primary.extend_from_slice(&v.to_le_bytes()); }
-        primary.extend_from_slice(&o.to_le_bytes());
-    }
-    PipelineUpload {
-        kind:            GltfPipelineKind::SplatBillboard,
-        primary_bytes:   primary,
-        secondary_bytes: ThinVec::new(),
-        element_count:   n as u32,
-        element_stride:  68,
-        workgroups:      [((n as u32 + 255) / 256).max(1), 1, 1],
-        is_mesh:         false,
+            draws[0].world_matrix
+        );
     }
 }

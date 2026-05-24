@@ -1,15 +1,15 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use glam::Affine3A;
-use thin_vec::ThinVec;
+use super::scene::{
+    BtNode, BtState, Effect, EvalCtx, Event, EventMatcher, Handler, Scene, SceneHandle, SceneId,
+    SceneKind, SceneTag, TroupeId,
+};
+use super::script::{Script, ScriptId};
 use crate::resource_manager::manager::{Arena, Handle, Id, LevelHandle, StageHandle};
 use crate::resource_manager::world_manager::stage::StageId;
 use crate::resource_manager::world_manager::world::World;
-use super::scene::{
-    BtNode, BtState, EvalCtx, Effect, Event, EventMatcher, Handler, Scene, SceneHandle,
-    SceneId, SceneKind, SceneTag, TroupeId,
-};
-use super::script::{Script, ScriptId};
+use glam::Affine3A;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use thin_vec::ThinVec;
 
 /// Stack-array inline cap for HSM region-target collection in
 /// `descend_to_leaves`. Trees with more concurrent regions than this fall
@@ -19,7 +19,8 @@ const REGION_TARGETS_INLINE: usize = 8;
 
 // ── Tags / markers / Ids owned by play.rs ───────────────────────────────────
 
-#[derive(Copy, Clone, PartialEq, Eq)] pub struct PlayTag;
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct PlayTag;
 pub type PlayHandle = Handle<PlayTag>;
 
 pub struct PlayMarker;
@@ -32,7 +33,7 @@ pub struct TransitionRecord {
     pub target: SceneId,
     /// Arc-shared slice of Mealy outputs so passing the record around is cheap
     /// (refcount bump, not a Vec copy).
-    pub mealy:  Arc<[Effect]>,
+    pub mealy: Arc<[Effect]>,
 }
 
 // ── PlayStats — workload shape counters ────────────────────────────────────
@@ -40,35 +41,35 @@ pub struct TransitionRecord {
 #[derive(Default)]
 pub struct PlayStats {
     /// Total parent_handle steps walked in chain-build loops.
-    pub chain_steps:       AtomicU64,
+    pub chain_steps: AtomicU64,
     /// Scenes that passed the dedup check and were fully processed.
-    pub scenes_processed:  AtomicU64,
+    pub scenes_processed: AtomicU64,
     /// Scenes hit by the early-break dedup (already visited this tick).
-    pub dedup_skips:       AtomicU64,
+    pub dedup_skips: AtomicU64,
     /// `apply_transition` calls.
     pub transitions_fired: AtomicU64,
     /// `BtNode::tick` invocations on Atomic scenes.
-    pub bt_ticks:          AtomicU64,
+    pub bt_ticks: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PlayStatsSnapshot {
-    pub chain_steps:       u64,
-    pub scenes_processed:  u64,
-    pub dedup_skips:       u64,
+    pub chain_steps: u64,
+    pub scenes_processed: u64,
+    pub dedup_skips: u64,
     pub transitions_fired: u64,
-    pub bt_ticks:          u64,
+    pub bt_ticks: u64,
 }
 
 impl PlayStats {
     #[inline(always)]
     pub fn snapshot(&self) -> PlayStatsSnapshot {
         PlayStatsSnapshot {
-            chain_steps:       self.chain_steps.load(Ordering::Relaxed),
-            scenes_processed:  self.scenes_processed.load(Ordering::Relaxed),
-            dedup_skips:       self.dedup_skips.load(Ordering::Relaxed),
+            chain_steps: self.chain_steps.load(Ordering::Relaxed),
+            scenes_processed: self.scenes_processed.load(Ordering::Relaxed),
+            dedup_skips: self.dedup_skips.load(Ordering::Relaxed),
             transitions_fired: self.transitions_fired.load(Ordering::Relaxed),
-            bt_ticks:          self.bt_ticks.load(Ordering::Relaxed),
+            bt_ticks: self.bt_ticks.load(Ordering::Relaxed),
         }
     }
 
@@ -84,17 +85,17 @@ impl PlayStats {
 // ── Play ────────────────────────────────────────────────────────────────────
 
 pub struct Play {
-    pub id:        PlayId,
-    pub name:      Arc<str>,
+    pub id: PlayId,
+    pub name: Arc<str>,
     pub script_id: ScriptId,
-    pub stage:     StageId,
-    pub level_h:   LevelHandle,
-    pub stage_h:   StageHandle,
+    pub stage: StageId,
+    pub level_h: LevelHandle,
+    pub stage_h: StageHandle,
 
-    pub scenes:    Arena<SceneTag, Scene>,
+    pub scenes: Arena<SceneTag, Scene>,
 
     /// HSM root scene handle. Always valid after instantiate.
-    pub root:      SceneHandle,
+    pub root: SceneHandle,
 
     /// Leaf scenes currently active. For Atomic-only scripts this has length 1;
     /// for AndParallel scenes at deepest level it has length ≥ k.
@@ -107,7 +108,7 @@ pub struct Play {
     /// array. `id_base` is the minimum authored SceneId; `id_lookup[id - id_base]`
     /// is the handle (or None for gaps). O(1) lookup, no branches, no binary
     /// search, no iterator state. Built once at instantiate.
-    pub id_base:   i64,
+    pub id_base: i64,
     pub id_lookup: ThinVec<Option<SceneHandle>>,
 
     /// Hot parallel arrays — dense, indexed by `SceneHandle::idx as usize`.
@@ -118,11 +119,11 @@ pub struct Play {
     /// magnitude. Set once at instantiate; `parents` is immutable thereafter,
     /// `tick_marks` is the dedup generation field formerly known as
     /// `Scene::last_processed_tick`.
-    pub parents:    ThinVec<Option<SceneHandle>>,
+    pub parents: ThinVec<Option<SceneHandle>>,
     pub tick_marks: ThinVec<AtomicU64>,
 
     pub handlers: ThinVec<Handler>,
-    pub queue:    ThinVec<Event>,
+    pub queue: ThinVec<Event>,
 
     /// Troupes whose authored cues are entirely IDENTITY (or which never appear
     /// as a CueTroupe target at all). Computed at instantiate time. Stage's
@@ -142,7 +143,7 @@ pub struct Play {
     /// latency rule holds.
     pub pending_mealy: ThinVec<Effect>,
 
-    pub paused:   bool,
+    pub paused: bool,
     pub finished: bool,
 
     /// True iff the script has at least one `EventMatcher::Tick` handler
@@ -180,10 +181,10 @@ pub struct Play {
     // config_scratch:          active configuration set in post_tick_bookkeeping
     // pending_drain_scratch:   swap-target for pending_transitions during drain;
     //                          allocation persists across ticks.
-    ancestor_scratch:       ThinVec<SceneHandle>,
-    transition_scratch:     ThinVec<SceneHandle>,
-    config_scratch:         ThinVec<SceneHandle>,
-    pending_drain_scratch:  ThinVec<TransitionRecord>,
+    ancestor_scratch: ThinVec<SceneHandle>,
+    transition_scratch: ThinVec<SceneHandle>,
+    config_scratch: ThinVec<SceneHandle>,
+    pending_drain_scratch: ThinVec<TransitionRecord>,
 }
 
 impl Play {
@@ -191,10 +192,10 @@ impl Play {
     /// the Scene arena; the entry scene becomes the HSM root and its initial
     /// child chain seeds active_leaves.
     pub fn instantiate(
-        id:      PlayId,
-        name:    impl Into<Arc<str>>,
-        script:  &Script,
-        stage:   StageId,
+        id: PlayId,
+        name: impl Into<Arc<str>>,
+        script: &Script,
+        stage: StageId,
         level_h: LevelHandle,
         stage_h: StageHandle,
     ) -> Self {
@@ -210,8 +211,12 @@ impl Play {
             let mut max_id: i64 = i64::MIN;
             for def in script.scenes.iter() {
                 let r = def.id.raw();
-                if r < min_id { min_id = r; }
-                if r > max_id { max_id = r; }
+                if r < min_id {
+                    min_id = r;
+                }
+                if r > max_id {
+                    max_id = r;
+                }
             }
             (min_id, (max_id - min_id + 1) as usize)
         };
@@ -229,10 +234,12 @@ impl Play {
         // is a valid array index. `parents[h.idx]` resolves SceneDef::parent
         // to a SceneHandle once; the per-tick chain walk reads it directly.
         let scene_count = script.scenes.len();
-        let mut parents:    ThinVec<Option<SceneHandle>> = ThinVec::with_capacity(scene_count);
-        let mut tick_marks: ThinVec<AtomicU64>           = ThinVec::with_capacity(scene_count);
+        let mut parents: ThinVec<Option<SceneHandle>> = ThinVec::with_capacity(scene_count);
+        let mut tick_marks: ThinVec<AtomicU64> = ThinVec::with_capacity(scene_count);
         parents.resize(scene_count, None);
-        for _ in 0..scene_count { tick_marks.push(AtomicU64::new(0)); }
+        for _ in 0..scene_count {
+            tick_marks.push(AtomicU64::new(0));
+        }
         for slot in id_lookup.iter() {
             if let Some(h) = *slot {
                 let ph = scenes[h].parent.and_then(|pid| {
@@ -259,9 +266,14 @@ impl Play {
 
         // Precompute whether anything actually consumes Event::Tick — World::tick
         // skips the per-tick push if not.
-        let wants_tick = script.handlers.iter().any(|h| matches!(h.matcher, EventMatcher::Tick))
+        let wants_tick = script
+            .handlers
+            .iter()
+            .any(|h| matches!(h.matcher, EventMatcher::Tick))
             || script.scenes.iter().any(|d| {
-                d.handlers.iter().any(|h| matches!(h.matcher, EventMatcher::Tick))
+                d.handlers
+                    .iter()
+                    .any(|h| matches!(h.matcher, EventMatcher::Tick))
             });
 
         let mut play = Play {
@@ -289,9 +301,9 @@ impl Play {
             wants_tick,
             tick_counter: AtomicU64::new(0),
             stats: PlayStats::default(),
-            ancestor_scratch:      ThinVec::with_capacity(16),
-            transition_scratch:    ThinVec::with_capacity(16),
-            config_scratch:        ThinVec::with_capacity(16),
+            ancestor_scratch: ThinVec::with_capacity(16),
+            transition_scratch: ThinVec::with_capacity(16),
+            config_scratch: ThinVec::with_capacity(16),
             pending_drain_scratch: ThinVec::with_capacity(4),
         };
 
@@ -318,7 +330,9 @@ impl Play {
         for &leaf in self.active_leaves.iter() {
             ancestors_into_fields(&self.parents, leaf, &mut scratch);
             for &h in scratch.iter() {
-                if !out.contains(&h) { out.push(h); }
+                if !out.contains(&h) {
+                    out.push(h);
+                }
             }
         }
         out
@@ -344,11 +358,11 @@ impl Play {
                 SceneKind::Atomic => {
                     is_atomic = true;
                 }
-                SceneKind::Compound { initial, history, .. } => {
+                SceneKind::Compound {
+                    initial, history, ..
+                } => {
                     is_atomic = false;
-                    let chosen = self.history_for(scene.id)
-                        .or(*history)
-                        .unwrap_or(*initial);
+                    let chosen = self.history_for(scene.id).or(*history).unwrap_or(*initial);
                     targets_inline[0] = chosen;
                     targets_len = 1;
                 }
@@ -397,9 +411,11 @@ impl Play {
     }
 
     fn history_for(&self, parent: SceneId) -> Option<SceneId> {
-        self.history.iter().find(|(p, _)| *p == parent).map(|(_, c)| *c)
+        self.history
+            .iter()
+            .find(|(p, _)| *p == parent)
+            .map(|(_, c)| *c)
     }
-
 
     /// Pass 1 — read-only — walk the active configuration, tick BTs, dispatch
     /// handlers, evaluate transitions.
@@ -416,12 +432,14 @@ impl Play {
     /// already processed by a prior leaf), strictly faster than `continue`.
     pub fn collect_effects(
         &self,
-        _dt:   f32,
+        _dt: f32,
         world: &World,
-        out:   &mut ThinVec<Effect>,
+        out: &mut ThinVec<Effect>,
         chain: &mut ThinVec<SceneHandle>,
     ) {
-        if self.paused || self.finished { return; }
+        if self.paused || self.finished {
+            return;
+        }
 
         // ── Play-global handler dispatch (once per tick, anchored at root) ──
         // Skip entirely when nothing would consume an event — recovers the
@@ -430,14 +448,14 @@ impl Play {
             let root_scene = &self.scenes[self.root];
             let play_ctx = EvalCtx {
                 world,
-                level_h:     self.level_h,
-                stage_h:     self.stage_h,
-                scene_id:    root_scene.id,
-                elapsed:     root_scene.elapsed,
-                tick_count:  root_scene.tick_count,
+                level_h: self.level_h,
+                stage_h: self.stage_h,
+                scene_id: root_scene.id,
+                elapsed: root_scene.elapsed,
+                tick_count: root_scene.tick_count,
                 events_seen: &root_scene.queue,
-                actors:      &root_scene.actors,
-                troupes:     &root_scene.troupes,
+                actors: &root_scene.actors,
+                troupes: &root_scene.troupes,
             };
             for ev in self.queue.iter() {
                 for h in self.handlers.iter() {
@@ -455,10 +473,10 @@ impl Play {
 
         // Local stat accumulators: avoid `lock xadd` per inner-loop step.
         // Folded to the atomic fields once at function exit.
-        let mut local_chain_steps:      u64 = 0;
+        let mut local_chain_steps: u64 = 0;
         let mut local_scenes_processed: u64 = 0;
-        let mut local_dedup_skips:      u64 = 0;
-        let mut local_bt_ticks:         u64 = 0;
+        let mut local_dedup_skips: u64 = 0;
+        let mut local_bt_ticks: u64 = 0;
 
         for &leaf in self.active_leaves.iter() {
             chain.clear();
@@ -493,14 +511,14 @@ impl Play {
 
                 let ctx = EvalCtx {
                     world,
-                    level_h:     self.level_h,
-                    stage_h:     self.stage_h,
-                    scene_id:    scene.id,
-                    elapsed:     scene.elapsed,
-                    tick_count:  scene.tick_count,
+                    level_h: self.level_h,
+                    stage_h: self.stage_h,
+                    scene_id: scene.id,
+                    elapsed: scene.elapsed,
+                    tick_count: scene.tick_count,
                     events_seen: &scene.queue,
-                    actors:      &scene.actors,
-                    troupes:     &scene.troupes,
+                    actors: &scene.actors,
+                    troupes: &scene.troupes,
                 };
 
                 // 1. Tick BT body (Atomic only).
@@ -525,9 +543,9 @@ impl Play {
                         out.push(Effect::ScheduleTransition {
                             level_h: self.level_h,
                             stage_h: self.stage_h,
-                            source:  scene.id,
-                            target:  t.target,
-                            mealy:   Arc::clone(&t.effects),
+                            source: scene.id,
+                            target: t.target,
+                            mealy: Arc::clone(&t.effects),
                         });
                         break;
                     }
@@ -537,15 +555,33 @@ impl Play {
 
         // Fold local accumulators into the atomic fields once. Single Relaxed
         // fetch_add per counter per call — total cost is fixed, not per-step.
-        if local_chain_steps      != 0 { self.stats.chain_steps.fetch_add(local_chain_steps, Ordering::Relaxed); }
-        if local_scenes_processed != 0 { self.stats.scenes_processed.fetch_add(local_scenes_processed, Ordering::Relaxed); }
-        if local_dedup_skips      != 0 { self.stats.dedup_skips.fetch_add(local_dedup_skips, Ordering::Relaxed); }
-        if local_bt_ticks         != 0 { self.stats.bt_ticks.fetch_add(local_bt_ticks, Ordering::Relaxed); }
+        if local_chain_steps != 0 {
+            self.stats
+                .chain_steps
+                .fetch_add(local_chain_steps, Ordering::Relaxed);
+        }
+        if local_scenes_processed != 0 {
+            self.stats
+                .scenes_processed
+                .fetch_add(local_scenes_processed, Ordering::Relaxed);
+        }
+        if local_dedup_skips != 0 {
+            self.stats
+                .dedup_skips
+                .fetch_add(local_dedup_skips, Ordering::Relaxed);
+        }
+        if local_bt_ticks != 0 {
+            self.stats
+                .bt_ticks
+                .fetch_add(local_bt_ticks, Ordering::Relaxed);
+        }
     }
 
     /// Pass 3 — mut — drain queues, advance counters, apply pending transition.
     pub fn post_tick_bookkeeping(&mut self, dt: f32) {
-        if self.paused || self.finished { return; }
+        if self.paused || self.finished {
+            return;
+        }
 
         // Build active config into config_scratch, reusing its allocation.
         active_configuration_into(
@@ -579,7 +615,10 @@ impl Play {
         // mem::swap into a persistent scratch field keeps the allocation
         // alive across ticks (mirrors the World::tick_effects mem::take pattern).
         if !self.pending_transitions.is_empty() {
-            std::mem::swap(&mut self.pending_transitions, &mut self.pending_drain_scratch);
+            std::mem::swap(
+                &mut self.pending_transitions,
+                &mut self.pending_drain_scratch,
+            );
             while let Some(rec) = self.pending_drain_scratch.pop() {
                 self.apply_transition(rec);
             }
@@ -594,9 +633,17 @@ impl Play {
     }
 
     fn apply_transition(&mut self, rec: TransitionRecord) {
-        let TransitionRecord { source, target, mealy } = rec;
-        let Some(src_h) = self.handle_for(source) else { return };
-        let Some(tgt_h) = self.handle_for(target) else { return };
+        let TransitionRecord {
+            source,
+            target,
+            mealy,
+        } = rec;
+        let Some(src_h) = self.handle_for(source) else {
+            return;
+        };
+        let Some(tgt_h) = self.handle_for(target) else {
+            return;
+        };
         self.stats.transitions_fired.fetch_add(1, Ordering::Relaxed);
 
         // Reuse scratch buffers for ancestor chains — no heap allocation.
@@ -621,7 +668,7 @@ impl Play {
         // Exit src → LCA (excluding LCA), leaf-first — no exit_chain Vec needed.
         for i in (lca_idx..src_len).rev() {
             let h = self.ancestor_scratch[i];
-            let scene_id  = self.scenes[h].id;
+            let scene_id = self.scenes[h].id;
             let parent_id = self.scenes[h].parent;
             if let Some(pid) = parent_id {
                 self.history.retain(|(p, _)| *p != pid);
@@ -631,8 +678,8 @@ impl Play {
             scene._rendered = true;
             scene.root.reset();
             scene.bt_state = BtState::default();
-            scene.entered  = false;
-            scene.elapsed  = 0.0;
+            scene.entered = false;
+            scene.elapsed = 0.0;
             scene.tick_count = 0;
             self.queue.push(Event::SceneExited(scene_id));
         }
@@ -647,10 +694,13 @@ impl Play {
                 let mut cur = leaf;
                 let mut found = false;
                 loop {
-                    if cur == src_h { found = true; break; }
+                    if cur == src_h {
+                        found = true;
+                        break;
+                    }
                     match parents[cur.idx as usize] {
                         Some(ph) => cur = ph,
-                        None     => break,
+                        None => break,
                     }
                 }
                 found
@@ -667,13 +717,13 @@ impl Play {
         self.pending_mealy.extend(mealy.iter().cloned());
 
         // Enter LCA → target chain root-first — no enter_chain Vec needed.
-        let enter_start     = lca_idx;
-        let enter_end       = tgt_len;
+        let enter_start = lca_idx;
+        let enter_end = tgt_len;
         let pre_descent_len = self.active_leaves.len();
 
         if enter_end > enter_start {
             for i in enter_start..enter_end {
-                let h  = self.transition_scratch[i];
+                let h = self.transition_scratch[i];
                 let id = self.scenes[h].id;
                 self.queue.push(Event::SceneEntered(id));
             }
@@ -692,7 +742,7 @@ impl Play {
         let new_end = self.active_leaves.len();
         for i in pre_descent_len..new_end {
             let leaf = self.active_leaves[i];
-            let id   = self.scenes[leaf].id;
+            let id = self.scenes[leaf].id;
             let mut already_fired = false;
             for j in enter_start..enter_end {
                 if self.scenes[self.transition_scratch[j]].id == id {
@@ -718,8 +768,8 @@ impl Play {
 /// Walks the dense `parents` array — single load per step, no Scene access.
 fn ancestors_into_fields(
     parents: &[Option<SceneHandle>],
-    leaf:    SceneHandle,
-    out:     &mut ThinVec<SceneHandle>,
+    leaf: SceneHandle,
+    out: &mut ThinVec<SceneHandle>,
 ) {
     out.clear();
     let mut cur = leaf;
@@ -727,7 +777,7 @@ fn ancestors_into_fields(
         out.push(cur);
         match parents[cur.idx as usize] {
             Some(ph) => cur = ph,
-            None     => break,
+            None => break,
         }
     }
     out.reverse();
@@ -736,16 +786,18 @@ fn ancestors_into_fields(
 /// Build the complete active-configuration set into `out` (cleared first),
 /// using `scratch` as a per-leaf ancestor work buffer.
 fn active_configuration_into(
-    parents:       &[Option<SceneHandle>],
+    parents: &[Option<SceneHandle>],
     active_leaves: &ThinVec<SceneHandle>,
-    out:           &mut ThinVec<SceneHandle>,
-    scratch:       &mut ThinVec<SceneHandle>,
+    out: &mut ThinVec<SceneHandle>,
+    scratch: &mut ThinVec<SceneHandle>,
 ) {
     out.clear();
     for &leaf in active_leaves.iter() {
         ancestors_into_fields(parents, leaf, scratch);
         for &h in scratch.iter() {
-            if !out.contains(&h) { out.push(h); }
+            if !out.contains(&h) {
+                out.push(h);
+            }
         }
     }
 }
@@ -764,14 +816,14 @@ fn compute_static_troupes(script: &Script) -> ThinVec<TroupeId> {
     // end (O(N log N)). Avoids the O(N²) contains() calls in the inner BT walk.
     // TroupeId: Ord (wraps i64), so sort_unstable + dedup is always correct.
     let mut all_troupes: ThinVec<TroupeId> = ThinVec::new();
-    let mut moving:      ThinVec<TroupeId> = ThinVec::new();
+    let mut moving: ThinVec<TroupeId> = ThinVec::new();
 
     for def in script.scenes.iter() {
         for t in def.troupes.iter() {
             all_troupes.push(*t);
         }
         scan_effects(&def.on_enter, &mut all_troupes, &mut moving);
-        scan_effects(&def.on_exit,  &mut all_troupes, &mut moving);
+        scan_effects(&def.on_exit, &mut all_troupes, &mut moving);
         for tr in def.transitions.iter() {
             scan_effects(&tr.effects, &mut all_troupes, &mut moving);
         }
@@ -791,13 +843,15 @@ fn compute_static_troupes(script: &Script) -> ThinVec<TroupeId> {
 fn scan_effects(
     effects: &[Effect],
     all_troupes: &mut ThinVec<TroupeId>,
-    moving:      &mut ThinVec<TroupeId>,
+    moving: &mut ThinVec<TroupeId>,
 ) {
     for e in effects {
         match e {
             Effect::CueTroupe { troupe, delta, .. } => {
                 all_troupes.push(*troupe);
-                if *delta != Affine3A::IDENTITY { moving.push(*troupe); }
+                if *delta != Affine3A::IDENTITY {
+                    moving.push(*troupe);
+                }
             }
             Effect::ScheduleTransition { mealy, .. } => scan_effects(mealy, all_troupes, moving),
             _ => {}
@@ -805,24 +859,26 @@ fn scan_effects(
     }
 }
 
-fn scan_bt(
-    node: &BtNode,
-    all_troupes: &mut ThinVec<TroupeId>,
-    moving:      &mut ThinVec<TroupeId>,
-) {
+fn scan_bt(node: &BtNode, all_troupes: &mut ThinVec<TroupeId>, moving: &mut ThinVec<TroupeId>) {
     match node {
         BtNode::Sequence(cs) | BtNode::Selector(cs) => {
-            for c in cs { scan_bt(c, all_troupes, moving) }
+            for c in cs {
+                scan_bt(c, all_troupes, moving)
+            }
         }
         BtNode::Parallel { children, .. } => {
-            for c in children { scan_bt(c, all_troupes, moving) }
+            for c in children {
+                scan_bt(c, all_troupes, moving)
+            }
         }
         BtNode::Repeat { child, .. } => scan_bt(child, all_troupes, moving),
         BtNode::Decorator { child, .. } => scan_bt(child, all_troupes, moving),
         BtNode::Leaf(op) => {
             if let Effect::CueTroupe { troupe, delta, .. } = &*op.effect {
                 all_troupes.push(*troupe);
-                if *delta != Affine3A::IDENTITY { moving.push(*troupe); }
+                if *delta != Affine3A::IDENTITY {
+                    moving.push(*troupe);
+                }
             }
         }
     }

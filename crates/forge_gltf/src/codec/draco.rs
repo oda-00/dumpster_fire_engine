@@ -22,13 +22,13 @@ use crate::error::{GltfError, GltfResult};
 /// list in the same winding order as the original mesh.
 #[derive(Debug, Default)]
 pub struct DracoMesh {
-    pub positions:  ThinVec<[f32; 3]>,
-    pub normals:    ThinVec<[f32; 3]>,
+    pub positions: ThinVec<[f32; 3]>,
+    pub normals: ThinVec<[f32; 3]>,
     pub tex_coords: Vec<ThinVec<[f32; 2]>>,
-    pub colors:     Vec<ThinVec<[f32; 4]>>,
-    pub joints:     Vec<ThinVec<[u16; 4]>>,
-    pub weights:    Vec<ThinVec<[f32; 4]>>,
-    pub indices:    ThinVec<u32>,
+    pub colors: Vec<ThinVec<[f32; 4]>>,
+    pub joints: Vec<ThinVec<[u16; 4]>>,
+    pub weights: Vec<ThinVec<[f32; 4]>>,
+    pub indices: ThinVec<u32>,
     pub num_points: u32,
 }
 
@@ -44,34 +44,34 @@ pub fn decode(bytes: &[u8]) -> GltfResult<DracoMesh> {
     // implement; 3.x doesn't exist yet but we reject preemptively to surface
     // a clean error instead of decoding garbage.
     if header.major > 2 {
-        return Err(GltfError::UnsupportedFeature(
-            format!("Draco file format version {}.{} (decoder supports 1.x and 2.x)",
-                header.major, header.minor)
-        ));
+        return Err(GltfError::UnsupportedFeature(format!(
+            "Draco file format version {}.{} (decoder supports 1.x and 2.x)",
+            header.major, header.minor
+        )));
     }
     // We decode triangular meshes; point clouds use a different code path
     // (sequential-only) that glTF doesn't require.
     const ENCODER_TYPE_TRIANGULAR_MESH: u8 = 1;
     if header.encoder_type != ENCODER_TYPE_TRIANGULAR_MESH {
-        return Err(GltfError::UnsupportedFeature(
-            format!("Draco encoder_type {} (only triangular mesh = 1 is supported in glTF)",
-                header.encoder_type)
-        ));
+        return Err(GltfError::UnsupportedFeature(format!(
+            "Draco encoder_type {} (only triangular mesh = 1 is supported in glTF)",
+            header.encoder_type
+        )));
     }
 
     match header.encoder_method {
-        METHOD_SEQUENTIAL   => decode_sequential_mesh(&mut r, &header),
-        METHOD_EDGEBREAKER  => decode_edgebreaker_mesh(&mut r, &header),
-        m => Err(GltfError::UnsupportedFeature(
-            format!("Draco encoder method {m}")
-        )),
+        METHOD_SEQUENTIAL => decode_sequential_mesh(&mut r, &header),
+        METHOD_EDGEBREAKER => decode_edgebreaker_mesh(&mut r, &header),
+        m => Err(GltfError::UnsupportedFeature(format!(
+            "Draco encoder method {m}"
+        ))),
     }
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DRACO_MAGIC: &[u8; 5] = b"DRACO";
-const METHOD_SEQUENTIAL:  u8 = 0;
+const METHOD_SEQUENTIAL: u8 = 0;
 const METHOD_EDGEBREAKER: u8 = 1;
 
 // Draco spec attribute-type identifiers. Joints/Weights aren't standard
@@ -80,38 +80,38 @@ const METHOD_EDGEBREAKER: u8 = 1;
 // `ATTR_JOINTS` / `ATTR_WEIGHTS` synthetic constants below are this
 // decoder's own private mapping for `store_attribute` to dispatch on
 // after a generic stream has been classified by unique_id at parse time.
-const ATTR_POSITION:   u8 = 0;
-const ATTR_NORMAL:     u8 = 1;
-const ATTR_COLOR:      u8 = 2;
-const ATTR_TEX_COORD:  u8 = 3;
-const ATTR_GENERIC:    u8 = 4;
-const ATTR_JOINTS:     u8 = 5; // synthetic; assigned from generic+unique_id
-const ATTR_WEIGHTS:    u8 = 6; // synthetic; assigned from generic+unique_id
+const ATTR_POSITION: u8 = 0;
+const ATTR_NORMAL: u8 = 1;
+const ATTR_COLOR: u8 = 2;
+const ATTR_TEX_COORD: u8 = 3;
+const ATTR_GENERIC: u8 = 4;
+const ATTR_JOINTS: u8 = 5; // synthetic; assigned from generic+unique_id
+const ATTR_WEIGHTS: u8 = 6; // synthetic; assigned from generic+unique_id
 
 // Draco data-type identifiers consumed by the dequantize dispatch. Signed
 // variants don't appear in glTF accessors (which are u8/u16/u32/f32) so
 // we reject them with a clear error rather than carry dead match arms.
-const DT_UINT8:   u8 = 1;
-const DT_UINT16:  u8 = 3;
-const DT_UINT32:  u8 = 5;
+const DT_UINT8: u8 = 1;
+const DT_UINT16: u8 = 3;
+const DT_UINT32: u8 = 5;
 const DT_FLOAT32: u8 = 6;
 
 // Attribute encoder methods we actually implement. `INVALID`, `NORMALS_OCT`,
 // `KD_TREE` from the Draco spec are deliberately not declared here — they
 // surface as `UnsupportedFeature` via the `m => ...` arm in
 // `decode_attribute_*`.
-const ATTR_ENC_PREDICTION_DIFF:  u8 = 1;
-const ATTR_ENC_SCHEME_WRAP:      u8 = 2;
+const ATTR_ENC_PREDICTION_DIFF: u8 = 1;
+const ATTR_ENC_SCHEME_WRAP: u8 = 2;
 
 // Prediction schemes implemented in `decode_attr_values`. The Draco spec
 // also defines NORMAL_OCT (3) and GEOMETRIC_NORMAL (5) but they only apply
 // to encoded-normal streams which glTF rarely uses; we error cleanly on
 // them via the catch-all arm in the prediction dispatch.
-const PRED_NONE:            i8 = -2;
-const PRED_DELTA:           i8 = 0;
-const PRED_PARALLELOGRAM:   i8 = 1;
-const PRED_MULTI_PARAL:     i8 = 2;
-const PRED_MESH_MULTI_PARAL:i8 = 4;
+const PRED_NONE: i8 = -2;
+const PRED_DELTA: i8 = 0;
+const PRED_PARALLELOGRAM: i8 = 1;
+const PRED_MULTI_PARAL: i8 = 2;
+const PRED_MESH_MULTI_PARAL: i8 = 4;
 
 // ─── File header ─────────────────────────────────────────────────────────────
 
@@ -119,11 +119,11 @@ const PRED_MESH_MULTI_PARAL:i8 = 4;
 struct DracoHeader {
     /// Spec version major. Reject `> 2` (3.x doesn't exist yet, future-
     /// proofs against garbage decode).
-    major:          u8,
+    major: u8,
     /// Spec version minor. Currently unused but kept for diagnostics.
-    minor:          u8,
+    minor: u8,
     /// 0 = POINT_CLOUD, 1 = TRIANGULAR_MESH. glTF requires triangle meshes.
-    encoder_type:   u8,
+    encoder_type: u8,
     /// Picked by decode() to dispatch to sequential / edgebreaker.
     encoder_method: u8,
 }
@@ -133,11 +133,11 @@ fn decode_header(r: &mut Reader<'_>) -> GltfResult<DracoHeader> {
     if magic != DRACO_MAGIC {
         return Err(GltfError::InvalidAccessor("Draco: bad magic"));
     }
-    let major          = r.read_u8()?;
-    let minor          = r.read_u8()?;
-    let encoder_type   = r.read_u8()?;
+    let major = r.read_u8()?;
+    let minor = r.read_u8()?;
+    let encoder_type = r.read_u8()?;
     let encoder_method = r.read_u8()?;
-    let flags          = r.read_u16_le()?;
+    let flags = r.read_u16_le()?;
     // The flags word only carries the metadata-present bit (0x0001) in
     // currently-shipping Draco versions; consume the per-spec metadata
     // length so the cursor lines up for the encoder-method body.
@@ -145,7 +145,12 @@ fn decode_header(r: &mut Reader<'_>) -> GltfResult<DracoHeader> {
     if flags & FLAG_METADATA_PRESENT != 0 {
         let _meta_len = r.read_u32_le()?;
     }
-    Ok(DracoHeader { major, minor, encoder_type, encoder_method })
+    Ok(DracoHeader {
+        major,
+        minor,
+        encoder_type,
+        encoder_method,
+    })
 }
 
 // ─── Attribute descriptor ─────────────────────────────────────────────────────
@@ -154,38 +159,40 @@ fn decode_header(r: &mut Reader<'_>) -> GltfResult<DracoHeader> {
 struct AttrDesc {
     /// Draco attribute type, possibly remapped from ATTR_GENERIC to one of
     /// our synthetic ATTR_JOINTS / ATTR_WEIGHTS based on `unique_id`.
-    attr_type:      u8,
+    attr_type: u8,
     /// One of DT_UINT8 / DT_UINT16 / DT_UINT32 / DT_FLOAT32. Drives the
     /// dequantize integer-width branch in `decode_attr_values`.
-    data_type:      u8,
+    data_type: u8,
     num_components: u8,
     /// glTF "normalized" hint: integer values represent fixed-point
     /// fractions of the natural range (255 → 1.0 for u8, etc.). The
     /// dequantize step divides by `range_max` when this is set.
-    normalized:     bool,
+    normalized: bool,
     encoder_method: u8,
 }
 
 fn decode_connectivity_header(r: &mut Reader<'_>) -> GltfResult<(u32, u32, Vec<AttrDesc>)> {
-    let num_points    = r.read_u32_le()?;
-    let num_faces     = r.read_u32_le()?;
-    let num_attrs     = r.read_u8()? as u32;
+    let num_points = r.read_u32_le()?;
+    let num_faces = r.read_u32_le()?;
+    let num_attrs = r.read_u8()? as u32;
     let mut attrs = Vec::with_capacity(num_attrs as usize);
     for _ in 0..num_attrs {
-        let attr_type_raw  = r.read_u8()?;
-        let data_type      = r.read_u8()?;
+        let attr_type_raw = r.read_u8()?;
+        let data_type = r.read_u8()?;
         let num_components = r.read_u8()?;
-        let normalized     = r.read_u8()? != 0;
-        let unique_id      = r.read_u32_le()?;
+        let normalized = r.read_u8()? != 0;
+        let unique_id = r.read_u32_le()?;
 
         // Validate data_type against the four glTF-compatible variants
         // (signed integers don't appear in glTF accessors and Draco doesn't
         // emit them for ratified Khronos sample assets).
         match data_type {
             DT_UINT8 | DT_UINT16 | DT_UINT32 | DT_FLOAT32 => {}
-            other => return Err(GltfError::UnsupportedFeature(
-                format!("Draco data_type {other} (only UINT8/16/32 and FLOAT32 supported in glTF context)")
-            )),
+            other => {
+                return Err(GltfError::UnsupportedFeature(format!(
+                    "Draco data_type {other} (only UINT8/16/32 and FLOAT32 supported in glTF context)"
+                )));
+            }
         }
 
         // Draco stores joints/weights as ATTR_GENERIC streams with a
@@ -207,7 +214,10 @@ fn decode_connectivity_header(r: &mut Reader<'_>) -> GltfResult<(u32, u32, Vec<A
         };
 
         attrs.push(AttrDesc {
-            attr_type, data_type, num_components, normalized,
+            attr_type,
+            data_type,
+            num_components,
+            normalized,
             encoder_method: 0,
         });
     }
@@ -246,9 +256,9 @@ fn decode_sequential_mesh(r: &mut Reader<'_>, _hdr: &DracoHeader) -> GltfResult<
 }
 
 fn decode_sequential_indices(
-    r:          &mut Reader<'_>,
-    count:      usize,
-    bits:       u8,
+    r: &mut Reader<'_>,
+    count: usize,
+    bits: u8,
     num_points: u32,
 ) -> GltfResult<ThinVec<u32>> {
     // Draco's sequential index encoding switches between raw-width and
@@ -263,7 +273,7 @@ fn decode_sequential_indices(
         0 => {
             for _ in 0..count {
                 let delta = r.read_varint32()?;
-                let idx   = last.wrapping_add(delta) % modulus;
+                let idx = last.wrapping_add(delta) % modulus;
                 indices.push(idx);
                 last = idx;
             }
@@ -271,7 +281,7 @@ fn decode_sequential_indices(
         8 => {
             for _ in 0..count {
                 let delta = r.read_u8()? as u32;
-                let idx   = last.wrapping_add(delta) % modulus;
+                let idx = last.wrapping_add(delta) % modulus;
                 indices.push(idx);
                 last = idx;
             }
@@ -279,7 +289,7 @@ fn decode_sequential_indices(
         16 => {
             for _ in 0..count {
                 let delta = r.read_u16_le()? as u32;
-                let idx   = last.wrapping_add(delta) % modulus;
+                let idx = last.wrapping_add(delta) % modulus;
                 indices.push(idx);
                 last = idx;
             }
@@ -287,18 +297,23 @@ fn decode_sequential_indices(
         32 => {
             for _ in 0..count {
                 let delta = r.read_u32_le()?;
-                let idx   = last.wrapping_add(delta) % modulus;
+                let idx = last.wrapping_add(delta) % modulus;
                 indices.push(idx);
                 last = idx;
             }
         }
-        other => return Err(GltfError::InvalidAccessor(
-            // Carry the bad width back via the static-error string family;
-            // the spec is fixed about the set so this points at corrupt
-            // input rather than a missing feature.
-            if other > 32 { "Draco: index bits > 32 (spec violation)" }
-            else          { "Draco: invalid index bits (must be 0/8/16/32)" }
-        )),
+        other => {
+            return Err(GltfError::InvalidAccessor(
+                // Carry the bad width back via the static-error string family;
+                // the spec is fixed about the set so this points at corrupt
+                // input rather than a missing feature.
+                if other > 32 {
+                    "Draco: index bits > 32 (spec violation)"
+                } else {
+                    "Draco: invalid index bits (must be 0/8/16/32)"
+                },
+            ));
+        }
     }
     Ok(indices)
 }
@@ -318,9 +333,9 @@ fn decode_edgebreaker_mesh(r: &mut Reader<'_>, _hdr: &DracoHeader) -> GltfResult
     let (num_points, num_faces, mut attrs) = decode_connectivity_header(r)?;
 
     // EB connectivity data
-    let num_encoded_symbols     = r.read_u32_le()?;
-    let num_encoded_split_syms  = r.read_u32_le()?;
-    let num_attr_data           = r.read_u8()? as u32;
+    let num_encoded_symbols = r.read_u32_le()?;
+    let num_encoded_split_syms = r.read_u32_le()?;
+    let num_attr_data = r.read_u8()? as u32;
     // Per the Draco spec, split symbols are a subset of the main symbol
     // stream — they can never outnumber the total. A bitstream that
     // declares more splits than total symbols is corrupt; reject early.
@@ -355,14 +370,14 @@ fn decode_edgebreaker_mesh(r: &mut Reader<'_>, _hdr: &DracoHeader) -> GltfResult
     let mut handles: Vec<(u32, u32)> = Vec::with_capacity(num_handles as usize);
     for _ in 0..num_handles {
         let source = r.read_u32_le()?;
-        let dest   = r.read_u32_le()?;
+        let dest = r.read_u32_le()?;
         handles.push((source, dest));
     }
 
     // Reconstruct connectivity from CLERS symbols.
     let indices = reconstruct_edgebreaker(
         num_points as usize,
-        num_faces  as usize,
+        num_faces as usize,
         &symbols,
         &start_face_configs,
         &handles,
@@ -391,7 +406,7 @@ fn decode_clers_symbols(r: &mut Reader<'_>, count: usize) -> GltfResult<Vec<u8>>
     // Symbols are entropy-coded with rANS, 5 symbols: C L E R S (0..4).
     let data_len = r.read_u32_le()? as usize;
     let data = r.read_bytes(data_len)?;
-    rans_decode_symbols(&data, count, 5)
+    rans_decode_symbols(data, count, 5)
 }
 
 // ─── rANS decoder ────────────────────────────────────────────────────────────
@@ -399,12 +414,14 @@ fn decode_clers_symbols(r: &mut Reader<'_>, count: usize) -> GltfResult<Vec<u8>>
 /// Decode `count` symbols from an rANS stream.
 /// `num_symbols` is the alphabet size (max 256 for Draco).
 fn rans_decode_symbols(data: &[u8], count: usize, num_symbols: u32) -> GltfResult<Vec<u8>> {
-    if data.is_empty() { return Ok(vec![0; count]); }
+    if data.is_empty() {
+        return Ok(vec![0; count]);
+    }
 
     // The Draco rANS bitstream is read backwards (tail to head).
     // Header: 1 byte = symbol 0 probability precision bits (L_BITS = 12 or 13).
     let l_bits = data[0] as u32;
-    if l_bits < 1 || l_bits > 20 {
+    if !(1..=20).contains(&l_bits) {
         return Err(GltfError::InvalidAccessor("Draco rANS: invalid L bits"));
     }
     let l = 1u32 << l_bits;
@@ -431,14 +448,18 @@ fn rans_decode_symbols(data: &[u8], count: usize, num_symbols: u32) -> GltfResul
     // (`freqs[s]` of them) into three parallel tables. The inner
     // broadcasts use 8-wide u32 stores per iteration for the freq/bias
     // tables; sym_table is a u8 byte-fill via _mm_storeu_si128.
-    let mut sym_table  = vec![0u8;  l as usize];
+    let mut sym_table = vec![0u8; l as usize];
     let mut freq_table = vec![0u32; l as usize];
     let mut bias_table = vec![0u32; l as usize];
     #[cfg(target_arch = "x86_64")]
     unsafe {
         build_rans_decode_tables_sse2(
-            &cdf, &freqs, num_symbols as usize,
-            &mut sym_table, &mut freq_table, &mut bias_table,
+            &cdf,
+            &freqs,
+            num_symbols as usize,
+            &mut sym_table,
+            &mut freq_table,
+            &mut bias_table,
         );
     }
     #[cfg(not(target_arch = "x86_64"))]
@@ -446,7 +467,7 @@ fn rans_decode_symbols(data: &[u8], count: usize, num_symbols: u32) -> GltfResul
         for s in 0..num_symbols as usize {
             for slot in cdf[s]..cdf[s + 1] {
                 if (slot as usize) < sym_table.len() {
-                    sym_table[slot as usize]  = s as u8;
+                    sym_table[slot as usize] = s as u8;
                     freq_table[slot as usize] = freqs[s];
                     bias_table[slot as usize] = cdf[s];
                 }
@@ -476,7 +497,9 @@ fn rans_decode_symbols(data: &[u8], count: usize, num_symbols: u32) -> GltfResul
         // Decoding proceeds: decode symbol, then renormalize by reading
         // bytes from the *front* of the remaining encoded data.
         let slot = (state & l_mask) as usize;
-        if slot >= l as usize { break; }
+        if slot >= l as usize {
+            break;
+        }
         let sym = sym_table[slot];
         let freq = freq_table[slot];
         let bias = bias_table[slot];
@@ -493,17 +516,19 @@ fn rans_decode_symbols(data: &[u8], count: usize, num_symbols: u32) -> GltfResul
 }
 
 fn decode_rans_freq_table(
-    data:        &[u8],
-    pos:         &mut usize,
+    data: &[u8],
+    pos: &mut usize,
     num_symbols: usize,
-    l:           u32,
+    l: u32,
 ) -> GltfResult<Vec<u32>> {
     // Frequencies are encoded as a sequence of values that sum to L.
     // Draco uses a simple run-length + direct encoding.
     let mut freqs = vec![0u32; num_symbols];
 
     // Read the number of unique symbols that have non-zero frequency.
-    if *pos >= data.len() { return Ok(freqs); }
+    if *pos >= data.len() {
+        return Ok(freqs);
+    }
     let unique_count = data[*pos] as usize;
     *pos += 1;
 
@@ -511,19 +536,21 @@ fn decode_rans_freq_table(
     // Each entry: (symbol_index: varint, freq: varint).
     let mut remaining = l;
     for _ in 0..unique_count {
-        if *pos >= data.len() { break; }
+        if *pos >= data.len() {
+            break;
+        }
         let sym_idx = read_varint_at(data, pos)? as usize;
-        let freq    = read_varint_at(data, pos)?;
+        let freq = read_varint_at(data, pos)?;
         if sym_idx < num_symbols && freq <= remaining {
             freqs[sym_idx] = freq;
             remaining -= freq;
         }
     }
     // Last symbol gets the remainder (implicit).
-    if let Some(last_nonzero) = freqs.iter().rposition(|&f| f == 0) {
-        if remaining > 0 {
-            freqs[last_nonzero] = remaining;
-        }
+    if let Some(last_nonzero) = freqs.iter().rposition(|&f| f == 0)
+        && remaining > 0
+    {
+        freqs[last_nonzero] = remaining;
     }
     Ok(freqs)
 }
@@ -538,7 +565,9 @@ fn read_varint_at(data: &[u8], pos: &mut usize) -> GltfResult<u32> {
         let b = data[*pos];
         *pos += 1;
         val |= ((b & 0x7F) as u32) << shift;
-        if b & 0x80 == 0 { break; }
+        if b & 0x80 == 0 {
+            break;
+        }
         shift += 7;
         if shift >= 35 {
             return Err(GltfError::InvalidAccessor("Draco: varint overflow"));
@@ -550,11 +579,11 @@ fn read_varint_at(data: &[u8], pos: &mut usize) -> GltfResult<u32> {
 // ─── Edgebreaker connectivity reconstruction ──────────────────────────────────
 
 fn reconstruct_edgebreaker(
-    num_points:     usize,
-    num_faces:      usize,
-    symbols:        &[u8],
-    start_configs:  &[u8],
-    handles:        &[(u32, u32)],
+    num_points: usize,
+    num_faces: usize,
+    symbols: &[u8],
+    start_configs: &[u8],
+    handles: &[(u32, u32)],
 ) -> GltfResult<ThinVec<u32>> {
     // We track a "corner table" in progress.
     // Each triangle face has 3 corners (corner = 3*face + local_corner).
@@ -565,7 +594,7 @@ fn reconstruct_edgebreaker(
     // the attribute decoder to read out-of-bounds. The decoder needs a
     // floor of 3 for the start face's three corners.
     let max_points = num_points.max(3) as u32;
-    let max_faces  = num_faces.max(1);
+    let max_faces = num_faces.max(1);
 
     let mut face_indices: Vec<[u32; 3]> = Vec::with_capacity(max_faces);
     // vertex_id_map[corner] = point id
@@ -581,7 +610,7 @@ fn reconstruct_edgebreaker(
     let emit_vtx = |nv: &mut u32| -> Result<u32, GltfError> {
         if *nv >= max_points {
             return Err(GltfError::InvalidAccessor(
-                "Draco edgebreaker: vertex count exceeded declared num_points"
+                "Draco edgebreaker: vertex count exceeded declared num_points",
             ));
         }
         let v = *nv;
@@ -599,9 +628,9 @@ fn reconstruct_edgebreaker(
     // a real-world fixture demands them.
     let start_cfg = start_configs.first().copied().unwrap_or(0);
     if start_cfg != 0 {
-        return Err(GltfError::UnsupportedFeature(
-            format!("Draco edgebreaker start_face_config {start_cfg}")
-        ));
+        return Err(GltfError::UnsupportedFeature(format!(
+            "Draco edgebreaker start_face_config {start_cfg}"
+        )));
     }
     {
         face_indices.push([0, 0, 0]);
@@ -627,7 +656,7 @@ fn reconstruct_edgebreaker(
     for &sym in symbols {
         let active = match active_corners.last().copied() {
             Some(c) => c,
-            None    => break,
+            None => break,
         };
 
         match sym {
@@ -635,21 +664,28 @@ fn reconstruct_edgebreaker(
                 // C: right child. New face to the left of active corner.
                 let face_id = face_indices.len() as u32;
                 let c0 = face_id * 3;
-                let v_left  = vertex_ids[active as usize];
+                let v_left = vertex_ids[active as usize];
                 let v_right = if active % 3 == 2 {
                     vertex_ids[(active - 2) as usize]
                 } else {
                     vertex_ids[(active + 1) as usize]
                 };
                 vertex_ids.push(v_left);
-                vertex_ids.push(next_vertex); next_vertex += 1;
+                vertex_ids.push(next_vertex);
+                next_vertex += 1;
                 vertex_ids.push(v_right);
                 opp.push(active);
                 opp.push(u32::MAX);
                 opp.push(u32::MAX);
                 // Update opposite of active.
-                if (active as usize) < opp.len() { opp[active as usize] = c0; }
-                face_indices.push([vertex_ids[c0 as usize], vertex_ids[c0 as usize + 1], vertex_ids[c0 as usize + 2]]);
+                if (active as usize) < opp.len() {
+                    opp[active as usize] = c0;
+                }
+                face_indices.push([
+                    vertex_ids[c0 as usize],
+                    vertex_ids[c0 as usize + 1],
+                    vertex_ids[c0 as usize + 2],
+                ]);
                 *active_corners.last_mut().unwrap() = c0 + 1;
             }
             EB_R => {
@@ -664,12 +700,19 @@ fn reconstruct_edgebreaker(
                 };
                 vertex_ids.push(v0);
                 vertex_ids.push(v1);
-                vertex_ids.push(next_vertex); next_vertex += 1;
+                vertex_ids.push(next_vertex);
+                next_vertex += 1;
                 opp.push(u32::MAX);
                 opp.push(active);
                 opp.push(u32::MAX);
-                if (active as usize) < opp.len() { opp[active as usize] = c0 + 1; }
-                face_indices.push([vertex_ids[c0 as usize], vertex_ids[c0 as usize + 1], vertex_ids[c0 as usize + 2]]);
+                if (active as usize) < opp.len() {
+                    opp[active as usize] = c0 + 1;
+                }
+                face_indices.push([
+                    vertex_ids[c0 as usize],
+                    vertex_ids[c0 as usize + 1],
+                    vertex_ids[c0 as usize + 2],
+                ]);
                 *active_corners.last_mut().unwrap() = c0 + 2;
             }
             EB_L => {
@@ -683,13 +726,20 @@ fn reconstruct_edgebreaker(
                     vertex_ids[(active + 1) as usize]
                 };
                 vertex_ids.push(v_tip);
-                vertex_ids.push(next_vertex); next_vertex += 1;
+                vertex_ids.push(next_vertex);
+                next_vertex += 1;
                 vertex_ids.push(v_left);
                 opp.push(active);
                 opp.push(u32::MAX);
                 opp.push(u32::MAX);
-                if (active as usize) < opp.len() { opp[active as usize] = c0; }
-                face_indices.push([vertex_ids[c0 as usize], vertex_ids[c0 as usize + 1], vertex_ids[c0 as usize + 2]]);
+                if (active as usize) < opp.len() {
+                    opp[active as usize] = c0;
+                }
+                face_indices.push([
+                    vertex_ids[c0 as usize],
+                    vertex_ids[c0 as usize + 1],
+                    vertex_ids[c0 as usize + 2],
+                ]);
                 *active_corners.last_mut().unwrap() = c0 + 1;
             }
             EB_E => {
@@ -744,9 +794,12 @@ impl CornerTable {
     /// index (this is preferable to a panic in debug-only assertions).
     fn from_indices(num_points: usize, indices: &[u32]) -> Self {
         let num_corners = indices.len();
-        let num_faces   = num_corners / 3;
+        let num_faces = num_corners / 3;
         let limit = num_points.max(1) as u32;
-        let vtx: Vec<u32> = indices.iter().map(|&i| if i < limit { i } else { 0 }).collect();
+        let vtx: Vec<u32> = indices
+            .iter()
+            .map(|&i| if i < limit { i } else { 0 })
+            .collect();
 
         // Build edge-to-corner map for opposite-corner lookup. Only the
         // unit tests + future parallelogram-prediction path consume this
@@ -761,7 +814,7 @@ impl CornerTable {
                 let v0 = indices[c];
                 let v1 = indices[c / 3 * 3 + (c + 1) % 3];
                 if let Some(&opp_c) = edge_map.get(&(v1, v0)) {
-                    opp[c]              = opp_c;
+                    opp[c] = opp_c;
                     opp[opp_c as usize] = c as u32;
                 } else {
                     edge_map.insert((v0, v1), c as u32);
@@ -773,7 +826,8 @@ impl CornerTable {
         let _ = num_corners; // not used outside the test path
 
         Self {
-            #[cfg(test)] opp,
+            #[cfg(test)]
+            opp,
             vtx,
             num_faces,
         }
@@ -795,7 +849,11 @@ impl CornerTable {
     #[cfg(test)]
     fn opposite(&self, c: usize) -> Option<usize> {
         let o = self.opp[c];
-        if o == u32::MAX { None } else { Some(o as usize) }
+        if o == u32::MAX {
+            None
+        } else {
+            Some(o as usize)
+        }
     }
 
     // The remaining accessors (left, right, prev, next) are part of the
@@ -807,104 +865,140 @@ impl CornerTable {
     // Re-enable when parallelogram prediction (which needs all of them)
     // lands; gating to `cfg(test)` keeps the algebra documented without
     // emitting them into release artifacts.
-    #[cfg(test)] fn left (&self, c: usize) -> usize { c / 3 * 3 + (c + 1) % 3 }
-    #[cfg(test)] fn right(&self, c: usize) -> usize { c / 3 * 3 + (c + 2) % 3 }
-    #[cfg(test)] fn prev (&self, c: usize) -> usize { c / 3 * 3 + (c + 2) % 3 }
-    #[cfg(test)] fn next (&self, c: usize) -> usize { c / 3 * 3 + (c + 1) % 3 }
+    #[cfg(test)]
+    fn left(&self, c: usize) -> usize {
+        c / 3 * 3 + (c + 1) % 3
+    }
+    #[cfg(test)]
+    fn right(&self, c: usize) -> usize {
+        c / 3 * 3 + (c + 2) % 3
+    }
+    #[cfg(test)]
+    fn prev(&self, c: usize) -> usize {
+        c / 3 * 3 + (c + 2) % 3
+    }
+    #[cfg(test)]
+    fn next(&self, c: usize) -> usize {
+        c / 3 * 3 + (c + 1) % 3
+    }
 }
 
 // ─── Attribute decoders ───────────────────────────────────────────────────────
 
 fn decode_attribute_sequential(
-    r:       &mut Reader<'_>,
-    attr:    &AttrDesc,
+    r: &mut Reader<'_>,
+    attr: &AttrDesc,
     npoints: usize,
     indices: &[u32],
-    mesh:    &mut DracoMesh,
+    mesh: &mut DracoMesh,
 ) -> GltfResult<()> {
     // Read attribute encoding metadata.
     let encoding_method = attr.encoder_method;
-    let pred_method     = r.read_i8()? as i8;
-    let quantization    = if encoding_method == ATTR_ENC_PREDICTION_DIFF || encoding_method == ATTR_ENC_SCHEME_WRAP {
-        read_quantization_params(r)?
-    } else {
-        QuantizationParams::default()
-    };
+    let pred_method = r.read_i8()?;
+    let quantization =
+        if encoding_method == ATTR_ENC_PREDICTION_DIFF || encoding_method == ATTR_ENC_SCHEME_WRAP {
+            read_quantization_params(r)?
+        } else {
+            QuantizationParams::default()
+        };
 
     // Read the actual coded values (rANS or delta-coded, depending on pred).
     let nc = attr.num_components as usize;
     let values = decode_attr_values(
-        r, npoints, nc, pred_method, &quantization, indices,
-        attr.data_type, attr.normalized,
+        r,
+        npoints,
+        nc,
+        pred_method,
+        &quantization,
+        indices,
+        attr.data_type,
+        attr.normalized,
     )?;
 
     store_attribute(attr, npoints, nc, values, mesh)
 }
 
 fn decode_attribute_edgebreaker(
-    r:       &mut Reader<'_>,
-    attr:    &AttrDesc,
+    r: &mut Reader<'_>,
+    attr: &AttrDesc,
     npoints: usize,
-    ct:      &CornerTable,
-    mesh:    &mut DracoMesh,
+    ct: &CornerTable,
+    mesh: &mut DracoMesh,
 ) -> GltfResult<()> {
     let encoding_method = attr.encoder_method;
-    let pred_method     = r.read_i8()? as i8;
-    let quantization    = if encoding_method == ATTR_ENC_PREDICTION_DIFF || encoding_method == ATTR_ENC_SCHEME_WRAP {
-        read_quantization_params(r)?
-    } else {
-        QuantizationParams::default()
-    };
+    let pred_method = r.read_i8()?;
+    let quantization =
+        if encoding_method == ATTR_ENC_PREDICTION_DIFF || encoding_method == ATTR_ENC_SCHEME_WRAP {
+            read_quantization_params(r)?
+        } else {
+            QuantizationParams::default()
+        };
 
     let nc = attr.num_components as usize;
     // Reuse sequential decode with corner-order traversal for prediction.
     let values = decode_attr_values_eb(
-        r, npoints, nc, pred_method, &quantization, ct,
-        attr.data_type, attr.normalized,
+        r,
+        npoints,
+        nc,
+        pred_method,
+        &quantization,
+        ct,
+        attr.data_type,
+        attr.normalized,
     )?;
     store_attribute(attr, npoints, nc, values, mesh)
 }
 
 #[derive(Debug, Default, Clone)]
 struct QuantizationParams {
-    num_bits:    u8,
-    range:       f32,
-    min_values:  Vec<f32>,
+    num_bits: u8,
+    range: f32,
+    min_values: Vec<f32>,
 }
 
 fn read_quantization_params(r: &mut Reader<'_>) -> GltfResult<QuantizationParams> {
     let num_bits = r.read_u8()?;
     let nc = r.read_u8()? as usize;
     let mut min_values = Vec::with_capacity(nc);
-    for _ in 0..nc { min_values.push(r.read_f32_le()?); }
+    for _ in 0..nc {
+        min_values.push(r.read_f32_le()?);
+    }
     let range = r.read_f32_le()?;
-    Ok(QuantizationParams { num_bits, range, min_values })
+    Ok(QuantizationParams {
+        num_bits,
+        range,
+        min_values,
+    })
 }
 
 /// Decode raw coded attribute values and return them in row-major order
 /// (npoints × nc elements).
+#[allow(clippy::too_many_arguments)]
 fn decode_attr_values(
-    r:          &mut Reader<'_>,
-    npoints:    usize,
-    nc:         usize,
-    pred_method:i8,
-    q:          &QuantizationParams,
-    indices:    &[u32],
-    data_type:  u8,
+    r: &mut Reader<'_>,
+    npoints: usize,
+    nc: usize,
+    pred_method: i8,
+    q: &QuantizationParams,
+    indices: &[u32],
+    data_type: u8,
     normalized: bool,
 ) -> GltfResult<Vec<f32>> {
     let total = npoints * nc;
-    if total == 0 { return Ok(Vec::new()); }
+    if total == 0 {
+        return Ok(Vec::new());
+    }
 
     // Bounds-check the index stream against the point count we promised
     // the rest of the decoder — catches truncated streams up front rather
     // than dereferencing a stale index later.
     let max_idx = (npoints.saturating_sub(1)) as u32;
     if let Some(&bad) = indices.iter().find(|&&i| i > max_idx) {
-        return Err(GltfError::InvalidAccessor(
-            if bad as usize >= npoints * 2 { "Draco: index wildly out of range" }
-            else                            { "Draco: index out of range" }
-        ));
+        return Err(GltfError::InvalidAccessor(if bad as usize >= npoints * 2 {
+            "Draco: index wildly out of range"
+        } else {
+            "Draco: index out of range"
+        }));
     }
 
     // Read raw coded integers via portable rANS or direct varint stream.
@@ -912,19 +1006,23 @@ fn decode_attr_values(
     let data = r.read_bytes(data_len)?.to_vec();
 
     let raw_ints = match pred_method {
-        PRED_NONE
-        | PRED_DELTA
-        | PRED_PARALLELOGRAM
-        | PRED_MULTI_PARAL
-        | PRED_MESH_MULTI_PARAL => decode_delta_ints(&data, total)?,
-        other => return Err(GltfError::UnsupportedFeature(
-            format!("Draco prediction scheme {other}")
-        )),
+        PRED_NONE | PRED_DELTA | PRED_PARALLELOGRAM | PRED_MULTI_PARAL | PRED_MESH_MULTI_PARAL => {
+            decode_delta_ints(&data, total)?
+        }
+        other => {
+            return Err(GltfError::UnsupportedFeature(format!(
+                "Draco prediction scheme {other}"
+            )));
+        }
     };
 
     // Undo prediction (delta decoding) and dequantize.
-    let quant_max = if q.num_bits > 0 { (1u32 << q.num_bits) - 1 } else { 1 };
-    let scale     = if quant_max > 0 && q.range != 0.0 {
+    let quant_max = if q.num_bits > 0 {
+        (1u32 << q.num_bits) - 1
+    } else {
+        1
+    };
+    let scale = if quant_max > 0 && q.range != 0.0 {
         q.range / quant_max as f32
     } else {
         1.0
@@ -950,13 +1048,15 @@ fn decode_attr_values(
     // Per-type clamp ceiling driven by `data_type` so an oversized rANS
     // symbol doesn't wraparound past the natural u8/u16/u32/f32 range.
     let type_ceiling: i64 = match data_type {
-        DT_UINT8   => u8::MAX  as i64,
-        DT_UINT16  => u16::MAX as i64,
-        DT_UINT32  => u32::MAX as i64,
+        DT_UINT8 => u8::MAX as i64,
+        DT_UINT16 => u16::MAX as i64,
+        DT_UINT32 => u32::MAX as i64,
         DT_FLOAT32 => i32::MAX as i64, // f32 quantized: the scale handles range
-        _          => return Err(GltfError::UnsupportedFeature(
-            format!("Draco data_type {data_type}")
-        )),
+        _ => {
+            return Err(GltfError::UnsupportedFeature(format!(
+                "Draco data_type {data_type}"
+            )));
+        }
     };
     let clamp_max = (quant_max as i64).min(type_ceiling) as i32;
 
@@ -980,9 +1080,12 @@ fn decode_attr_values(
     let combined_scale = inv_norm * scale;
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        if nc >= 1 && nc <= 4 {
+        if (1..=4).contains(&nc) {
             dequantize_vertices_sse2(
-                &decoded, &mut out, npoints, nc,
+                &decoded,
+                &mut out,
+                npoints,
+                nc,
                 clamp_max,
                 combined_scale,
                 &q.min_values,
@@ -992,8 +1095,8 @@ fn decode_attr_values(
     }
     for i in 0..npoints {
         for c in 0..nc {
-            let q_val  = decoded[i * nc + c].clamp(0, clamp_max) as f32 / normalize_div;
-            let min    = *q.min_values.get(c).unwrap_or(&0.0);
+            let q_val = decoded[i * nc + c].clamp(0, clamp_max) as f32 / normalize_div;
+            let min = *q.min_values.get(c).unwrap_or(&0.0);
             out[i * nc + c] = min + q_val * scale;
         }
     }
@@ -1012,8 +1115,13 @@ pub fn bench_dequantize_helper(decoded: &[i32], out: &mut [f32], npoints: usize,
     let min_values = [-1.0f32, 0.0, 1.0, 0.0];
     unsafe {
         dequantize_vertices_sse2(
-            decoded, out, npoints, nc,
-            clamp_max, combined_scale, &min_values,
+            decoded,
+            out,
+            npoints,
+            nc,
+            clamp_max,
+            combined_scale,
+            &min_values,
         );
     }
 }
@@ -1027,20 +1135,22 @@ pub fn bench_dequantize_helper(decoded: &[i32], out: &mut [f32], npoints: usize,
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn build_rans_decode_tables_sse2(
-    cdf:         &[u32],
-    freqs:       &[u32],
+    cdf: &[u32],
+    freqs: &[u32],
     num_symbols: usize,
-    sym_table:   &mut [u8],
-    freq_table:  &mut [u32],
-    bias_table:  &mut [u32],
+    sym_table: &mut [u8],
+    freq_table: &mut [u32],
+    bias_table: &mut [u32],
 ) {
     use std::arch::x86_64::*;
     unsafe {
         let table_len = sym_table.len();
         for s in 0..num_symbols {
             let start = cdf[s] as usize;
-            let end   = (cdf[s + 1] as usize).min(table_len);
-            if start >= end { continue; }
+            let end = (cdf[s + 1] as usize).min(table_len);
+            if start >= end {
+                continue;
+            }
             let count = end - start;
 
             // sym_table: byte broadcast.
@@ -1082,19 +1192,19 @@ unsafe fn build_rans_decode_tables_sse2(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn dequantize_vertices_sse2(
-    decoded:        &[i32],
-    out:            &mut [f32],
-    npoints:        usize,
-    nc:             usize,
-    clamp_max:      i32,
+    decoded: &[i32],
+    out: &mut [f32],
+    npoints: usize,
+    nc: usize,
+    clamp_max: i32,
     combined_scale: f32,
-    min_values:     &[f32],
+    min_values: &[f32],
 ) {
     use std::arch::x86_64::*;
     unsafe {
         // Broadcast scalars across all lanes.
         let v_scale = _mm_set1_ps(combined_scale);
-        let v_zero  = _mm_setzero_ps();
+        let v_zero = _mm_setzero_ps();
         let v_max_f = _mm_set1_ps(clamp_max as f32);
 
         // Per-channel min[c] packed into the first nc lanes of the xmm
@@ -1107,7 +1217,11 @@ unsafe fn dequantize_vertices_sse2(
 
         // Walk all-but-last vertex with full 4-lane SIMD (safe because
         // we have at least `npoints * nc` valid input slots).
-        let main_pts = if nc == 4 { npoints } else { npoints.saturating_sub(1) };
+        let main_pts = if nc == 4 {
+            npoints
+        } else {
+            npoints.saturating_sub(1)
+        };
         for i in 0..main_pts {
             let src = decoded.as_ptr().add(i * nc) as *const __m128i;
             let dst = out.as_mut_ptr().add(i * nc);
@@ -1118,22 +1232,22 @@ unsafe fn dequantize_vertices_sse2(
             // Clamp to [0, clamp_max] — float clamp via min/max.
             let clamped = _mm_max_ps(_mm_min_ps(q_f, v_max_f), v_zero);
             // q_norm * scale + min  →  combined_scale absorbs 1/normalize_div.
-            let scaled  = _mm_mul_ps(clamped, v_scale);
-            let result  = _mm_add_ps(scaled, v_min);
+            let scaled = _mm_mul_ps(clamped, v_scale);
+            let result = _mm_add_ps(scaled, v_min);
             // Store only the first nc lanes. We use sequences of
             // _mm_store_ss + shuffles because the SSE2 partial-store
             // intrinsics that take a `*mut __m64` are MMX-only.
             match nc {
                 4 => _mm_storeu_ps(dst, result),
                 3 => {
-                    _mm_store_ss(dst,           result);
+                    _mm_store_ss(dst, result);
                     let r1 = _mm_shuffle_ps(result, result, 0b_00_00_00_01);
                     _mm_store_ss(dst.add(1), r1);
                     let r2 = _mm_movehl_ps(result, result);
                     _mm_store_ss(dst.add(2), r2);
                 }
                 2 => {
-                    _mm_store_ss(dst,           result);
+                    _mm_store_ss(dst, result);
                     let r1 = _mm_shuffle_ps(result, result, 0b_00_00_00_01);
                     _mm_store_ss(dst.add(1), r1);
                 }
@@ -1153,24 +1267,23 @@ unsafe fn dequantize_vertices_sse2(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_attr_values_eb(
-    r:           &mut Reader<'_>,
-    npoints:     usize,
-    nc:          usize,
+    r: &mut Reader<'_>,
+    npoints: usize,
+    nc: usize,
     pred_method: i8,
-    q:           &QuantizationParams,
-    ct:          &CornerTable,
-    data_type:   u8,
-    normalized:  bool,
+    q: &QuantizationParams,
+    ct: &CornerTable,
+    data_type: u8,
+    normalized: bool,
 ) -> GltfResult<Vec<f32>> {
     // For edgebreaker, attributes are decoded in corner traversal order
     // (one entry per corner = 3 entries per face). Build the corner→vertex
     // map via the CornerTable's public accessor so the attribute decoder
     // sees the same ordering the connectivity pass produced.
-    let num_corners = ct.num_faces as usize * 3;
-    let corner_to_vertex: Vec<u32> = (0..num_corners)
-        .map(|c| ct.vertex(c))
-        .collect();
+    let num_corners = ct.num_faces * 3;
+    let corner_to_vertex: Vec<u32> = (0..num_corners).map(|c| ct.vertex(c)).collect();
     // Cross-check: corner-table's reconstructed vertex map must agree with
     // the corner count derived from num_faces. A mismatch means upstream
     // edgebreaker reconstruction emitted an inconsistent table.
@@ -1179,7 +1292,16 @@ fn decode_attr_values_eb(
             "Draco edgebreaker corner table: face/vertex count mismatch",
         ));
     }
-    decode_attr_values(r, npoints, nc, pred_method, q, &corner_to_vertex, data_type, normalized)
+    decode_attr_values(
+        r,
+        npoints,
+        nc,
+        pred_method,
+        q,
+        &corner_to_vertex,
+        data_type,
+        normalized,
+    )
 }
 
 fn decode_delta_ints(data: &[u8], count: usize) -> GltfResult<Vec<i32>> {
@@ -1204,11 +1326,11 @@ fn decode_delta_ints(data: &[u8], count: usize) -> GltfResult<Vec<i32>> {
 }
 
 fn store_attribute(
-    attr:    &AttrDesc,
+    attr: &AttrDesc,
     npoints: usize,
-    nc:      usize,
-    values:  Vec<f32>,
-    mesh:    &mut DracoMesh,
+    nc: usize,
+    values: Vec<f32>,
+    mesh: &mut DracoMesh,
 ) -> GltfResult<()> {
     // Cross-check: the dequantize step guarantees `values.len() == npoints * nc`.
     // Anything else means an upstream truncation we should surface here so the
@@ -1221,7 +1343,8 @@ fn store_attribute(
     }
     match attr.attr_type {
         ATTR_POSITION => {
-            mesh.positions = values.chunks_exact(nc)
+            mesh.positions = values
+                .chunks_exact(nc)
                 .map(|c| {
                     let x = *c.first().unwrap_or(&0.0);
                     let y = *c.get(1).unwrap_or(&0.0);
@@ -1231,7 +1354,8 @@ fn store_attribute(
                 .collect();
         }
         ATTR_NORMAL => {
-            mesh.normals = values.chunks_exact(nc)
+            mesh.normals = values
+                .chunks_exact(nc)
                 .map(|c| {
                     let x = *c.first().unwrap_or(&0.0);
                     let y = *c.get(1).unwrap_or(&0.0);
@@ -1241,26 +1365,33 @@ fn store_attribute(
                 .collect();
         }
         ATTR_TEX_COORD => {
-            let tvec: ThinVec<[f32; 2]> = values.chunks_exact(nc)
+            let tvec: ThinVec<[f32; 2]> = values
+                .chunks_exact(nc)
                 .map(|c| [*c.first().unwrap_or(&0.0), *c.get(1).unwrap_or(&0.0)])
                 .collect();
             mesh.tex_coords.push(tvec);
         }
         ATTR_COLOR => {
-            let alpha = if nc >= 4 { true } else { false };
-            let cvec: ThinVec<[f32; 4]> = values.chunks_exact(nc)
+            let alpha = nc >= 4;
+            let cvec: ThinVec<[f32; 4]> = values
+                .chunks_exact(nc)
                 .map(|c| {
                     let r = *c.first().unwrap_or(&0.0);
                     let g = *c.get(1).unwrap_or(&0.0);
                     let b = *c.get(2).unwrap_or(&0.0);
-                    let a = if alpha { *c.get(3).unwrap_or(&1.0) } else { 1.0 };
+                    let a = if alpha {
+                        *c.get(3).unwrap_or(&1.0)
+                    } else {
+                        1.0
+                    };
                     [r, g, b, a]
                 })
                 .collect();
             mesh.colors.push(cvec);
         }
         ATTR_JOINTS => {
-            let jvec: ThinVec<[u16; 4]> = values.chunks_exact(nc)
+            let jvec: ThinVec<[u16; 4]> = values
+                .chunks_exact(nc)
                 .map(|c| {
                     [
                         c.first().unwrap_or(&0.0).clamp(0.0, 65535.0) as u16,
@@ -1273,7 +1404,8 @@ fn store_attribute(
             mesh.joints.push(jvec);
         }
         ATTR_WEIGHTS => {
-            let wvec: ThinVec<[f32; 4]> = values.chunks_exact(nc)
+            let wvec: ThinVec<[f32; 4]> = values
+                .chunks_exact(nc)
                 .map(|c| {
                     [
                         *c.first().unwrap_or(&0.0),
@@ -1298,13 +1430,15 @@ fn store_attribute(
 #[target_feature(enable = "sse2")]
 unsafe fn prefix_sum_per_channel_sse2(
     raw_ints: &[i32],
-    decoded:  &mut [i32],
-    npoints:  usize,
-    nc:       usize,
+    decoded: &mut [i32],
+    npoints: usize,
+    nc: usize,
 ) {
     use std::arch::x86_64::*;
     unsafe {
-        if nc == 0 || npoints == 0 { return; }
+        if nc == 0 || npoints == 0 {
+            return;
+        }
 
         if nc <= 4 {
             // Pack each per-vertex stripe into an i32x4 — unused lanes hold
@@ -1313,8 +1447,8 @@ unsafe fn prefix_sum_per_channel_sse2(
             for i in 0..npoints {
                 // Build a 4-lane register from the at-most-4 channels.
                 let mut lane = [0i32; 4];
-                for c in 0..nc {
-                    lane[c] = *raw_ints.get_unchecked(i * nc + c);
+                for (c, slot) in lane[..nc].iter_mut().enumerate() {
+                    *slot = *raw_ints.get_unchecked(i * nc + c);
                 }
                 let delta = _mm_loadu_si128(lane.as_ptr() as *const __m128i);
                 running = _mm_add_epi32(running, delta);
@@ -1325,8 +1459,8 @@ unsafe fn prefix_sum_per_channel_sse2(
                 // the same xmm register).
                 let mut out = [0i32; 4];
                 _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, running);
-                for c in 0..nc {
-                    *decoded.get_unchecked_mut(i * nc + c) = out[c];
+                for (c, &val) in out[..nc].iter().enumerate() {
+                    *decoded.get_unchecked_mut(i * nc + c) = val;
                 }
             }
         } else {
@@ -1335,7 +1469,11 @@ unsafe fn prefix_sum_per_channel_sse2(
             // accessor).
             let total = npoints * nc;
             for i in 0..total {
-                let prev = if i >= nc { *decoded.get_unchecked(i - nc) } else { 0 };
+                let prev = if i >= nc {
+                    *decoded.get_unchecked(i - nc)
+                } else {
+                    0
+                };
                 *decoded.get_unchecked_mut(i) = prev.wrapping_add(*raw_ints.get_unchecked(i));
             }
         }
@@ -1346,7 +1484,7 @@ unsafe fn prefix_sum_per_channel_sse2(
 
 struct Reader<'a> {
     data: &'a [u8],
-    pos:  usize,
+    pos: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -1398,7 +1536,9 @@ impl<'a> Reader<'a> {
         loop {
             let b = self.read_u8()?;
             val |= ((b & 0x7F) as u32) << shift;
-            if b & 0x80 == 0 { break; }
+            if b & 0x80 == 0 {
+                break;
+            }
             shift += 7;
             if shift >= 35 {
                 return Err(GltfError::InvalidAccessor("Draco: varint32 overflow"));
@@ -1409,8 +1549,10 @@ impl<'a> Reader<'a> {
 }
 
 fn read_u32_le(data: &[u8], off: usize) -> u32 {
-    if off + 4 > data.len() { return 0; }
-    u32::from_le_bytes([data[off], data[off+1], data[off+2], data[off+3]])
+    if off + 4 > data.len() {
+        return 0;
+    }
+    u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1464,7 +1606,7 @@ mod tests {
         // │/│
         // 2─3
         // tri0: 0,1,2   tri1: 1,3,2
-        let indices: ThinVec<u32> = [0,1,2,1,3,2].into_iter().collect();
+        let indices: ThinVec<u32> = [0, 1, 2, 1, 3, 2].into_iter().collect();
         let ct = CornerTable::from_indices(4, &indices);
         assert_eq!(ct.num_faces, 2);
         // Corner 1 (v=1, tri0) and corner 3 (v=1, tri1) share edge 1→2/2→1.
@@ -1490,15 +1632,15 @@ mod tests {
         let ct = CornerTable::from_indices(4, &indices);
         // Face 0 corners are 0, 1, 2; face 1 are 3, 4, 5.
         // For corner 0 (face 0, offset 0): left = 1, right = 2.
-        assert_eq!(ct.left(0),  1);
+        assert_eq!(ct.left(0), 1);
         assert_eq!(ct.right(0), 2);
-        assert_eq!(ct.next(0),  1);
-        assert_eq!(ct.prev(0),  2);
+        assert_eq!(ct.next(0), 1);
+        assert_eq!(ct.prev(0), 2);
         // For corner 4 (face 1, offset 1): left = 5, right = 3.
-        assert_eq!(ct.left(4),  5);
+        assert_eq!(ct.left(4), 5);
         assert_eq!(ct.right(4), 3);
-        assert_eq!(ct.next(4),  5);
-        assert_eq!(ct.prev(4),  3);
+        assert_eq!(ct.next(4), 5);
+        assert_eq!(ct.prev(4), 3);
     }
 
     /// SSE2 per-vertex dequantize must produce byte-identical output to
@@ -1529,14 +1671,24 @@ mod tests {
             let mut simd_out = vec![0.0f32; total];
             unsafe {
                 dequantize_vertices_sse2(
-                    &decoded, &mut simd_out, npoints, nc,
-                    clamp_max, combined_scale, &min_values,
+                    &decoded,
+                    &mut simd_out,
+                    npoints,
+                    nc,
+                    clamp_max,
+                    combined_scale,
+                    &min_values,
                 );
             }
             for i in 0..total {
-                assert!((scalar_out[i] - simd_out[i]).abs() < 1e-5,
+                assert!(
+                    (scalar_out[i] - simd_out[i]).abs() < 1e-5,
                     "nc={} i={}: scalar={} simd={}",
-                    nc, i, scalar_out[i], simd_out[i]);
+                    nc,
+                    i,
+                    scalar_out[i],
+                    simd_out[i]
+                );
             }
         }
     }
