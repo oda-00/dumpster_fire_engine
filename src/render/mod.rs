@@ -14,6 +14,10 @@ pub mod vulkan;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgpu_surface;
 pub mod window;
+pub mod ui_core;
+pub mod ui_render;
+pub mod ui_widgets;
+pub mod ui_editor;
 
 pub use app::*;
 pub use blas::*;
