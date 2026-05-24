@@ -52,6 +52,7 @@ version = "0.1.5"
 version = "1.0.7"
 
 [features]
+
 disable-alltargets-init = []
 force-dynamic = []
 force-static = []
@@ -65,3 +66,6 @@ repository = "taricorp/llvm-sys.rs"
 
 [badges.maintenance]
 status = "passively-maintained"
+
+[env]
+LLVM_SYS_180_PREFIX = { value = ".llvm/18", relative = true }
