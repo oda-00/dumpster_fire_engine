@@ -38,28 +38,49 @@ jobs:
 
       # ── LLVM 18 ──────────────────────────────────────────────────────────────
 
-      - name: Install LLVM 18 (Linux / macOS)
+      - name: Cache LLVM 18 (Linux / macOS)
         if: runner.os != 'Windows'
+        id: cache-llvm-unix
+        uses: actions/cache@v4
+        with:
+          path: .llvm/18
+          key: llvm-18.1.8-${{ matrix.os }}
+
+      - name: Install LLVM 18 (Linux / macOS)
+        if: runner.os != 'Windows' && steps.cache-llvm-unix.outputs.cache-hit != 'true'
         shell: bash
         run: |
           mkdir -p .llvm/18
           curl -fsSL \
             "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/${{ matrix.llvm_tarball }}" \
             | tar xJf - -C .llvm/18 --strip-components=1
+
+      - name: Set LLVM prefix (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
           echo "LLVM_SYS_180_PREFIX=$PWD/.llvm/18" >> "$GITHUB_ENV"
           echo "$PWD/.llvm/18/bin"                 >> "$GITHUB_PATH"
 
-      - name: Install LLVM 18 (Windows)
+      # Windows: the LLVM NSIS installer requires unconditional UAC elevation
+      # (even with /S) so we do NOT run it. Instead we set LLVM_SYS_180_PREFIX
+      # to a workspace-local directory and let vendor/llvm-sys/build.rs do the
+      # download + 7-Zip extraction (no admin needed — see PRs #32 and #33).
+      - name: Cache LLVM 18 (Windows)
+        if: runner.os == 'Windows'
+        id: cache-llvm-windows
+        uses: actions/cache@v4
+        with:
+          path: .llvm\18
+          key: llvm-18.1.8-windows-x86_64
+
+      - name: Set LLVM prefix (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe"
-          $tmp = "$env:TEMP\LLVM-18.1.8-win64.exe"
-          (New-Object System.Net.WebClient).DownloadFile($url, $tmp)
-          Start-Process -Wait $tmp -ArgumentList '/S'
-          $llvmDir = "C:\Program Files\LLVM"
-          Add-Content $env:GITHUB_ENV  "LLVM_SYS_180_PREFIX=$llvmDir"
-          Add-Content $env:GITHUB_PATH "$llvmDir\bin"
+          $prefix = "$env:GITHUB_WORKSPACE\.llvm\18"
+          Add-Content $env:GITHUB_ENV  "LLVM_SYS_180_PREFIX=$prefix"
+          Add-Content $env:GITHUB_PATH "$prefix\bin"
 
       # ── Platform-specific deps ────────────────────────────────────────────────
 
