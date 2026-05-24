@@ -46,6 +46,9 @@ gltf = { version = "1.4", default-features = false, features = [
 mikktspace = "0.3"
 object     = { version = "0.36", default-features = false, features = ["read", "std"] }
 forge_gltf = { path = "crates/forge_gltf" }
+fontdue    = "0.7"
+hashbrown  = "0.14"
+notify     = "6.1"
 
 [target.'cfg(unix)'.dependencies]
 # Used for UnixStream ancillary-fd transport (SCM_RIGHTS) when the engine
@@ -131,6 +134,10 @@ harness = false
 
 [[bench]]
 name = "script_hot_reload"
+harness = false
+
+[[bench]]
+name = "ui_core"
 harness = false
 
 [[bench]]
