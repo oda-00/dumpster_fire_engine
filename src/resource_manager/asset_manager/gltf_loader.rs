@@ -129,12 +129,32 @@ pub fn load_all_meshes_from_slice(bytes: &[u8]) -> Result<ThinVec<MeshOre>, Gltf
 }
 
 fn first_mesh_from_asset(asset: &GltfAsset) -> Result<MeshOre, GltfError> {
-    let mut meshes = all_meshes_from_asset(asset);
-    if meshes.is_empty() {
-        Err(GltfError::NoPrimitives)
-    } else {
-        Ok(meshes.swap_remove(0))
+    for mesh in &asset.meshes {
+        for prim in &mesh.primitives {
+            let n = prim.streams.positions.len();
+            let uv0 = prim.streams.uv_sets.first();
+            let vertices: ThinVec<ForgeVertex> = (0..n)
+                .map(|i| {
+                    ForgeVertex::new(
+                        prim.streams.positions[i],
+                        prim.streams
+                            .normals
+                            .get(i)
+                            .copied()
+                            .unwrap_or([0.0, 1.0, 0.0]),
+                        prim.streams
+                            .tangents
+                            .get(i)
+                            .copied()
+                            .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                        uv0.and_then(|s| s.get(i).copied()).unwrap_or([0.0, 0.0]),
+                    )
+                })
+                .collect();
+            return Ok(MeshOre::new(vertices, prim.indices.clone()));
+        }
     }
+    Err(GltfError::NoPrimitives)
 }
 
 fn all_meshes_from_asset(asset: &GltfAsset) -> ThinVec<MeshOre> {
