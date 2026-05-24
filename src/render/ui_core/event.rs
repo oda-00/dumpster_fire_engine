@@ -25,6 +25,7 @@ pub enum EventHandler {
     TextChanged(Box<dyn Fn(String) + Send + Sync>),
 }
 
+#[derive(Debug, Default)]
 pub struct EventBus {
     events: ThinVec<UiEvent>,
 }
@@ -45,8 +46,42 @@ impl EventBus {
     }
 }
 
-impl Default for EventBus {
-    fn default() -> Self {
-        Self::new()
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::ui_core::id::WidgetId;
+    use std::marker::PhantomData;
+    use std::num::NonZeroU32;
+
+    fn dummy_id(idx: u32) -> WidgetId {
+        WidgetId { idx, generation: NonZeroU32::new(1).unwrap(), _tag: PhantomData }
+    }
+
+    #[test]
+    fn event_bus_emit_and_drain() {
+        let mut bus = EventBus::new();
+        bus.emit(UiEvent::Click(dummy_id(0)));
+        bus.emit(UiEvent::Click(dummy_id(1)));
+        let drained: Vec<_> = bus.drain().collect();
+        assert_eq!(drained.len(), 2);
+    }
+
+    #[test]
+    fn event_bus_drain_clears() {
+        let mut bus = EventBus::new();
+        bus.emit(UiEvent::Click(dummy_id(0)));
+        let _ = bus.drain().count();
+        let second: Vec<_> = bus.drain().collect();
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn ui_event_value_changed_preserves_value() {
+        let ev = UiEvent::ValueChanged(dummy_id(5), 3.14);
+        match ev {
+            UiEvent::ValueChanged(_, v) => assert!((v - 3.14).abs() < 1e-6),
+            _ => panic!("wrong variant"),
+        }
     }
 }

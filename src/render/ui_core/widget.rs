@@ -6,7 +6,7 @@ use crate::render::ui_core::signal::Signal;
 use crate::resource_manager::world_manager::World;
 
 #[repr(u8)]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DirtyFlags {
     NONE = 0,
     LAYOUT = 1 << 0,

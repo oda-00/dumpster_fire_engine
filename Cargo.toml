@@ -137,6 +137,10 @@ name = "script_hot_reload"
 harness = false
 
 [[bench]]
+name = "ui_core"
+harness = false
+
+[[bench]]
 name = "full_system"
 harness = false
 

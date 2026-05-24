@@ -1,7 +1,5 @@
-use crate::render::vulkan::VulkanContext;
-use crate::render::window::FRAMES_IN_FLIGHT;
 use ash::vk;
-use std::mem;
+use crate::render::window::FRAMES_IN_FLIGHT;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -18,6 +16,7 @@ pub struct RingBuffer {
     mapped_ptrs: [*mut u8; FRAMES_IN_FLIGHT],
     current_frame: usize,
     capacity: usize,
+    mem_props: vk::PhysicalDeviceMemoryProperties,
 }
 
 impl RingBuffer {
@@ -32,7 +31,7 @@ impl RingBuffer {
         let mut mapped_ptrs: [*mut u8; FRAMES_IN_FLIGHT] = [std::ptr::null_mut(); FRAMES_IN_FLIGHT];
 
         for i in 0..FRAMES_IN_FLIGHT {
-            let (buf, mem, ptr) = Self::create_buffer(device, mem_props, initial_capacity);
+            let (buf, mem, ptr) = Self::alloc_buffer(device, mem_props, initial_capacity);
             buffers[i] = buf;
             memories[i] = mem;
             mapped_ptrs[i] = ptr;
@@ -45,10 +44,11 @@ impl RingBuffer {
             mapped_ptrs,
             current_frame: 0,
             capacity: initial_capacity,
+            mem_props: *mem_props,
         }
     }
 
-    fn create_buffer(
+    fn alloc_buffer(
         device: &ash::Device,
         mem_props: &vk::PhysicalDeviceMemoryProperties,
         size: usize,
@@ -72,7 +72,7 @@ impl RingBuffer {
                             | vk::MemoryPropertyFlags::HOST_COHERENT,
                     )
             })
-            .unwrap()
+            .expect("no host-visible coherent memory type found")
             .0;
 
         let alloc_info = vk::MemoryAllocateInfo::default()
@@ -94,7 +94,7 @@ impl RingBuffer {
     pub fn upload(&mut self, device: &ash::Device, data: &[u8]) {
         let idx = self.current_frame;
         if data.len() > self.capacity {
-            self.resize(device, data.len() * 2);
+            self.grow(device, data.len() * 2);
         }
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), self.mapped_ptrs[idx], data.len());
@@ -115,39 +115,31 @@ impl RingBuffer {
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
     }
 
+    #[inline]
     pub fn buffer(&self) -> vk::Buffer {
         self.buffers[self.current_frame]
     }
 
+    #[inline]
     pub fn size(&self) -> u32 {
         self.sizes[self.current_frame] as u32
     }
 
-    fn resize(&mut self, device: &ash::Device, new_capacity: usize) {
+    fn grow(&mut self, device: &ash::Device, new_capacity: usize) {
         for i in 0..FRAMES_IN_FLIGHT {
             unsafe {
+                device.unmap_memory(self.memories[i]);
                 device.destroy_buffer(self.buffers[i], None);
                 device.free_memory(self.memories[i], None);
             }
         }
-
-        let mem_props = unsafe {
-            let instance = std::ptr::null::<ash::Instance>();
-            (*instance).get_physical_device_memory_properties(vk::PhysicalDevice::null())
-        };
-
+        let mem_props = self.mem_props;
         for i in 0..FRAMES_IN_FLIGHT {
-            let (buf, mem, ptr) = Self::create_buffer(device, &mem_props, new_capacity);
+            let (buf, mem, ptr) = Self::alloc_buffer(device, &mem_props, new_capacity);
             self.buffers[i] = buf;
             self.memories[i] = mem;
             self.mapped_ptrs[i] = ptr;
         }
         self.capacity = new_capacity;
-    }
-}
-
-impl Drop for RingBuffer {
-    fn drop(&mut self) {
-        // Buffers and memory will be cleaned up by the Vulkan device
     }
 }

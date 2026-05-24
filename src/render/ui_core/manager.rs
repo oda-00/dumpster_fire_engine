@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use hashbrown::HashMap;
 use thin_vec::ThinVec;
 
@@ -5,14 +7,14 @@ use crate::render::ui_core::controller::Controller;
 use crate::render::ui_core::event::EventBus;
 use crate::render::ui_core::id::{WidgetArena, WidgetId, WidgetIdPath};
 use crate::render::ui_core::layout::{Constraint, LayoutContext, Rect, Size};
-use crate::render::ui_core::widget::{DirtyFlags, Widget};
+use crate::render::ui_core::widget::DirtyFlags;
 use crate::resource_manager::world_manager::World;
 
 pub struct UiManager {
     pub widgets: WidgetArena,
     pub root: Option<WidgetId>,
     pub event_bus: EventBus,
-    pub controllers: ThinVec<Box<dyn Controller>>,
+    pub controllers: ThinVec<Arc<dyn Controller>>,
     viewport_rect: Rect,
     path_to_id: HashMap<String, WidgetId>,
 }
@@ -29,7 +31,7 @@ impl UiManager {
         }
     }
 
-    pub fn register_controller(&mut self, ctrl: Box<dyn Controller>) {
+    pub fn register_controller(&mut self, ctrl: Arc<dyn Controller>) {
         self.controllers.push(ctrl);
     }
 
@@ -41,7 +43,17 @@ impl UiManager {
         self.viewport_rect = rect;
     }
 
-    pub fn get_widget_by_path(&mut self, path: &str) -> Option<WidgetId> {
+    #[inline]
+    pub fn viewport_width(&self) -> f32 {
+        self.viewport_rect.w
+    }
+
+    #[inline]
+    pub fn viewport_height(&self) -> f32 {
+        self.viewport_rect.h
+    }
+
+    pub fn get_widget_by_path(&self, path: &str) -> Option<WidgetId> {
         self.path_to_id.get(path).copied()
     }
 
@@ -67,9 +79,9 @@ impl UiManager {
             let mut ctx = LayoutContext::new();
             let constraint = Constraint {
                 min_width: 0.0,
-                max_width: f32::INFINITY,
+                max_width: self.viewport_rect.w,
                 min_height: 0.0,
-                max_height: f32::INFINITY,
+                max_height: self.viewport_rect.h,
             };
             self.measure(root, &mut ctx, constraint);
             self.arrange(root, self.viewport_rect);
@@ -77,7 +89,7 @@ impl UiManager {
     }
 
     fn measure(&mut self, id: WidgetId, ctx: &mut LayoutContext, constraint: Constraint) -> Size {
-        let w = self.widgets.get(id).expect("Widget not found");
+        let Some(w) = self.widgets.get(id) else { return Size { w: 0.0, h: 0.0 } };
         let child_constraints: ThinVec<Constraint> =
             w.children.iter().map(|_| constraint).collect();
         let child_refs: ThinVec<(WidgetId, Constraint)> =
@@ -88,7 +100,7 @@ impl UiManager {
     }
 
     fn arrange(&mut self, id: WidgetId, rect: Rect) {
-        let w = self.widgets.get_mut(id).expect("Widget not found");
+        let Some(w) = self.widgets.get_mut(id) else { return };
         w.rect = rect;
         let mut child_rects: ThinVec<(WidgetId, Rect)> = w
             .children
@@ -104,18 +116,16 @@ impl UiManager {
 
     pub fn tick(&mut self, world: &mut World) {
         let events: ThinVec<_> = self.event_bus.drain().collect();
-        for ev in events {
-            let controller_count = self.controllers.len();
-            for i in 0..controller_count {
-                let ctrl = &self.controllers[i];
-                ctrl.handle_event(&ev, world, self);
+        // Clone Arcs before the loop so we don't hold a borrow on self.controllers
+        // while passing &mut self to handle_event.
+        let controllers: ThinVec<Arc<dyn Controller>> =
+            self.controllers.iter().cloned().collect();
+        for ev in &events {
+            for ctrl in &controllers {
+                ctrl.handle_event(ev, world, self);
             }
         }
     }
-}
-
-pub fn mark_dirty(id: WidgetId, flags: DirtyFlags) {
-    let _ = (id, flags);
 }
 
 impl Default for UiManager {

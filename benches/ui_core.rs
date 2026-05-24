@@ -1,0 +1,117 @@
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::marker::PhantomData;
+use std::num::NonZeroU32;
+
+use dumpster_fire_engine::render::ui_core::{
+    id::WidgetId,
+    layout::{Constraint, LayoutContext, Rect, Size},
+    signal::Signal,
+    event::{EventBus, UiEvent},
+};
+
+fn dummy_id(idx: u32) -> WidgetId {
+    WidgetId { idx, generation: NonZeroU32::new(1).unwrap(), _tag: PhantomData }
+}
+
+// ── LayoutContext ──────────────────────────────────────────────────────────
+
+fn bench_layout_context_insert(c: &mut Criterion) {
+    c.bench_function("LayoutContext::set_size x1000", |b| {
+        b.iter(|| {
+            let mut ctx = LayoutContext::new();
+            for i in 0..1000u32 {
+                ctx.set_size(dummy_id(i), black_box(Size { w: i as f32, h: i as f32 }));
+            }
+        });
+    });
+}
+
+fn bench_layout_context_lookup(c: &mut Criterion) {
+    let mut ctx = LayoutContext::new();
+    for i in 0..1000u32 {
+        ctx.set_size(dummy_id(i), Size { w: i as f32, h: i as f32 });
+    }
+    c.bench_function("LayoutContext::get_size (hit)", |b| {
+        b.iter(|| ctx.get_size(black_box(dummy_id(500))));
+    });
+    c.bench_function("LayoutContext::get_size (miss)", |b| {
+        b.iter(|| ctx.get_size(black_box(dummy_id(9999))));
+    });
+}
+
+// ── Signal ─────────────────────────────────────────────────────────────────
+
+fn bench_signal_get(c: &mut Criterion) {
+    let s = Signal::new(42u32);
+    c.bench_function("Signal::get", |b| b.iter(|| black_box(s.get())));
+}
+
+fn bench_signal_set_change(c: &mut Criterion) {
+    let s = Signal::new(0u32);
+    c.bench_function("Signal::set (value changes)", |b| {
+        let mut v = 0u32;
+        b.iter(|| {
+            v = v.wrapping_add(1);
+            s.set(black_box(v));
+        });
+    });
+}
+
+fn bench_signal_set_noop(c: &mut Criterion) {
+    let s = Signal::new(42u32);
+    c.bench_function("Signal::set (no-op same value)", |b| {
+        b.iter(|| s.set(black_box(42u32)));
+    });
+}
+
+fn bench_signal_subscribe(c: &mut Criterion) {
+    c.bench_function("Signal::subscribe x100 unique", |b| {
+        b.iter(|| {
+            let s = Signal::new(0u32);
+            for i in 0..100u32 {
+                s.subscribe(dummy_id(i));
+            }
+            black_box(s.subscribers().len())
+        });
+    });
+}
+
+// ── EventBus ───────────────────────────────────────────────────────────────
+
+fn bench_event_bus_emit_drain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("EventBus");
+    for n in [10, 100, 1000] {
+        group.bench_with_input(BenchmarkId::new("emit+drain", n), &n, |b, &n| {
+            b.iter(|| {
+                let mut bus = EventBus::new();
+                for i in 0..n as u32 {
+                    bus.emit(UiEvent::Click(dummy_id(i)));
+                }
+                bus.drain().count()
+            });
+        });
+    }
+    group.finish();
+}
+
+// ── Constraint ────────────────────────────────────────────────────────────
+
+fn bench_constraint_clamp(c: &mut Criterion) {
+    let constraint = Constraint { min_width: 10.0, max_width: 800.0, min_height: 5.0, max_height: 600.0 };
+    c.bench_function("Constraint::clamp", |b| {
+        b.iter(|| constraint.clamp(black_box(Size { w: 500.0, h: 300.0 })));
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_layout_context_insert,
+    bench_layout_context_lookup,
+    bench_signal_get,
+    bench_signal_set_change,
+    bench_signal_set_noop,
+    bench_signal_subscribe,
+    bench_event_bus_emit_drain,
+    bench_constraint_clamp,
+);
+criterion_main!(benches);

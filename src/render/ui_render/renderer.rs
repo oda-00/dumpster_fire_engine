@@ -13,6 +13,7 @@ impl UIRenderer {
         Self { ring }
     }
 
+    #[inline]
     pub fn render(&mut self, drawlist: &DrawList, cmd: vk::CommandBuffer, device: &ash::Device) {
         if drawlist.vertices.is_empty() || drawlist.indices.is_empty() {
             return;

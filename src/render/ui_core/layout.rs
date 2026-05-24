@@ -1,3 +1,4 @@
+use hashbrown::HashMap;
 use thin_vec::ThinVec;
 
 use crate::render::ui_core::id::{WidgetArena, WidgetId};
@@ -43,22 +44,30 @@ impl Constraint {
 }
 
 pub struct LayoutContext {
-    sizes: ThinVec<(WidgetId, Size)>,
+    sizes: HashMap<WidgetId, Size>,
 }
 
 impl LayoutContext {
     pub fn new() -> Self {
         Self {
-            sizes: ThinVec::new(),
+            sizes: HashMap::new(),
         }
     }
 
+    #[inline]
     pub fn set_size(&mut self, id: WidgetId, size: Size) {
-        self.sizes.push((id, size));
+        self.sizes.insert(id, size);
     }
 
+    #[inline]
     pub fn get_size(&self, id: WidgetId) -> Option<Size> {
-        self.sizes.iter().find(|(i, _)| *i == id).map(|(_, s)| *s)
+        self.sizes.get(&id).copied()
+    }
+}
+
+impl Default for LayoutContext {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -72,12 +81,13 @@ pub trait LayoutSolver: Send + Sync {
     fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &mut WidgetArena);
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct RowLayout {
     pub gap: f32,
     pub cross_alignment: Alignment,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub enum Alignment {
     Start,
     Center,
@@ -129,6 +139,7 @@ impl LayoutSolver for RowLayout {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct ColumnLayout {
     pub gap: f32,
     pub cross_alignment: Alignment,
@@ -178,6 +189,7 @@ impl LayoutSolver for ColumnLayout {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
 pub struct NullLayout;
 
 impl LayoutSolver for NullLayout {
@@ -191,4 +203,46 @@ impl LayoutSolver for NullLayout {
     }
 
     fn arrange(&self, _rect: Rect, _children: &mut [(WidgetId, Rect)], _arena: &mut WidgetArena) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_context_get_set_roundtrip() {
+        let mut ctx = LayoutContext::new();
+        // Fabricate a WidgetId using the public fields on Handle.
+        let id = crate::render::ui_core::id::WidgetId {
+            idx: 0,
+            generation: std::num::NonZeroU32::new(1).unwrap(),
+            _tag: std::marker::PhantomData,
+        };
+        ctx.set_size(id, Size { w: 100.0, h: 50.0 });
+        let got = ctx.get_size(id).unwrap();
+        assert!((got.w - 100.0).abs() < 1e-6);
+        assert!((got.h - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn layout_context_missing_id_returns_none() {
+        let ctx = LayoutContext::new();
+        let id = crate::render::ui_core::id::WidgetId {
+            idx: 99,
+            generation: std::num::NonZeroU32::new(1).unwrap(),
+            _tag: std::marker::PhantomData,
+        };
+        assert!(ctx.get_size(id).is_none());
+    }
+
+    #[test]
+    fn constraint_clamp_enforces_bounds() {
+        let c = Constraint { min_width: 10.0, max_width: 200.0, min_height: 5.0, max_height: 100.0 };
+        let too_small = c.clamp(Size { w: 1.0, h: 1.0 });
+        assert!((too_small.w - 10.0).abs() < 1e-6);
+        assert!((too_small.h - 5.0).abs() < 1e-6);
+        let too_large = c.clamp(Size { w: 999.0, h: 999.0 });
+        assert!((too_large.w - 200.0).abs() < 1e-6);
+        assert!((too_large.h - 100.0).abs() < 1e-6);
+    }
 }
