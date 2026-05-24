@@ -4,6 +4,8 @@ use std::process::Command;
 fn main() {
     // Auto-install dev tooling that isn't handled by the patched llvm-sys build.rs.
     // Each function is idempotent: it checks whether the tool exists first.
+    ensure_llvm_windows();
+    ensure_shaderc_dll_windows();
     ensure_iai_callgrind_runner();
     ensure_vulkan_and_glslc();
     ensure_valgrind();
@@ -58,36 +60,51 @@ fn main() {
 
         // 3. Reuse a pre-built .spv if present.
         if Path::new(&out).exists() {
-            println!("cargo::warning=reusing pre-built {out} \
-                      (no compiler succeeded for {src})");
+            println!(
+                "cargo::warning=reusing pre-built {out} \
+                      (no compiler succeeded for {src})"
+            );
             continue;
         }
 
         // 4. Emit a warning rather than panicking — source is committed and
         //    will compile on the next build that has shaderc / Vulkan SDK.
-        println!("cargo::warning=could not compile {src} and no pre-built \
-                  {out} found; runtime loading of this shader will fail");
+        println!(
+            "cargo::warning=could not compile {src} and no pre-built \
+                  {out} found; runtime loading of this shader will fail"
+        );
     }
 }
 
 // ── Native shaderc path ────────────────────────────────────────────────────
 
 fn shader_kind(path: &str) -> shaderc::ShaderKind {
-    if      path.ends_with(".vert") || path.ends_with(".vert.glsl") { shaderc::ShaderKind::Vertex }
-    else if path.ends_with(".frag") || path.ends_with(".frag.glsl") { shaderc::ShaderKind::Fragment }
-    else if path.ends_with(".comp") || path.ends_with(".comp.glsl") { shaderc::ShaderKind::Compute }
-    else if path.ends_with(".rgen")                                  { shaderc::ShaderKind::RayGeneration }
-    else if path.ends_with(".rmiss")                                 { shaderc::ShaderKind::Miss }
-    else if path.ends_with(".rchit")                                 { shaderc::ShaderKind::ClosestHit }
-    else if path.ends_with(".rahit")                                 { shaderc::ShaderKind::AnyHit }
-    else if path.ends_with(".rint")                                  { shaderc::ShaderKind::Intersection }
-    else if path.ends_with(".rcall")                                 { shaderc::ShaderKind::Callable }
-    else                                                             { shaderc::ShaderKind::InferFromSource }
+    if path.ends_with(".vert") || path.ends_with(".vert.glsl") {
+        shaderc::ShaderKind::Vertex
+    } else if path.ends_with(".frag") || path.ends_with(".frag.glsl") {
+        shaderc::ShaderKind::Fragment
+    } else if path.ends_with(".comp") || path.ends_with(".comp.glsl") {
+        shaderc::ShaderKind::Compute
+    } else if path.ends_with(".rgen") {
+        shaderc::ShaderKind::RayGeneration
+    } else if path.ends_with(".rmiss") {
+        shaderc::ShaderKind::Miss
+    } else if path.ends_with(".rchit") {
+        shaderc::ShaderKind::ClosestHit
+    } else if path.ends_with(".rahit") {
+        shaderc::ShaderKind::AnyHit
+    } else if path.ends_with(".rint") {
+        shaderc::ShaderKind::Intersection
+    } else if path.ends_with(".rcall") {
+        shaderc::ShaderKind::Callable
+    } else {
+        shaderc::ShaderKind::InferFromSource
+    }
 }
 
 fn compile_native(sc: &shaderc::Compiler, src: &str, out: &str) -> bool {
     let source = match std::fs::read_to_string(src) {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => {
             println!("cargo::warning=shaderc: could not read {src}: {e}");
             return false;
@@ -96,7 +113,10 @@ fn compile_native(sc: &shaderc::Compiler, src: &str, out: &str) -> bool {
 
     let mut opts = shaderc::CompileOptions::new().expect("shaderc::CompileOptions::new");
     // Target Vulkan 1.3 / SPIR-V 1.6. Ray-tracing shaders require SPIR-V ≥ 1.4.
-    opts.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_3 as u32);
+    opts.set_target_env(
+        shaderc::TargetEnv::Vulkan,
+        shaderc::EnvVersion::Vulkan1_3 as u32,
+    );
     opts.set_target_spirv(shaderc::SpirvVersion::V1_6);
     // Enable debug info in non-release builds so renderdoc / NSight can show
     // source-level annotations.
@@ -114,7 +134,10 @@ fn compile_native(sc: &shaderc::Compiler, src: &str, out: &str) -> bool {
     match result {
         Ok(artifact) => {
             if artifact.get_num_warnings() > 0 {
-                println!("cargo::warning=shaderc {src}: {}", artifact.get_warning_messages());
+                println!(
+                    "cargo::warning=shaderc {src}: {}",
+                    artifact.get_warning_messages()
+                );
             }
             match std::fs::write(out, artifact.as_binary_u8()) {
                 Ok(()) => true,
@@ -135,11 +158,14 @@ fn compile_native(sc: &shaderc::Compiler, src: &str, out: &str) -> bool {
 
 struct ExtCompiler {
     binary: String,
-    kind:   ExtKind,
+    kind: ExtKind,
 }
 
 #[derive(Clone, Copy)]
-enum ExtKind { Glslc, Glslang }
+enum ExtKind {
+    Glslc,
+    Glslang,
+}
 
 fn find_ext_compiler() -> Option<ExtCompiler> {
     if let Ok(sdk) = std::env::var("VULKAN_SDK") {
@@ -154,10 +180,20 @@ fn find_ext_compiler() -> Option<ExtCompiler> {
         }
     }
     if Command::new("glslc").arg("--version").output().is_ok() {
-        return Some(ExtCompiler { binary: "glslc".into(), kind: ExtKind::Glslc });
+        return Some(ExtCompiler {
+            binary: "glslc".into(),
+            kind: ExtKind::Glslc,
+        });
     }
-    if Command::new("glslangValidator").arg("--version").output().is_ok() {
-        return Some(ExtCompiler { binary: "glslangValidator".into(), kind: ExtKind::Glslang });
+    if Command::new("glslangValidator")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        return Some(ExtCompiler {
+            binary: "glslangValidator".into(),
+            kind: ExtKind::Glslang,
+        });
     }
     None
 }
@@ -167,10 +203,15 @@ fn compile_external(ec: &ExtCompiler, src: &str, out: &str) -> bool {
         ExtKind::Glslc => {
             let mut cmd = Command::new(&ec.binary);
             // Explicit stage flags for double-extension files that glslc can't auto-detect.
-            if src.ends_with(".vert.glsl") { cmd.args(["-fshader-stage=vertex"]); }
-            else if src.ends_with(".frag.glsl") { cmd.args(["-fshader-stage=fragment"]); }
-            else if src.ends_with(".comp.glsl") { cmd.args(["-fshader-stage=compute"]); }
-            cmd.args(["--target-env=vulkan1.3", src, "-o", out]).status()
+            if src.ends_with(".vert.glsl") {
+                cmd.args(["-fshader-stage=vertex"]);
+            } else if src.ends_with(".frag.glsl") {
+                cmd.args(["-fshader-stage=fragment"]);
+            } else if src.ends_with(".comp.glsl") {
+                cmd.args(["-fshader-stage=compute"]);
+            }
+            cmd.args(["--target-env=vulkan1.3", src, "-o", out])
+                .status()
         }
         ExtKind::Glslang => Command::new(&ec.binary)
             .args(["--target-env", "vulkan1.3", "-V", src, "-o", out])
@@ -179,7 +220,10 @@ fn compile_external(ec: &ExtCompiler, src: &str, out: &str) -> bool {
     match status {
         Ok(s) if s.success() => true,
         Ok(s) => {
-            println!("cargo::warning=external compiler exited {:?} on {src}", s.code());
+            println!(
+                "cargo::warning=external compiler exited {:?} on {src}",
+                s.code()
+            );
             false
         }
         Err(e) => {
@@ -190,7 +234,151 @@ fn compile_external(ec: &ExtCompiler, src: &str, out: &str) -> bool {
 }
 
 // ── Dev-tooling bootstrap ──────────────────────────────────────────────────
+fn ensure_llvm_windows() {
+    if std::env::consts::OS != "windows" {
+        return;
+    }
+    let prefix = std::env::var("LLVM_SYS_180_PREFIX").unwrap_or_else(|_| ".llvm/18".to_string());
+    let llvm_path = Path::new(&prefix);
+    if llvm_path.join("bin/llvm-config.exe").exists() {
+        return;
+    }
+    println!("cargo::warning=Downloading prebuilt LLVM 18 for Windows...");
+    let url = "https://github.com/PLC-lang/llvm-package-windows/releases/download/llvm-18.1.8/llvm-18.1.8-msvc19-x86_64.zip";
+    let zip_path = llvm_path.with_extension("zip");
+    std::fs::create_dir_all(llvm_path).unwrap();
 
+    // Download with curl or PowerShell
+    let ok = if Command::new("curl").arg("--version").output().is_ok() {
+        Command::new("curl")
+            .args(["-L", "-o", zip_path.to_str().unwrap(), url])
+            .status()
+    } else {
+        Command::new("powershell")
+            .args([
+                "-Command",
+                &format!(
+                    "Invoke-WebRequest -Uri {} -OutFile {}",
+                    url,
+                    zip_path.display()
+                ),
+            ])
+            .status()
+    }
+    .map(|s| s.success())
+    .unwrap_or(false);
+
+    if !ok {
+        println!("cargo::warning=Failed to download LLVM");
+        return;
+    }
+
+    // Extract using PowerShell (or fallback to tar)
+    let temp = llvm_path.join("temp_extract");
+    std::fs::create_dir_all(&temp).unwrap();
+    let extract_ok = if Command::new("powershell").output().is_ok() {
+        Command::new("powershell")
+            .args([
+                "-Command",
+                &format!(
+                    "Expand-Archive -Path {} -DestinationPath {} -Force",
+                    zip_path.display(),
+                    temp.display()
+                ),
+            ])
+            .status()
+    } else {
+        Command::new("tar")
+            .args([
+                "-xf",
+                zip_path.to_str().unwrap(),
+                "-C",
+                temp.to_str().unwrap(),
+            ])
+            .status()
+    }
+    .map(|s| s.success())
+    .unwrap_or(false);
+
+    if extract_ok {
+        // The zip contains one subfolder like "llvm-18.1.8-msvc19-x86_64"
+        let entries: Vec<_> = std::fs::read_dir(&temp)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        let source = if entries.len() == 1 && entries[0].path().is_dir() {
+            entries[0].path()
+        } else {
+            temp.clone()
+        };
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let dest = llvm_path.join(entry.file_name());
+            std::fs::rename(entry.path(), &dest).unwrap();
+        }
+        std::fs::remove_dir_all(temp).ok();
+        std::fs::remove_file(zip_path).ok();
+        println!("cargo::warning=LLVM installed to {}", llvm_path.display());
+    } else {
+        println!("cargo::warning=Failed to extract LLVM");
+    }
+}
+fn ensure_shaderc_dll_windows() {
+    if std::env::consts::OS != "windows" {
+        return;
+    }
+    // Look for shaderc_shared.dll in standard places
+    let dll_name = "shaderc_shared.dll";
+    let search_paths = vec![
+        std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("debug"),
+        std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("release"),
+        std::env::var("VULKAN_SDK")
+            .map(|s| Path::new(&s).join("Bin"))
+            .unwrap_or_default(),
+    ];
+    for path in &search_paths {
+        if path.join(dll_name).exists() {
+            return; // already present
+        }
+    }
+
+    println!("cargo::warning=Downloading shaderc_shared.dll...");
+    let url = "https://github.com/google/shaderc/releases/download/v2024.0/shaderc_shared.dll";
+    let dest = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join("debug")
+        .join(dll_name);
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    let status = if Command::new("curl").arg("--version").output().is_ok() {
+        Command::new("curl")
+            .args(["-L", "-o", dest.to_str().unwrap(), url])
+            .status()
+    } else {
+        Command::new("powershell")
+            .args([
+                "-Command",
+                &format!("Invoke-WebRequest -Uri {} -OutFile {}", url, dest.display()),
+            ])
+            .status()
+    };
+    if status.ok().map_or(false, |s| s.success()) {
+        println!(
+            "cargo::warning=shaderc_shared.dll downloaded to {}",
+            dest.display()
+        );
+    } else {
+        println!(
+            "cargo::warning=Failed to download shaderc_shared.dll; shaderc will build from source (slow)"
+        );
+    }
+}
 fn ensure_iai_callgrind_runner() {
     // iai-callgrind requires valgrind, which doesn't exist on Windows.
     if std::env::consts::OS == "windows" {
@@ -216,7 +404,13 @@ fn ensure_iai_callgrind_runner() {
     }
     println!("cargo::warning=Installing iai-callgrind-runner {VERSION} (one-time)...");
     let status = Command::new("cargo")
-        .args(["install", "iai-callgrind-runner", "--version", VERSION, "--locked"])
+        .args([
+            "install",
+            "iai-callgrind-runner",
+            "--version",
+            VERSION,
+            "--locked",
+        ])
         .status();
     if !matches!(status, Ok(s) if s.success()) {
         println!(
@@ -230,7 +424,10 @@ fn ensure_iai_callgrind_runner() {
 fn ensure_vulkan_and_glslc() {
     let os = std::env::consts::OS;
     let has_glslc = Command::new("glslc").arg("--version").output().is_ok()
-        || Command::new("glslangValidator").arg("--version").output().is_ok();
+        || Command::new("glslangValidator")
+            .arg("--version")
+            .output()
+            .is_ok();
 
     // Detect whether the Vulkan runtime loader is present by probing for
     // the shared library directly — ash loads it at runtime via dlopen.
@@ -240,12 +437,12 @@ fn ensure_vulkan_and_glslc() {
             out.map(|o| String::from_utf8_lossy(&o.stdout).contains("libvulkan"))
                 .unwrap_or(false)
         }
-        "macos" => Path::new("/usr/local/lib/libvulkan.dylib").exists()
-            || Path::new("/opt/homebrew/lib/libvulkan.dylib").exists()
-            || std::env::var("VULKAN_SDK").is_ok(),
-        "windows" => {
-            Command::new("where").arg("vulkan-1.dll").output().is_ok()
+        "macos" => {
+            Path::new("/usr/local/lib/libvulkan.dylib").exists()
+                || Path::new("/opt/homebrew/lib/libvulkan.dylib").exists()
+                || std::env::var("VULKAN_SDK").is_ok()
         }
+        "windows" => Command::new("where").arg("vulkan-1.dll").output().is_ok(),
         _ => true,
     };
 
@@ -256,10 +453,19 @@ fn ensure_vulkan_and_glslc() {
     match os {
         "linux" => {
             let mut pkgs: Vec<&str> = Vec::new();
-            if !has_vulkan { pkgs.extend_from_slice(&["libvulkan1", "libvulkan-dev"]); }
-            if !has_glslc  { pkgs.push("glslang-tools"); }
-            if pkgs.is_empty() { return; }
-            println!("cargo::warning=Installing Vulkan/glslc packages: {:?}", pkgs);
+            if !has_vulkan {
+                pkgs.extend_from_slice(&["libvulkan1", "libvulkan-dev"]);
+            }
+            if !has_glslc {
+                pkgs.push("glslang-tools");
+            }
+            if pkgs.is_empty() {
+                return;
+            }
+            println!(
+                "cargo::warning=Installing Vulkan/glslc packages: {:?}",
+                pkgs
+            );
             let mut args = vec!["apt-get", "install", "-y"];
             args.extend_from_slice(&pkgs);
             let ok = try_with_sudo("apt-get", &args[1..]);
@@ -297,9 +503,7 @@ fn ensure_valgrind() {
         return;
     }
     let os = std::env::consts::OS;
-    println!(
-        "cargo::warning=valgrind not found; iai-callgrind benchmarks require it on Linux."
-    );
+    println!("cargo::warning=valgrind not found; iai-callgrind benchmarks require it on Linux.");
     match os {
         "linux" => {
             let ok = try_with_sudo("apt-get", &["install", "-y", "valgrind"]);
@@ -320,7 +524,9 @@ fn ensure_valgrind() {
 /// Returns true if the command succeeds.
 fn try_with_sudo(cmd: &str, args: &[&str]) -> bool {
     let is_root = std::env::var("EUID").as_deref() == Ok("0")
-        || Command::new("id").arg("-u").output()
+        || Command::new("id")
+            .arg("-u")
+            .output()
             .map(|o| o.stdout.starts_with(b"0"))
             .unwrap_or(false);
     let status = if is_root {

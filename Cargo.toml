@@ -55,7 +55,7 @@ forge_gltf = { path = "crates/forge_gltf" }
 rustix = { version = "0.38", features = ["net", "fs"] }
 
 [build-dependencies]
-shaderc = "0.8"
+shaderc = { version = "0.8", features = ["shaderc-shared"] }
 
 [dev-dependencies]
 slotmap       = "1"
