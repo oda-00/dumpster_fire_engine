@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use hashbrown::HashMap;
 use thin_vec::ThinVec;
 
 use crate::render::ui_core::controller::Controller;
@@ -16,7 +15,9 @@ pub struct UiManager {
     pub event_bus: EventBus,
     pub controllers: ThinVec<Arc<dyn Controller>>,
     viewport_rect: Rect,
-    path_to_id: HashMap<String, WidgetId>,
+    /// Path → WidgetId mapping. Sorted by path so lookup uses
+    /// `partition_point` (O(log N), same pattern as ScriptManager::id_to_handle).
+    path_to_id: ThinVec<(String, WidgetId)>,
 }
 
 impl UiManager {
@@ -27,7 +28,7 @@ impl UiManager {
             event_bus: EventBus::new(),
             controllers: ThinVec::new(),
             viewport_rect,
-            path_to_id: HashMap::new(),
+            path_to_id: ThinVec::new(),
         }
     }
 
@@ -54,11 +55,20 @@ impl UiManager {
     }
 
     pub fn get_widget_by_path(&self, path: &str) -> Option<WidgetId> {
-        self.path_to_id.get(path).copied()
+        let pos = self.path_to_id.partition_point(|(p, _)| p.as_str() < path);
+        self.path_to_id
+            .get(pos)
+            .filter(|(p, _)| p.as_str() == path)
+            .map(|(_, id)| *id)
     }
 
     pub fn register_widget_path(&mut self, path: String, id: WidgetId) {
-        self.path_to_id.insert(path, id);
+        let pos = self.path_to_id.partition_point(|(p, _)| p.as_str() < path.as_str());
+        if self.path_to_id.get(pos).map(|(p, _)| p.as_str()) == Some(path.as_str()) {
+            self.path_to_id[pos].1 = id; // update existing entry
+        } else {
+            self.path_to_id.insert(pos, (path, id));
+        }
     }
 
     #[inline]

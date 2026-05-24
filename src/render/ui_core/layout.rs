@@ -1,4 +1,3 @@
-use hashbrown::HashMap;
 use thin_vec::ThinVec;
 
 use crate::render::ui_core::id::{WidgetArena, WidgetId};
@@ -43,25 +42,33 @@ impl Constraint {
     }
 }
 
+/// Per-frame layout scratch: maps WidgetId → measured Size.
+///
+/// Uses a direct-index ThinVec keyed by `WidgetId::idx` — the same
+/// range-compressed pattern as `Play::id_lookup`.  Arena indices are dense
+/// (0, 1, 2, …) so gaps are rare and the array stays small.  Cleared and
+/// reused each layout pass to avoid allocations.
 pub struct LayoutContext {
-    sizes: HashMap<WidgetId, Size>,
+    sizes: ThinVec<Option<Size>>,
 }
 
 impl LayoutContext {
     pub fn new() -> Self {
-        Self {
-            sizes: HashMap::new(),
-        }
+        Self { sizes: ThinVec::new() }
     }
 
     #[inline]
     pub fn set_size(&mut self, id: WidgetId, size: Size) {
-        self.sizes.insert(id, size);
+        let idx = id.idx as usize;
+        if idx >= self.sizes.len() {
+            self.sizes.resize(idx + 1, None);
+        }
+        self.sizes[idx] = Some(size);
     }
 
     #[inline]
     pub fn get_size(&self, id: WidgetId) -> Option<Size> {
-        self.sizes.get(&id).copied()
+        self.sizes.get(id.idx as usize).copied().flatten()
     }
 }
 

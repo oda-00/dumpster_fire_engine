@@ -2,7 +2,7 @@ use crate::forge_master::ore::ForgeImage;
 use crate::render::vulkan::VulkanContext;
 use ash::vk;
 use fontdue::{Font, FontSettings};
-use hashbrown::HashMap;
+use thin_vec::ThinVec;
 
 #[derive(Copy, Clone, Debug)]
 pub struct GlyphRect {
@@ -20,7 +20,9 @@ pub struct GlyphRect {
 pub struct FontAtlas {
     pub texture: ForgeImage,
     pub atlas_size: (u32, u32),
-    glyph_map: HashMap<(char, u16), GlyphRect>,
+    /// Glyph cache sorted by `(char, size_px)` for O(log N) binary search —
+    /// same pattern as the object-loader's sorted symbol table.
+    glyph_cache: ThinVec<((char, u16), GlyphRect)>,
     fonts: Vec<Font>,
     next_x: u32,
     next_y: u32,
@@ -47,7 +49,7 @@ impl FontAtlas {
         Self {
             texture,
             atlas_size: (1024, 1024),
-            glyph_map: HashMap::new(),
+            glyph_cache: ThinVec::new(),
             fonts: vec![font],
             next_x: 0,
             next_y: 0,
@@ -56,8 +58,10 @@ impl FontAtlas {
     }
 
     pub fn get_glyph(&mut self, ch: char, size: u16) -> GlyphRect {
-        if let Some(rect) = self.glyph_map.get(&(ch, size)) {
-            return *rect;
+        let key = (ch, size);
+        let pos = self.glyph_cache.partition_point(|&(k, _)| k < key);
+        if self.glyph_cache.get(pos).map(|&(k, _)| k) == Some(key) {
+            return self.glyph_cache[pos].1;
         }
 
         let (metrics, _bitmap) = self.fonts[0].rasterize(ch, size as f32);
@@ -76,7 +80,7 @@ impl FontAtlas {
                 off_x: metrics.xmin as f32,
                 off_y: -metrics.ymin as f32,
             };
-            self.glyph_map.insert((ch, size), rect);
+            self.glyph_cache.insert(pos, (key, rect));
             return rect;
         }
 
@@ -107,7 +111,9 @@ impl FontAtlas {
             off_y: -metrics.ymin as f32,
         };
 
-        self.glyph_map.insert((ch, size), rect);
+        // Insert maintaining sorted order (glyphs are typically added in text-scan
+        // order so pos ≈ len — amortised O(1) push, O(N) worst case shift).
+        self.glyph_cache.insert(pos, (key, rect));
         self.next_x += w;
         self.row_height = self.row_height.max(h);
 
@@ -119,6 +125,6 @@ impl FontAtlas {
         self.next_x = 0;
         self.next_y = 0;
         self.row_height = 0;
-        self.glyph_map.clear();
+        self.glyph_cache.clear();
     }
 }
