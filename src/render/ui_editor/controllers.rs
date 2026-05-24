@@ -7,7 +7,7 @@ pub struct TransformController;
 impl Controller for TransformController {
     fn handle_event(&self, event: &UiEvent, _world: &mut World, _ui: &mut UiManager) {
         match event {
-            UiEvent::ValueChanged(_wid, _value) | UiEvent::Click(_wid) => {}
+            UiEvent::ValueChanged(_, _) | UiEvent::Click(_) => {}
             _ => {}
         }
     }

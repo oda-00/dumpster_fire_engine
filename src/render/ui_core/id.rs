@@ -6,6 +6,7 @@ use thin_vec::ThinVec;
 
 use crate::resource_manager::manager::{Arena, Handle};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WidgetTag;
 pub type WidgetId = Handle<WidgetTag>;
 pub type WidgetArena = Arena<WidgetTag, super::widget::Widget>;

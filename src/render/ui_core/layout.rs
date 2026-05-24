@@ -78,7 +78,7 @@ pub trait LayoutSolver: Send + Sync {
         arena: &WidgetArena,
         ctx: &mut LayoutContext,
     ) -> Size;
-    fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &mut WidgetArena);
+    fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &WidgetArena);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +89,7 @@ pub struct RowLayout {
 
 #[derive(Debug, Copy, Clone, Default)]
 pub enum Alignment {
+    #[default]
     Start,
     Center,
     End,
@@ -102,8 +103,8 @@ impl LayoutSolver for RowLayout {
         arena: &WidgetArena,
         ctx: &mut LayoutContext,
     ) -> Size {
-        let mut total_w = 0.0;
-        let mut max_h = 0.0;
+        let mut total_w: f32 = 0.0;
+        let mut max_h: f32 = 0.0;
         for (id, constraint) in children {
             if let Some(child) = arena.get(*id) {
                 let size = child.layout_solver.measure(&[], arena, ctx);
@@ -122,7 +123,7 @@ impl LayoutSolver for RowLayout {
         }
     }
 
-    fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &mut WidgetArena) {
+    fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &WidgetArena) {
         let mut x = rect.x;
         for (id, child_rect) in children {
             if let Some(child) = arena.get(*id) {
@@ -152,8 +153,8 @@ impl LayoutSolver for ColumnLayout {
         arena: &WidgetArena,
         ctx: &mut LayoutContext,
     ) -> Size {
-        let mut total_h = 0.0;
-        let mut max_w = 0.0;
+        let mut total_h: f32 = 0.0;
+        let mut max_w: f32 = 0.0;
         for (id, constraint) in children {
             if let Some(child) = arena.get(*id) {
                 let size = child.layout_solver.measure(&[], arena, ctx);
@@ -172,7 +173,7 @@ impl LayoutSolver for ColumnLayout {
         }
     }
 
-    fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &mut WidgetArena) {
+    fn arrange(&self, rect: Rect, children: &mut [(WidgetId, Rect)], arena: &WidgetArena) {
         let mut y = rect.y;
         for (id, child_rect) in children {
             if let Some(child) = arena.get(*id) {
@@ -202,7 +203,7 @@ impl LayoutSolver for NullLayout {
         Size { w: 0.0, h: 0.0 }
     }
 
-    fn arrange(&self, _rect: Rect, _children: &mut [(WidgetId, Rect)], _arena: &mut WidgetArena) {}
+    fn arrange(&self, _rect: Rect, _children: &mut [(WidgetId, Rect)], _arena: &WidgetArena) {}
 }
 
 #[cfg(test)]

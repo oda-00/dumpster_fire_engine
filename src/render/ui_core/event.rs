@@ -18,7 +18,6 @@ pub enum UiEvent {
     ActorSelected(Option<ActorHandle>),
 }
 
-#[derive(Debug)]
 pub enum EventHandler {
     Click(Box<dyn Fn() + Send + Sync>),
     ValueChanged(Box<dyn Fn(f32) + Send + Sync>),

@@ -15,11 +15,13 @@ impl DrawList {
         }
     }
 
+    #[inline]
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.indices.clear();
     }
 
+    #[inline]
     pub fn push_rect(&mut self, rect: Rect, color: [u8; 4]) {
         let base = self.vertices.len() as u32;
         let x0 = rect.x;
@@ -53,6 +55,7 @@ impl DrawList {
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
+    #[inline]
     pub fn push_line(&mut self, from: [f32; 2], to: [f32; 2], thickness: f32, color: [u8; 4]) {
         let dx = to[0] - from[0];
         let dy = to[1] - from[1];
@@ -90,7 +93,7 @@ impl DrawList {
     pub fn push_text(
         &mut self,
         text: &str,
-        font: &super::font::FontAtlas,
+        font: &mut super::font::FontAtlas,
         pos: [f32; 2],
         color: [u8; 4],
     ) {

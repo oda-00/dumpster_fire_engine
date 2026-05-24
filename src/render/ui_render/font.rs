@@ -29,9 +29,9 @@ pub struct FontAtlas {
 
 impl FontAtlas {
     pub fn new(vulkan: &VulkanContext) -> Self {
-        let default_font_bytes = include_bytes!("../../assets/fonts/FiraCode-Regular.ttf");
+        let default_font_bytes: &[u8] = include_bytes!("../../../assets/fonts/FiraCode-Regular.ttf");
         let font = Font::from_bytes(default_font_bytes, FontSettings::default())
-            .unwrap_or_else(|_| Font::from_bytes(&[], FontSettings::default()).unwrap());
+            .expect("bundled FiraCode-Regular.ttf failed to parse");
 
         let texture = ForgeImage::create_2d(
             &vulkan.device,
@@ -60,7 +60,7 @@ impl FontAtlas {
             return *rect;
         }
 
-        let (metrics, _bitmap) = self.fonts[0].rasterize(ch, size);
+        let (metrics, _bitmap) = self.fonts[0].rasterize(ch, size as f32);
         let w = metrics.width as u32;
         let h = metrics.height as u32;
 

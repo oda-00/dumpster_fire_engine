@@ -56,7 +56,7 @@ impl<'a> UiBuilder<'a> {
             kind,
             parent: self.current_parent,
             children: ThinVec::new(),
-            dirty: (DirtyFlags::LAYOUT | DirtyFlags::CONTENT) as u8,
+            dirty: DirtyFlags::LAYOUT as u8 | DirtyFlags::CONTENT as u8,
             rect: Rect { x, y, w: vw, h: height },
             constraint: Constraint {
                 min_width: 0.0,

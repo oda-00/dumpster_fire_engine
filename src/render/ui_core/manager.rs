@@ -68,7 +68,7 @@ impl UiManager {
         let mut cur = id;
         while let Some(parent) = self.widgets.get(cur).and_then(|w| w.parent) {
             if let Some(p) = self.widgets.get_mut(parent) {
-                p.dirty |= (DirtyFlags::LAYOUT | DirtyFlags::CHILDREN) as u8;
+                p.dirty |= DirtyFlags::LAYOUT as u8 | DirtyFlags::CHILDREN as u8;
             }
             cur = parent;
         }
@@ -100,15 +100,21 @@ impl UiManager {
     }
 
     fn arrange(&mut self, id: WidgetId, rect: Rect) {
-        let Some(w) = self.widgets.get_mut(id) else { return };
-        w.rect = rect;
-        let mut child_rects: ThinVec<(WidgetId, Rect)> = w
-            .children
-            .iter()
-            .map(|&cid| (cid, Rect::default()))
-            .collect();
-        w.layout_solver
-            .arrange(rect, &mut child_rects, &mut self.widgets);
+        // Set rect and collect children — then release the mutable borrow before
+        // calling layout_solver.arrange (which needs &WidgetArena for child sizes).
+        let children: ThinVec<WidgetId> = {
+            let Some(w) = self.widgets.get_mut(id) else { return };
+            w.rect = rect;
+            w.children.clone()
+        };
+
+        let mut child_rects: ThinVec<(WidgetId, Rect)> =
+            children.iter().map(|&cid| (cid, Rect::default())).collect();
+
+        if let Some(w) = self.widgets.get(id) {
+            w.layout_solver.arrange(rect, &mut child_rects, &self.widgets);
+        }
+
         for (cid, child_rect) in child_rects {
             self.arrange(cid, child_rect);
         }
