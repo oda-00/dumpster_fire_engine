@@ -703,25 +703,74 @@ fn download_llvm_prebuilt(prefix: &Path, os: &str, arch: &str) {
     );
 
     if os == "windows" {
-        // Use a PID-unique filename so parallel build-script invocations
-        // (langc and langcd both depend on llvm-sys) don't collide in %TEMP%.
+        // PID-unique temp name avoids collision when two build scripts run in parallel.
         let tmp = std::env::temp_dir()
             .join(format!("dfe_llvm18_{}.exe", std::process::id()));
-        let dl = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!("Invoke-WebRequest -Uri '{url}' -OutFile '{}'", tmp.display()),
-            ])
+        let tmp_str = tmp.to_str().unwrap();
+
+        // ── Download ──────────────────────────────────────────────────────────
+        // curl.exe ships with Windows 10 1803+ and is far faster than
+        // Invoke-WebRequest (which buffers in memory and uses a single TCP stream).
+        let curl_ok = Command::new("curl.exe")
+            .args(["-fsSL", "--retry", "3", "--retry-delay", "2",
+                   "--progress-bar", "-o", tmp_str, &url])
             .status()
-            .expect("powershell download failed");
-        assert!(dl.success(), "LLVM download failed");
-        let install = Command::new(&tmp)
-            .args(["/S", &format!("/D={}", prefix.display())])
-            .status()
-            .expect("LLVM NSIS installer failed");
-        let _ = std::fs::remove_file(&tmp); // clean up installer
-        assert!(install.success(), "LLVM installer failed");
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !curl_ok {
+            println!("cargo:warning=curl.exe not found or failed — falling back to Invoke-WebRequest (slow)...");
+            let ps = Command::new("powershell")
+                .args([
+                    "-NoProfile", "-Command",
+                    &format!("Invoke-WebRequest -Uri '{url}' -OutFile '{tmp_str}'"),
+                ])
+                .status()
+                .expect("powershell Invoke-WebRequest failed");
+            assert!(ps.success(), "LLVM download failed");
+        }
+
+        // ── Extract ───────────────────────────────────────────────────────────
+        // NSIS installers are 7-Zip archives internally. `7z x` unpacks them
+        // without running any installer scripts — no admin, no registry writes,
+        // and significantly faster than running the NSIS installer.
+        let prefix_str = prefix.to_str().unwrap();
+        let seven_z_bins = ["7z.exe", r"C:\Program Files\7-Zip\7z.exe",
+                             r"C:\Program Files (x86)\7-Zip\7z.exe"];
+        let extracted = seven_z_bins.iter().any(|bin| {
+            Command::new(bin)
+                .args(["x", tmp_str, &format!("-o{prefix_str}"), "-y"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+
+        let _ = std::fs::remove_file(&tmp);
+
+        if !extracted {
+            println!("cargo:warning=7-Zip not found — falling back to NSIS silent install (slower)...");
+            // Re-download without removing; tmp was already deleted above.
+            let tmp2 = std::env::temp_dir()
+                .join(format!("dfe_llvm18_{}_nsis.exe", std::process::id()));
+            let curl_ok2 = Command::new("curl.exe")
+                .args(["-fsSL", "--retry", "3", "-o", tmp2.to_str().unwrap(), &url])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !curl_ok2 {
+                Command::new("powershell")
+                    .args(["-NoProfile", "-Command",
+                           &format!("Invoke-WebRequest -Uri '{url}' -OutFile '{}'", tmp2.display())])
+                    .status()
+                    .expect("powershell download failed");
+            }
+            let install = Command::new(&tmp2)
+                .args(["/S", &format!("/D={prefix_str}")])
+                .status()
+                .expect("LLVM NSIS installer failed");
+            let _ = std::fs::remove_file(&tmp2);
+            assert!(install.success(), "LLVM NSIS installer failed");
+        }
     } else {
         let cmd = format!(
             "curl -fsSL '{url}' | tar xJf - -C '{}' --strip-components=1",
