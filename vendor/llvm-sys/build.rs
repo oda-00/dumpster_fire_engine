@@ -719,7 +719,7 @@ fn download_llvm_prebuilt(prefix: &Path, os: &str, arch: &str) {
             .unwrap_or(false);
 
         if !curl_ok {
-            println!("cargo:warning=curl.exe not found or failed — falling back to Invoke-WebRequest (slower)...");
+            println!("cargo:warning=curl.exe not found — falling back to Invoke-WebRequest (slower)...");
             let ps = Command::new("powershell")
                 .args([
                     "-NoProfile", "-Command",
@@ -731,32 +731,35 @@ fn download_llvm_prebuilt(prefix: &Path, os: &str, arch: &str) {
         }
 
         // ── Extract ───────────────────────────────────────────────────────────
-        // NSIS installers are 7-Zip archives internally. `7z x` unpacks them
-        // without running any installer scripts — no admin, no registry writes,
-        // and significantly faster than running the NSIS installer.
-        // We try 7z first; only if it isn't installed do we fall back to NSIS.
-        // Either way we use the same already-downloaded tmp file — no re-download.
+        // The LLVM NSIS installer has a UAC manifest requiring elevation regardless
+        // of the target path — running it is not an option without admin.
+        // NSIS installers are 7-Zip archives internally; `7z x` extracts them
+        // without any installer scripts, no admin, no registry writes.
+        //
+        // Priority: system 7z → bootstrap 7za.exe from 7-zip.org (no admin needed).
         let prefix_str = prefix.to_str().unwrap();
-        let seven_z_bins = ["7z.exe", r"C:\Program Files\7-Zip\7z.exe",
-                             r"C:\Program Files (x86)\7-Zip\7z.exe"];
-        let extracted = seven_z_bins.iter().any(|bin| {
-            Command::new(bin)
-                .args(["x", tmp_str, &format!("-o{prefix_str}"), "-y"])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        });
+        let sz = find_7z_windows()
+            .or_else(|| bootstrap_7za_windows());
 
-        if !extracted {
-            println!("cargo:warning=7-Zip not found — using NSIS silent install (slower, no re-download)...");
-            let install = Command::new(&tmp)
-                .args(["/S", &format!("/D={prefix_str}")])
-                .status()
-                .expect("LLVM NSIS installer failed");
-            assert!(install.success(), "LLVM NSIS installer failed");
+        match sz {
+            Some(seven_z) => {
+                let ok = Command::new(&seven_z)
+                    .args(["x", tmp_str, &format!("-o{prefix_str}"), "-y"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                let _ = std::fs::remove_file(&tmp);
+                assert!(ok, "7-Zip extraction of LLVM installer failed");
+            }
+            None => {
+                let _ = std::fs::remove_file(&tmp);
+                panic!(
+                    "Cannot extract LLVM 18: 7-Zip is unavailable and bootstrap failed.\n\
+                     Install 7-Zip from https://www.7-zip.org and retry,\n\
+                     or set LLVM_SYS_180_PREFIX to an existing LLVM 18 installation."
+                );
+            }
         }
-
-        let _ = std::fs::remove_file(&tmp); // clean up after extraction by either method
     } else {
         let cmd = format!(
             "curl -fsSL '{url}' | tar xJf - -C '{}' --strip-components=1",
@@ -766,6 +769,89 @@ fn download_llvm_prebuilt(prefix: &Path, os: &str, arch: &str) {
         assert!(status.success(), "LLVM download/extract failed");
     }
     println!("cargo:warning=LLVM 18 cached at {}", prefix.display());
+}
+
+fn find_7z_windows() -> Option<PathBuf> {
+    for candidate in &[
+        "7z.exe",
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ] {
+        if Command::new(candidate)
+            .arg("i") // info command, exits 0
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Some(PathBuf::from(candidate));
+        }
+    }
+    None
+}
+
+// Bootstrap a standalone 7za.exe from 7-zip.org without requiring any pre-installed
+// extraction tool. 7za920.zip is a plain ZIP file (not a .7z), so PowerShell's
+// Expand-Archive can open it without 7-Zip already being present. The resulting
+// 7za.exe supports reading NSIS archives (support added in 7-Zip 4.57, 2008).
+fn bootstrap_7za_windows() -> Option<PathBuf> {
+    println!(
+        "cargo:warning=7-Zip not found — bootstrapping 7za.exe from 7-zip.org (~374 KB, one-time)..."
+    );
+
+    let tmp = std::env::temp_dir().join(format!("dfe_7za_bootstrap_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let zip = tmp.join("7za920.zip");
+    let zip_str = zip.to_str().unwrap();
+
+    // Download the bootstrap zip (curl first, PowerShell fallback).
+    const BOOTSTRAP_URL: &str = "https://www.7-zip.org/a/7za920.zip";
+    let dl_ok = Command::new("curl.exe")
+        .args(["-fsSL", "--retry", "3", "-o", zip_str, BOOTSTRAP_URL])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !dl_ok {
+        let _ = Command::new("powershell")
+            .args([
+                "-NoProfile", "-Command",
+                &format!("Invoke-WebRequest -Uri '{BOOTSTRAP_URL}' -OutFile '{zip_str}'"),
+            ])
+            .status();
+    }
+
+    if !zip.exists() {
+        println!("cargo:warning=7za bootstrap download failed.");
+        return None;
+    }
+
+    // Expand the zip using PowerShell's built-in Expand-Archive (available since PS 5 / Win10).
+    let expanded = Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            &format!(
+                "Expand-Archive -LiteralPath '{zip_str}' -DestinationPath '{}' -Force",
+                tmp.display()
+            ),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !expanded {
+        println!("cargo:warning=7za bootstrap Expand-Archive failed.");
+        return None;
+    }
+
+    let exe = tmp.join("7za.exe");
+    if exe.exists() {
+        Some(exe)
+    } else {
+        println!("cargo:warning=7za.exe not found after extraction.");
+        None
+    }
 }
 
 fn ensure_libtinfo_shim(lib_dir: &Path) {
