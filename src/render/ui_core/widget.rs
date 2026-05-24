@@ -1,9 +1,13 @@
 use thin_vec::ThinVec;
 
+use crate::render::ui_core::event::UiEvent;
 use crate::render::ui_core::id::WidgetId;
 use crate::render::ui_core::layout::{Constraint, LayoutSolver, Rect};
 use crate::render::ui_core::signal::Signal;
 use crate::resource_manager::world_manager::World;
+
+/// Closure type for per-widget event sinks.
+pub type EventSink = Box<dyn Fn(&UiEvent) + Send + Sync>;
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -23,7 +27,7 @@ pub struct Widget {
     pub rect: Rect,
     pub constraint: Constraint,
     pub layout_solver: Box<dyn LayoutSolver>,
-    pub event_handlers: ThinVec<Box<dyn Fn(&crate::render::ui_core::event::UiEvent) + Send + Sync>>,
+    pub event_handlers: ThinVec<EventSink>,
     pub user_data: Option<Box<dyn std::any::Any>>,
 }
 
@@ -83,11 +87,31 @@ pub struct PanelState {
     pub close_requested: bool,
 }
 
+/// Lazily rendered list: only items in the visible window are built each frame.
+/// `item_builder` is called with the item index and a mutable cursor position;
+/// it should push geometry into the provided DrawList rather than into the tree.
 pub struct VirtualListState {
     pub item_count: usize,
     pub item_height: f32,
     pub scroll_offset: f32,
+    /// Closure that renders one item at the given index.
+    /// Signature: `fn(item_index: usize, cursor_y: f32)`.
+    pub item_builder: Box<dyn Fn(usize, f32) + Send + Sync>,
     pub visible_widgets: ThinVec<(usize, WidgetId)>,
+}
+
+impl VirtualListState {
+    /// Returns the inclusive range of item indices currently visible inside
+    /// `viewport_height`.
+    pub fn visible_range(&self, viewport_height: f32) -> std::ops::Range<usize> {
+        if self.item_height <= 0.0 || self.item_count == 0 {
+            return 0..0;
+        }
+        let first = (self.scroll_offset / self.item_height).floor() as usize;
+        let count = (viewport_height / self.item_height).ceil() as usize + 1;
+        let last = (first + count).min(self.item_count);
+        first..last
+    }
 }
 
 pub struct OutlinerState {
@@ -101,6 +125,12 @@ pub struct OutlinerNode {
     pub children: ThinVec<OutlinerNode>,
 }
 
+impl OutlinerNode {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into(), children: ThinVec::new() }
+    }
+}
+
 pub struct PropertyGridState {
     pub properties: ThinVec<PropertyDesc>,
     pub dirty: bool,
@@ -109,10 +139,11 @@ pub struct PropertyGridState {
 pub struct PropertyDesc {
     pub name: String,
     pub kind: PropertyKind,
-    pub get: Box<dyn Fn(&World) -> String>,
-    pub set: Box<dyn Fn(&mut World, String)>,
+    pub get: Box<dyn Fn(&World) -> String + Send + Sync>,
+    pub set: Box<dyn Fn(&mut World, &str) + Send + Sync>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyKind {
     Float,
     Bool,

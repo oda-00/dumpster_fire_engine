@@ -1,11 +1,21 @@
 use thin_vec::ThinVec;
 
-use crate::render::ui_core::layout::{ColumnLayout, NullLayout};
+use crate::render::ui_core::layout::{Alignment, ColumnLayout, NullLayout};
 use crate::render::ui_core::signal::Signal;
 use crate::render::ui_core::widget::{
-    ButtonState, CheckboxState, DirtyFlags, LabelState, SliderState, Widget, WidgetKind,
+    ButtonState, CheckboxState, DirtyFlags, LabelState, PanelState, SliderState, Widget, WidgetKind,
 };
 use crate::render::ui_core::{Constraint, Rect, UiEvent, UiManager, WidgetId, WidgetIdPath};
+
+/// Placeholder inserted before the arena hands back the real generational id.
+/// Immediately overwritten after `Arena::insert` returns.
+fn sentinel_id() -> WidgetId {
+    WidgetId {
+        idx: u32::MAX,
+        generation: unsafe { std::num::NonZeroU32::new_unchecked(1) },
+        _tag: std::marker::PhantomData,
+    }
+}
 
 pub struct UiBuilder<'a> {
     manager: &'a mut UiManager,
@@ -26,9 +36,11 @@ impl<'a> UiBuilder<'a> {
         }
     }
 
+    /// Return an existing widget id for `name` in the current path scope, or
+    /// allocate a new one via the arena and register the path→id mapping.
     fn resolve_or_create(&mut self, name: &'static str, kind: WidgetKind, height: f32) -> WidgetId {
         self.id_stack.push(name);
-        let path = WidgetIdPath(self.id_stack.clone()).to_string(); // Display impl
+        let path = WidgetIdPath(self.id_stack.clone()).to_string();
         self.id_stack.pop();
 
         if let Some(id) = self.manager.get_widget_by_path(&path) {
@@ -37,26 +49,18 @@ impl<'a> UiBuilder<'a> {
 
         let x = self.cursor[0];
         let y = self.cursor[1];
-        let w = self
-            .manager
-            .viewport_width()
-            .max(80.0)
-            .min(self.manager.viewport_width());
+        let vw = self.manager.viewport_width();
 
         let id = self.manager.widgets.insert(Widget {
-            id: WidgetId {
-                idx: 0,
-                generation: unsafe { std::num::NonZeroU32::new_unchecked(1) },
-                _tag: std::marker::PhantomData,
-            },
+            id: sentinel_id(), // patched immediately below
             kind,
             parent: self.current_parent,
             children: ThinVec::new(),
             dirty: (DirtyFlags::LAYOUT | DirtyFlags::CONTENT) as u8,
-            rect: Rect { x, y, w, h: height },
+            rect: Rect { x, y, w: vw, h: height },
             constraint: Constraint {
                 min_width: 0.0,
-                max_width: f32::INFINITY,
+                max_width: vw,
                 min_height: height,
                 max_height: height,
             },
@@ -65,8 +69,9 @@ impl<'a> UiBuilder<'a> {
             user_data: None,
         });
 
-        if let Some(wid) = self.manager.widgets.get_mut(id) {
-            wid.id = id;
+        // Patch the self-referential id field now that the arena has assigned it.
+        if let Some(w) = self.manager.widgets.get_mut(id) {
+            w.id = id;
         }
 
         self.manager.register_widget_path(path, id);
@@ -107,13 +112,7 @@ impl<'a> UiBuilder<'a> {
             .manager
             .widgets
             .get(id)
-            .map(|w| {
-                if let WidgetKind::Button(ref s) = w.kind {
-                    s.clicked
-                } else {
-                    false
-                }
-            })
+            .map(|w| matches!(&w.kind, WidgetKind::Button(s) if s.clicked))
             .unwrap_or(false);
 
         if clicked {
@@ -130,7 +129,7 @@ impl<'a> UiBuilder<'a> {
     }
 
     pub fn slider(&mut self, _label: &str, min: f32, max: f32, value: &mut f32) {
-        let state = SliderState {
+        let state = crate::render::ui_core::widget::SliderState {
             value: Signal::new(*value),
             min,
             max,
@@ -165,14 +164,17 @@ impl<'a> UiBuilder<'a> {
     }
 
     pub fn begin_column(&mut self, name: &'static str) {
-        let state = crate::render::ui_core::widget::PanelState {
+        let state = PanelState {
             title: Signal::new(name.to_owned()),
             closable: false,
             close_requested: false,
         };
         let id = self.resolve_or_create(name, WidgetKind::Panel(state), 0.0);
         if let Some(w) = self.manager.widgets.get_mut(id) {
-            w.layout_solver = Box::new(ColumnLayout { gap: self.gap, cross_alignment: crate::render::ui_core::layout::Alignment::Start });
+            w.layout_solver = Box::new(ColumnLayout {
+                gap: self.gap,
+                cross_alignment: Alignment::Start,
+            });
         }
         self.id_stack.push(name);
         self.current_parent = Some(id);
