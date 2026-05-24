@@ -587,6 +587,174 @@ fn is_llvm_debug(llvm_config_path: &Path) -> bool {
     llvm_config(llvm_config_path, ["--build-mode"]).contains("Debug")
 }
 
+/// Compile LLVM 18 from source on Windows.
+/// Downloads LLVM source, compiles it with CMake, and installs to a local prefix.
+/// Returns the path to the installed LLVM if successful, None otherwise.
+fn compile_llvm_from_source_windows() -> Option<PathBuf> {
+    if !target_os_is("windows") {
+        return None;
+    }
+
+    let prefix = PathBuf::from(".llvm_build/18");
+    let llvm_config = prefix.join("bin/llvm-config.exe");
+
+    // If already compiled, return the path
+    if llvm_config.exists() {
+        println!("cargo:warning=Using previously compiled LLVM at {}", prefix.display());
+        // Set the environment variable so locate_llvm_config can find it
+        env::set_var(&*ENV_LLVM_PREFIX, &prefix);
+        return Some(prefix);
+    }
+
+    println!("cargo:warning=Downloading LLVM 18 source code (~500 MB)...");
+    let source_dir = PathBuf::from(".llvm_build/llvm-project-18.1.8");
+
+    // Download LLVM source if not present
+    if !source_dir.exists() {
+        let url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz";
+        let tar_path = PathBuf::from(".llvm_build/llvm-project-18.1.8.tar.xz");
+        std::fs::create_dir_all(".llvm_build").ok();
+
+        // Download using curl or PowerShell
+        let download_ok = if Command::new("curl").arg("--version").output().is_ok() {
+            Command::new("curl")
+                .args(["-L", "-o", tar_path.to_str().unwrap(), url])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else {
+            Command::new("powershell")
+                .args([
+                    "-Command",
+                    &format!(
+                        "Invoke-WebRequest -Uri '{}' -OutFile '{}'",
+                        url,
+                        tar_path.display()
+                    ),
+                ])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+
+        if !download_ok {
+            println!("cargo:warning=Failed to download LLVM source");
+            return None;
+        }
+
+        // Extract tar.xz using tar command or 7z
+        println!("cargo:warning=Extracting LLVM source...");
+        let extract_ok = if Command::new("tar").arg("--version").output().is_ok() {
+            Command::new("tar")
+                .args([
+                    "-xf",
+                    tar_path.to_str().unwrap(),
+                    "-C",
+                    ".llvm_build",
+                ])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else {
+            // Try 7z as fallback
+            Command::new("7z")
+                .args(["x", tar_path.to_str().unwrap(), "-o.llvm_build", "-y"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+
+        if !extract_ok {
+            println!("cargo:warning=Failed to extract LLVM source");
+            let _ = std::fs::remove_file(&tar_path);
+            return None;
+        }
+
+        let _ = std::fs::remove_file(&tar_path);
+    }
+
+    // Check for CMake
+    if Command::new("cmake").arg("--version").output().is_err() {
+        println!(
+            "cargo:warning=CMake not found. Install CMake to compile LLVM from source. \
+             Alternatively, set LLVM_SYS_180_PREFIX to an existing LLVM 18 installation."
+        );
+        return None;
+    }
+
+    // Create build directory
+    let build_dir = PathBuf::from(".llvm_build/build");
+    let _ = std::fs::create_dir_all(&build_dir);
+
+    // Configure LLVM with CMake
+    println!("cargo:warning=Configuring LLVM 18 with CMake (this may take a few minutes)...");
+    let cmake_ok = Command::new("cmake")
+        .args([
+            "-B", build_dir.to_str().unwrap(),
+            "-S", source_dir.join("llvm").to_str().unwrap(),
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_INSTALL_PREFIX", prefix.to_str().unwrap(),
+            "-DLLVM_ENABLE_PROJECTS=clang",
+            "-DLLVM_TARGETS_TO_BUILD=X86;ARM;AArch64",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !cmake_ok {
+        println!("cargo:warning=CMake configuration failed");
+        return None;
+    }
+
+    // Build LLVM
+    println!("cargo:warning=Building LLVM 18 (this may take 30+ minutes)...");
+    let build_ok = Command::new("cmake")
+        .args([
+            "--build", build_dir.to_str().unwrap(),
+            "--config", "Release",
+            "-j", &std::thread::available_parallelism()
+                .map(|n| n.get().to_string())
+                .unwrap_or_else(|_| "4".to_string()),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !build_ok {
+        println!("cargo:warning=Building LLVM 18 failed");
+        return None;
+    }
+
+    // Install LLVM
+    println!("cargo:warning=Installing LLVM 18...");
+    let install_ok = Command::new("cmake")
+        .args([
+            "--install", build_dir.to_str().unwrap(),
+            "--config", "Release",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !install_ok {
+        println!("cargo:warning=Installing LLVM 18 failed");
+        return None;
+    }
+
+    if !llvm_config.exists() {
+        println!(
+            "cargo:warning=LLVM 18 installation completed but llvm-config.exe not found at {}",
+            llvm_config.display()
+        );
+        return None;
+    }
+
+    // Set environment variable so locate_llvm_config can find it
+    env::set_var(&*ENV_LLVM_PREFIX, &prefix);
+    println!("cargo:warning=LLVM 18 successfully compiled and installed at {}", prefix.display());
+    Some(prefix)
+}
+
 fn ensure_llvm_prebuilt() {
     let prefix = match env::var(&*ENV_LLVM_PREFIX) {
         Ok(p) => PathBuf::from(p),
@@ -1029,8 +1197,28 @@ fn main() {
 
     let llvm_config_path = match locate_llvm_config() {
         None => {
-            println!("cargo:rustc-cfg=LLVM_SYS_NOT_FOUND");
-            return;
+            // Windows fallback: try to compile LLVM from source if not found
+            if target_os_is("windows") {
+                println!("cargo:warning=LLVM not found; attempting to compile from source on Windows...");
+                if compile_llvm_from_source_windows().is_some() {
+                    // Retry locating llvm-config after compilation and environment variable is set
+                    match locate_llvm_config() {
+                        Some(config_path) => config_path,
+                        None => {
+                            println!("cargo:warning=Failed to locate llvm-config after compilation");
+                            println!("cargo:rustc-cfg=LLVM_SYS_NOT_FOUND");
+                            return;
+                        }
+                    }
+                } else {
+                    println!("cargo:warning=LLVM compilation from source failed on Windows");
+                    println!("cargo:rustc-cfg=LLVM_SYS_NOT_FOUND");
+                    return;
+                }
+            } else {
+                println!("cargo:rustc-cfg=LLVM_SYS_NOT_FOUND");
+                return;
+            }
         }
         Some(llvm_config_path) => llvm_config_path,
     };
