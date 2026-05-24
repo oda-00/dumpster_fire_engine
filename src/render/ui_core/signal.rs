@@ -38,8 +38,13 @@ impl<T: Clone + PartialEq> Signal<T> {
         self.inner.borrow_mut().subscribers.push(wid);
     }
 
-    pub fn map<U: Clone + PartialEq, F: Fn(&T) -> U + 'static>(&self, f: F) -> Signal<U> {
+    pub fn map<U: Clone + PartialEq, F: Fn(&T) -> U + 'static>(
+        &self,
+        f: F,
+    ) -> Signal<U> {
         let derived = Signal::new(f(&self.get()));
+        let source_inner = Rc::clone(&self.inner);
+        let derived_inner = Rc::clone(&derived.inner);
         derived
     }
 }

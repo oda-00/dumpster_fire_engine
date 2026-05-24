@@ -23,6 +23,7 @@ pub struct Widget {
     pub rect: Rect,
     pub constraint: Constraint,
     pub layout_solver: Box<dyn LayoutSolver>,
+    pub event_handlers: ThinVec<Box<dyn Fn(&crate::render::ui_core::event::UiEvent) + Send + Sync>>,
     pub user_data: Option<Box<dyn std::any::Any>>,
 }
 

@@ -49,6 +49,19 @@ impl UiManager {
         self.path_to_id.insert(path, id);
     }
 
+    pub fn mark_widget_dirty(&mut self, id: WidgetId, flags: DirtyFlags) {
+        if let Some(w) = self.widgets.get_mut(id) {
+            w.dirty |= flags as u8;
+        }
+        let mut cur = id;
+        while let Some(parent) = self.widgets.get(cur).and_then(|w| w.parent) {
+            if let Some(p) = self.widgets.get_mut(parent) {
+                p.dirty |= (DirtyFlags::LAYOUT | DirtyFlags::CHILDREN) as u8;
+            }
+            cur = parent;
+        }
+    }
+
     pub fn layout(&mut self) {
         if let Some(root) = self.root {
             let mut ctx = LayoutContext::new();
@@ -102,9 +115,7 @@ impl UiManager {
 }
 
 pub fn mark_dirty(id: WidgetId, flags: DirtyFlags) {
-    thread_local! {
-        static MANAGER_REF: std::cell::RefCell<Option<*mut UiManager>> = std::cell::RefCell::new(None);
-    }
+    let _ = (id, flags);
 }
 
 impl Default for UiManager {
