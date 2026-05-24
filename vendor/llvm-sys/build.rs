@@ -633,6 +633,42 @@ impl Drop for LockGuard {
     fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
 }
 
+// Returns true if the process with the given PID is currently running.
+fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // `kill -0` sends no signal but checks existence; works on Linux, macOS, BSDs.
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        // tasklist /FI filters by PID; no output means process is gone.
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .map(|o| {
+                let out = String::from_utf8_lossy(&o.stdout);
+                // Second CSV field on each line is the PID.
+                out.lines().any(|line| {
+                    let mut fields = line.split(',');
+                    fields.next();
+                    fields.next()
+                        .map(|f| f.trim().trim_matches('"') == pid.to_string())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    { true } // unknown platform: assume alive (conservative)
+}
+
 // Returns true if the lock file was left behind by a process that no longer exists.
 fn lock_is_stale(lock_path: &Path) -> bool {
     let content = match std::fs::read_to_string(lock_path) {
@@ -650,11 +686,7 @@ fn lock_is_stale(lock_path: &Path) -> bool {
                 .unwrap_or(true);
         }
     };
-    // On Unix check /proc/<pid>; elsewhere fall back to always-live assumption.
-    #[cfg(unix)]
-    { !std::path::Path::new(&format!("/proc/{pid}")).exists() }
-    #[cfg(not(unix))]
-    { false }
+    !pid_is_alive(pid)
 }
 
 // Coordinates between parallel cargo build-script processes so only one
