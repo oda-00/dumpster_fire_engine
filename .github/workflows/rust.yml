@@ -11,28 +11,84 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux (x86_64)
+            llvm_tarball: clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz
+          - os: macos-latest
+            name: macOS (arm64)
+            llvm_tarball: clang+llvm-18.1.8-arm64-apple-darwin22.0.tar.xz
+          - os: windows-latest
+            name: Windows (x86_64)
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - name: Install LLVM 18 (pre-built tarball)
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ── LLVM 18 ──────────────────────────────────────────────────────────────
+
+      - name: Install LLVM 18 (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           mkdir -p .llvm/18
-          curl -fsSL https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz \
+          curl -fsSL \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/${{ matrix.llvm_tarball }}" \
             | tar xJf - -C .llvm/18 --strip-components=1
-          echo "LLVM_SYS_180_PREFIX=$PWD/.llvm/18" >> $GITHUB_ENV
-          echo "$PWD/.llvm/18/bin" >> $GITHUB_PATH
-      - name: Install Vulkan dev + GLSL compiler + Valgrind
-        run: sudo apt-get install -y libvulkan-dev glslang-tools valgrind
+          echo "LLVM_SYS_180_PREFIX=$PWD/.llvm/18" >> "$GITHUB_ENV"
+          echo "$PWD/.llvm/18/bin"                 >> "$GITHUB_PATH"
+
+      - name: Install LLVM 18 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe"
+          $tmp = "$env:TEMP\LLVM-18.1.8-win64.exe"
+          (New-Object System.Net.WebClient).DownloadFile($url, $tmp)
+          Start-Process -Wait $tmp -ArgumentList '/S'
+          $llvmDir = "C:\Program Files\LLVM"
+          Add-Content $env:GITHUB_ENV  "LLVM_SYS_180_PREFIX=$llvmDir"
+          Add-Content $env:GITHUB_PATH "$llvmDir\bin"
+
+      # ── Platform-specific deps ────────────────────────────────────────────────
+
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libvulkan-dev glslang-tools valgrind
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install molten-vk vulkan-headers vulkan-loader glslang
+
+      # Vulkan dev headers are not needed on Windows: ash uses dynamic loading.
+      # valgrind is Linux-only; iai-callgrind benches are skipped automatically
+      # on other platforms.
+
       - name: Install iai-callgrind-runner
+        if: runner.os == 'Linux'
         run: cargo install iai-callgrind-runner --version 0.16.1 --locked
+
+      # ── Checks ───────────────────────────────────────────────────────────────
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Build
         run: cargo build --workspace --verbose
+
       - name: Test
         run: cargo test --workspace --verbose
