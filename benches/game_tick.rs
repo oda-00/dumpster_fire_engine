@@ -677,8 +677,10 @@ fn bench_deep_hsm(c: &mut Criterion) {
 //   cargo bench --bench game_tick -- --profile-time=10
 // Output: target/criterion/<bench>/profile/flamegraph.svg
 
+#[cfg(unix)]
 use pprof::criterion::{Output, PProfProfiler};
 
+#[cfg(unix)]
 criterion_group! {
     name    = benches;
     config  = Criterion::default()
@@ -691,4 +693,17 @@ criterion_group! {
         bench_transition_storm,
         bench_deep_hsm
 }
+
+#[cfg(not(unix))]
+criterion_group! {
+    name    = benches;
+    targets =
+        bench_world_build,
+        bench_tick_steady,
+        bench_tick_scaling,
+        bench_tick_phases,
+        bench_transition_storm,
+        bench_deep_hsm
+}
+
 criterion_main!(benches);

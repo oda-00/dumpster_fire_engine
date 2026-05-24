@@ -602,7 +602,7 @@ fn ensure_llvm_prebuilt() {
     });
 
     if !llvm_config.exists() {
-        download_llvm_prebuilt(&prefix, os, arch);
+        download_llvm_prebuilt_coordinated(&prefix, os, arch, &llvm_config);
     }
 
     // The Ubuntu 18.04 pre-built tarball links against libtinfo.so.5, absent
@@ -620,6 +620,47 @@ fn ensure_llvm_prebuilt() {
         };
         // Safety: build scripts are effectively single-threaded here.
         unsafe { env::set_var("LD_LIBRARY_PATH", &new_path); }
+    }
+}
+
+// Coordinates between parallel cargo build-script processes so only one
+// actually downloads LLVM — the other polls and waits.
+fn download_llvm_prebuilt_coordinated(prefix: &Path, os: &str, arch: &str, llvm_config: &Path) {
+    use std::fs::OpenOptions;
+
+    std::fs::create_dir_all(prefix).expect("failed to create LLVM prefix dir");
+    let lock_path = prefix.join(".downloading");
+
+    // Try to become the downloader by atomically creating the lock file.
+    let got_lock = OpenOptions::new()
+        .write(true)
+        .create_new(true) // fails if already exists
+        .open(&lock_path)
+        .is_ok();
+
+    if got_lock {
+        // We won the race — download and install LLVM, then remove the lock.
+        download_llvm_prebuilt(prefix, os, arch);
+        let _ = std::fs::remove_file(&lock_path);
+    } else {
+        // Another parallel build script is downloading. Poll until done.
+        println!(
+            "cargo:warning=Another build process is downloading LLVM 18 — waiting for it to finish..."
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if llvm_config.exists() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "Timed out waiting for LLVM 18 download. \
+                     Delete {prefix}/.downloading and retry.",
+                    prefix = prefix.display()
+                );
+            }
+        }
     }
 }
 
