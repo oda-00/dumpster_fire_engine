@@ -54,8 +54,6 @@ forge_gltf = { path = "crates/forge_gltf" }
 # ancillary data parsing by hand.
 rustix = { version = "0.38", features = ["net", "fs"] }
 
-[build-dependencies]
-shaderc = "0.8"
 
 [dev-dependencies]
 slotmap       = "1"

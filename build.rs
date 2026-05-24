@@ -5,14 +5,9 @@ fn main() {
     // Auto-install dev tooling that isn't handled by the patched llvm-sys build.rs.
     // Each function is idempotent: it checks whether the tool exists first.
     ensure_llvm_windows();
-    ensure_shaderc_dll_windows();
     ensure_iai_callgrind_runner();
     ensure_vulkan_and_glslc();
     ensure_valgrind();
-
-    // Prefer the native shaderc Rust binding — zero external tool deps.
-    // Falls back to glslc / glslangValidator on PATH, then to pre-built .spv.
-    let shaderc_compiler = shaderc::Compiler::new();
 
     let shaders: &[&str] = &[
         "assets/shaders/triangle.vert",
@@ -44,21 +39,14 @@ fn main() {
         println!("cargo::rerun-if-changed={src}");
         let out = format!("{src}.spv");
 
-        // 1. Try native shaderc.
-        if let Some(ref sc) = shaderc_compiler {
-            if compile_native(sc, src, &out) {
-                continue;
-            }
-        }
-
-        // 2. Fall back to external glslc / glslangValidator.
+        // 1. Try external glslc / glslangValidator.
         if let Some(ref ec) = ext_compiler {
             if compile_external(ec, src, &out) {
                 continue;
             }
         }
 
-        // 3. Reuse a pre-built .spv if present.
+        // 2. Reuse a pre-built .spv if present.
         if Path::new(&out).exists() {
             println!(
                 "cargo::warning=reusing pre-built {out} \
@@ -67,8 +55,8 @@ fn main() {
             continue;
         }
 
-        // 4. Emit a warning rather than panicking — source is committed and
-        //    will compile on the next build that has shaderc / Vulkan SDK.
+        // 3. Emit a warning — source is committed and pre-built .spv is present
+        //    for all current shaders, so this path fires only if .spv is missing.
         println!(
             "cargo::warning=could not compile {src} and no pre-built \
                   {out} found; runtime loading of this shader will fail"
@@ -76,85 +64,7 @@ fn main() {
     }
 }
 
-// ── Native shaderc path ────────────────────────────────────────────────────
-
-fn shader_kind(path: &str) -> shaderc::ShaderKind {
-    if path.ends_with(".vert") || path.ends_with(".vert.glsl") {
-        shaderc::ShaderKind::Vertex
-    } else if path.ends_with(".frag") || path.ends_with(".frag.glsl") {
-        shaderc::ShaderKind::Fragment
-    } else if path.ends_with(".comp") || path.ends_with(".comp.glsl") {
-        shaderc::ShaderKind::Compute
-    } else if path.ends_with(".rgen") {
-        shaderc::ShaderKind::RayGeneration
-    } else if path.ends_with(".rmiss") {
-        shaderc::ShaderKind::Miss
-    } else if path.ends_with(".rchit") {
-        shaderc::ShaderKind::ClosestHit
-    } else if path.ends_with(".rahit") {
-        shaderc::ShaderKind::AnyHit
-    } else if path.ends_with(".rint") {
-        shaderc::ShaderKind::Intersection
-    } else if path.ends_with(".rcall") {
-        shaderc::ShaderKind::Callable
-    } else {
-        shaderc::ShaderKind::InferFromSource
-    }
-}
-
-fn compile_native(sc: &shaderc::Compiler, src: &str, out: &str) -> bool {
-    let source = match std::fs::read_to_string(src) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("cargo::warning=shaderc: could not read {src}: {e}");
-            return false;
-        }
-    };
-
-    let mut opts = shaderc::CompileOptions::new().expect("shaderc::CompileOptions::new");
-    // Target Vulkan 1.3 / SPIR-V 1.6. Ray-tracing shaders require SPIR-V ≥ 1.4.
-    opts.set_target_env(
-        shaderc::TargetEnv::Vulkan,
-        shaderc::EnvVersion::Vulkan1_3 as u32,
-    );
-    opts.set_target_spirv(shaderc::SpirvVersion::V1_6);
-    // Enable debug info in non-release builds so renderdoc / NSight can show
-    // source-level annotations.
-    #[cfg(debug_assertions)]
-    opts.set_generate_debug_info();
-    opts.set_optimization_level(if cfg!(debug_assertions) {
-        shaderc::OptimizationLevel::Zero
-    } else {
-        shaderc::OptimizationLevel::Performance
-    });
-
-    let kind = shader_kind(src);
-    let result = sc.compile_into_spirv(&source, kind, src, "main", Some(&opts));
-
-    match result {
-        Ok(artifact) => {
-            if artifact.get_num_warnings() > 0 {
-                println!(
-                    "cargo::warning=shaderc {src}: {}",
-                    artifact.get_warning_messages()
-                );
-            }
-            match std::fs::write(out, artifact.as_binary_u8()) {
-                Ok(()) => true,
-                Err(e) => {
-                    println!("cargo::warning=shaderc: failed to write {out}: {e}");
-                    false
-                }
-            }
-        }
-        Err(e) => {
-            println!("cargo::warning=shaderc failed on {src}: {e}");
-            false
-        }
-    }
-}
-
-// ── External-tool fallback path ────────────────────────────────────────────
+// ── External-tool compiler path ───────────────────────────────────────────
 
 struct ExtCompiler {
     binary: String,
@@ -321,62 +231,6 @@ fn ensure_llvm_windows() {
         println!("cargo::warning=LLVM installed to {}", llvm_path.display());
     } else {
         println!("cargo::warning=Failed to extract LLVM");
-    }
-}
-fn ensure_shaderc_dll_windows() {
-    if std::env::consts::OS != "windows" {
-        return;
-    }
-    // Look for shaderc_shared.dll in standard places
-    let dll_name = "shaderc_shared.dll";
-    let search_paths = vec![
-        std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join("debug"),
-        std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join("release"),
-        std::env::var("VULKAN_SDK")
-            .map(|s| Path::new(&s).join("Bin"))
-            .unwrap_or_default(),
-    ];
-    for path in &search_paths {
-        if path.join(dll_name).exists() {
-            return; // already present
-        }
-    }
-
-    println!("cargo::warning=Downloading shaderc_shared.dll...");
-    let url = "https://github.com/google/shaderc/releases/download/v2024.0/shaderc_shared.dll";
-    let dest = std::env::current_dir()
-        .unwrap()
-        .join("target")
-        .join("debug")
-        .join(dll_name);
-    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-    let status = if Command::new("curl").arg("--version").output().is_ok() {
-        Command::new("curl")
-            .args(["-L", "-o", dest.to_str().unwrap(), url])
-            .status()
-    } else {
-        Command::new("powershell")
-            .args([
-                "-Command",
-                &format!("Invoke-WebRequest -Uri {} -OutFile {}", url, dest.display()),
-            ])
-            .status()
-    };
-    if status.ok().map_or(false, |s| s.success()) {
-        println!(
-            "cargo::warning=shaderc_shared.dll downloaded to {}",
-            dest.display()
-        );
-    } else {
-        println!(
-            "cargo::warning=Failed to download shaderc_shared.dll; shaderc will build from source (slow)"
-        );
     }
 }
 fn ensure_iai_callgrind_runner() {
