@@ -431,11 +431,29 @@ impl Stage {
     /// O(dirty count), not O(all actors). 4-way unrolled inner loop so the
     /// OOO core can keep multiple actor publishes (locals → worlds copy,
     /// dirty_flag clear, sub-entity composition) in flight at once.
+    ///
+    /// On x86-64 CPUs that advertise AVX2, the inner loop is compiled with
+    /// 256-bit vector registers so the Affine3A copies and glam matrix
+    /// multiplications in `propagate_one` use YMM rather than XMM lanes.
     pub fn propagate_transforms(&mut self) {
         if self.dirty_actors.is_empty() {
             return;
         }
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 presence verified by the runtime check above.
+            unsafe { return self.propagate_transforms_avx2(); }
+        }
+        self.propagate_transforms_inner();
+    }
 
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn propagate_transforms_avx2(&mut self) {
+        self.propagate_transforms_inner();
+    }
+
+    fn propagate_transforms_inner(&mut self) {
         let Self {
             dirty_actors,
             dirty_pos,
@@ -478,6 +496,19 @@ impl Stage {
     #[inline]
     pub fn dirty_count(&self) -> usize {
         self.dirty_actors.len()
+    }
+
+    /// Pre-allocate capacity for `additional` actors in every SoA array at once.
+    /// Call once before a spawn burst to avoid incremental Vec growth in spawn_actor.
+    pub fn reserve(&mut self, additional: usize) {
+        self.actors.reserve(additional);
+        self.locals.reserve(additional);
+        self.worlds.reserve(additional);
+        self.dirty_flags.reserve(additional);
+        self.cache_pos.reserve(additional);
+        self.dirty_pos.reserve(additional);
+        self.level_cache_pos.reserve(additional);
+        self.dirty_actors.reserve(additional);
     }
 }
 

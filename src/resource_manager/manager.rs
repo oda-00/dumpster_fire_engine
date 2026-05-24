@@ -62,6 +62,10 @@ impl<Tag, T> Arena<Tag, T> {
         }
     }
 
+    pub fn reserve(&mut self, additional: usize) {
+        self.slots.reserve(additional);
+    }
+
     pub fn insert(&mut self, val: T) -> Handle<Tag> {
         if let Some(idx) = self.free.pop() {
             // Reuse a freed slot; generation was already incremented on removal.

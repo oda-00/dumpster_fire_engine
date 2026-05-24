@@ -192,7 +192,7 @@ fn troupe_group_lookup(b: Bencher, n: usize) {
     };
     let t = build_troupe(4, n / 4, lh, sh);
     b.bench_local(|| {
-        let g = t.group(black_box(2));
+        let g = t.group(black_box(TroupeGroupHandle::new(2)));
         black_box(g.map(|s| s.len()).unwrap_or(0))
     });
 }

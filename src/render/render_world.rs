@@ -640,6 +640,7 @@ pub fn pack_lights_ubo(lights: &[LightView]) -> LightsUBO {
     ubo
 }
 
+// Pure-math tests; no GPU device, Vulkan instance, or window required.
 #[cfg(test)]
 mod lights_ubo_tests {
     use super::*;

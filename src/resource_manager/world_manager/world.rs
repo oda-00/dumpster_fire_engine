@@ -111,6 +111,15 @@ impl World {
             .spawn_actor(stage_h, id, local)
     }
 
+    pub fn reserve_actors(
+        &mut self,
+        level_h: LevelHandle,
+        stage_h: StageHandle,
+        additional: usize,
+    ) -> Option<()> {
+        self.levels.get_mut(level_h)?.reserve_actors(stage_h, additional)
+    }
+
     pub fn despawn_actor(
         &mut self,
         level_h: LevelHandle,
