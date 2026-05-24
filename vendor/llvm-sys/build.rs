@@ -649,7 +649,10 @@ fn download_llvm_prebuilt(prefix: &Path, os: &str, arch: &str) {
     );
 
     if os == "windows" {
-        let tmp = std::env::temp_dir().join(tarball);
+        // Use a PID-unique filename so parallel build-script invocations
+        // (langc and langcd both depend on llvm-sys) don't collide in %TEMP%.
+        let tmp = std::env::temp_dir()
+            .join(format!("dfe_llvm18_{}.exe", std::process::id()));
         let dl = Command::new("powershell")
             .args([
                 "-NoProfile",
@@ -663,6 +666,7 @@ fn download_llvm_prebuilt(prefix: &Path, os: &str, arch: &str) {
             .args(["/S", &format!("/D={}", prefix.display())])
             .status()
             .expect("LLVM NSIS installer failed");
+        let _ = std::fs::remove_file(&tmp); // clean up installer
         assert!(install.success(), "LLVM installer failed");
     } else {
         let cmd = format!(

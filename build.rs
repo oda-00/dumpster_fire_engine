@@ -134,9 +134,8 @@ fn compile_native(sc: &shaderc::Compiler, src: &str, out: &str) -> bool {
 // ── External-tool fallback path ────────────────────────────────────────────
 
 struct ExtCompiler {
-    binary:       String,
-    version_flag: &'static str,
-    kind:         ExtKind,
+    binary: String,
+    kind:   ExtKind,
 }
 
 #[derive(Clone, Copy)]
@@ -149,17 +148,16 @@ fn find_ext_compiler() -> Option<ExtCompiler> {
             if c.exists() {
                 return Some(ExtCompiler {
                     binary: c.to_string_lossy().into_owned(),
-                    version_flag: "--version",
                     kind: ExtKind::Glslc,
                 });
             }
         }
     }
     if Command::new("glslc").arg("--version").output().is_ok() {
-        return Some(ExtCompiler { binary: "glslc".into(), version_flag: "--version", kind: ExtKind::Glslc });
+        return Some(ExtCompiler { binary: "glslc".into(), kind: ExtKind::Glslc });
     }
     if Command::new("glslangValidator").arg("--version").output().is_ok() {
-        return Some(ExtCompiler { binary: "glslangValidator".into(), version_flag: "--version", kind: ExtKind::Glslang });
+        return Some(ExtCompiler { binary: "glslangValidator".into(), kind: ExtKind::Glslang });
     }
     None
 }
