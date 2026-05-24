@@ -1,19 +1,30 @@
 use ash::vk;
 use std::mem;
 
+use crate::render::overlay::OverlayPipeline;
 use crate::render::ui_render::drawlist::DrawList;
 use crate::render::ui_render::vertex::{RingBuffer, UiVertex};
+use crate::render::vulkan::VulkanContext;
 
 pub struct UIRenderer {
     vb: RingBuffer,
     ib: RingBuffer,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+    descriptor_set: vk::DescriptorSet,
 }
 
 impl UIRenderer {
-    pub fn new(device: &ash::Device, mem_props: &vk::PhysicalDeviceMemoryProperties) -> Self {
+    /// Construct by borrowing the pre-built pipeline and descriptor set from
+    /// `OverlayPipeline::ui`, then creating independent ring buffers for
+    /// vertex/index data (avoids aliasing with the overlay's per-frame slots).
+    pub fn new(vulkan: &VulkanContext, overlay: &OverlayPipeline) -> Self {
         Self {
-            vb: RingBuffer::new(device, mem_props, 65_536),
-            ib: RingBuffer::new(device, mem_props, 32_768),
+            vb: RingBuffer::new(&vulkan.device, &vulkan.memory_properties, 65_536),
+            ib: RingBuffer::new(&vulkan.device, &vulkan.memory_properties, 32_768),
+            pipeline: overlay.ui.pipeline,
+            pipeline_layout: overlay.ui.pipeline_layout,
+            descriptor_set: overlay.ui.set,
         }
     }
 
@@ -40,11 +51,12 @@ impl UIRenderer {
         self.ib.upload(device, ib_bytes);
     }
 
+    /// Bind the UI pipeline, descriptor set, vertex + index buffers, then
+    /// submit a single indexed draw call.
     #[inline]
     pub fn record_draw(
         &self,
         drawlist: &DrawList,
-        pipeline_layout: vk::PipelineLayout,
         cmd: vk::CommandBuffer,
         device: &ash::Device,
     ) {
@@ -52,6 +64,15 @@ impl UIRenderer {
             return;
         }
         unsafe {
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.descriptor_set],
+                &[],
+            );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.vb.buffer()], &[0]);
             device.cmd_bind_index_buffer(cmd, self.ib.buffer(), 0, vk::IndexType::UINT32);
             device.cmd_draw_indexed(cmd, drawlist.indices.len() as u32, 1, 0, 0, 0);

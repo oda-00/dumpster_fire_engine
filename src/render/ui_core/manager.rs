@@ -61,6 +61,11 @@ impl UiManager {
         self.path_to_id.insert(path, id);
     }
 
+    #[inline]
+    pub fn mark_dirty(&mut self, id: WidgetId, flags: DirtyFlags) {
+        self.mark_widget_dirty(id, flags);
+    }
+
     pub fn mark_widget_dirty(&mut self, id: WidgetId, flags: DirtyFlags) {
         if let Some(w) = self.widgets.get_mut(id) {
             w.dirty |= flags as u8;

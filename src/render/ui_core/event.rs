@@ -1,6 +1,7 @@
 use thin_vec::ThinVec;
 
 use crate::render::ui_core::id::WidgetId;
+use crate::resource_manager::component::GltfHandle;
 use crate::resource_manager::manager::ActorHandle;
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,7 @@ pub enum UiEvent {
         scale: [f32; 3],
     },
     ActorSelected(Option<ActorHandle>),
+    AssetLoaded(GltfHandle),
 }
 
 pub enum EventHandler {
