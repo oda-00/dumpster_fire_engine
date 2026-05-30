@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/forge_gltf",
+    "crates/forge_mesh",
     "crates/lang_frontend",
     "tools/langc",
     "tools/langcd",
