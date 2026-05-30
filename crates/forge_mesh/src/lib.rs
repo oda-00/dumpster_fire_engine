@@ -14,6 +14,7 @@
 
 pub mod bvh;
 pub mod half_edge;
+pub mod history;
 pub mod ops;
 pub mod select;
 pub mod transform;
