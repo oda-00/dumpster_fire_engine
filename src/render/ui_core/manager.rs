@@ -12,6 +12,8 @@ use crate::resource_manager::world_manager::World;
 pub struct UiManager {
     pub widgets: WidgetArena,
     pub root: Option<WidgetId>,
+    /// Widget that currently holds keyboard focus, if any.
+    focused: Option<WidgetId>,
     pub event_bus: EventBus,
     pub controllers: ThinVec<Arc<dyn Controller>>,
     viewport_rect: Rect,
@@ -31,6 +33,7 @@ impl UiManager {
         Self {
             widgets: WidgetArena::new(),
             root: None,
+            focused: None,
             event_bus: EventBus::new(),
             controllers: ThinVec::new(),
             viewport_rect,
@@ -45,6 +48,83 @@ impl UiManager {
 
     pub fn set_root(&mut self, root: WidgetId) {
         self.root = Some(root);
+    }
+
+    // ── Focus / keyboard navigation ─────────────────────────────────────────
+
+    #[inline]
+    pub fn focused(&self) -> Option<WidgetId> {
+        self.focused
+    }
+
+    /// Set focus to `id` only if it exists and is focusable; returns success.
+    pub fn set_focus(&mut self, id: WidgetId) -> bool {
+        let ok = self.widgets.get(id).map(|w| w.focusable).unwrap_or(false);
+        if ok {
+            self.focused = Some(id);
+        }
+        ok
+    }
+
+    pub fn clear_focus(&mut self) {
+        self.focused = None;
+    }
+
+    /// Depth-first, tree-order list of focusable widget ids under `root`.
+    fn focus_order(&self) -> ThinVec<WidgetId> {
+        let mut order = ThinVec::new();
+        if let Some(root) = self.root {
+            self.collect_focusable(root, &mut order);
+        }
+        order
+    }
+
+    fn collect_focusable(&self, id: WidgetId, out: &mut ThinVec<WidgetId>) {
+        let Some(w) = self.widgets.get(id) else { return };
+        if w.focusable {
+            out.push(id);
+        }
+        // Clone children ids to avoid holding the borrow across recursion.
+        let children: ThinVec<WidgetId> = w.children.clone();
+        for child in children {
+            self.collect_focusable(child, out);
+        }
+    }
+
+    /// Advance focus to the next focusable widget in tree order, wrapping around.
+    /// With nothing focused, focuses the first. Returns the newly focused id.
+    pub fn focus_next(&mut self) -> Option<WidgetId> {
+        self.step_focus(1)
+    }
+
+    /// Move focus to the previous focusable widget in tree order, wrapping.
+    pub fn focus_prev(&mut self) -> Option<WidgetId> {
+        self.step_focus(-1)
+    }
+
+    fn step_focus(&mut self, dir: i32) -> Option<WidgetId> {
+        let order = self.focus_order();
+        if order.is_empty() {
+            self.focused = None;
+            return None;
+        }
+        let n = order.len();
+        let next = match self.focused.and_then(|cur| order.iter().position(|&id| id == cur)) {
+            Some(i) => {
+                // Wrapping step by ±1 within [0, n).
+                let step = dir.rem_euclid(n as i32) as usize;
+                (i + step) % n
+            }
+            None => {
+                if dir >= 0 {
+                    0
+                } else {
+                    n - 1
+                }
+            }
+        };
+        self.focused = Some(order[next]);
+        self.focused
     }
 
     pub fn set_viewport(&mut self, rect: Rect) {
@@ -189,5 +269,113 @@ impl Default for UiManager {
             w: 1920.0,
             h: 1080.0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::ui_core::layout::LayoutDispatch;
+    use crate::render::ui_core::signal::Signal;
+    use crate::render::ui_core::widget::{ButtonState, LabelState, PanelState, Widget, WidgetKind};
+
+    fn add(m: &mut UiManager, kind: WidgetKind, parent: Option<WidgetId>) -> WidgetId {
+        let focusable = kind.default_focusable();
+        let id = m.widgets.insert(Widget {
+            id: WidgetId {
+                idx: u32::MAX,
+                generation: std::num::NonZeroU32::new(1).unwrap(),
+                _tag: std::marker::PhantomData,
+            },
+            kind,
+            parent,
+            children: ThinVec::new(),
+            dirty: 0,
+            rect: Rect::default(),
+            constraint: Constraint { min_width: 0.0, max_width: 0.0, min_height: 0.0, max_height: 0.0 },
+            layout_solver: LayoutDispatch::Null,
+            focusable,
+            event_handlers: ThinVec::new(),
+            user_data: None,
+        });
+        if let Some(w) = m.widgets.get_mut(id) {
+            w.id = id;
+        }
+        if let Some(p) = parent {
+            if let Some(pw) = m.widgets.get_mut(p) {
+                pw.children.push(id);
+            }
+        }
+        id
+    }
+
+    fn button(m: &mut UiManager, parent: Option<WidgetId>) -> WidgetId {
+        add(
+            m,
+            WidgetKind::Button(ButtonState {
+                label: Signal::new(String::new()),
+                enabled: Signal::new(true),
+                clicked: false,
+            }),
+            parent,
+        )
+    }
+
+    /// root(panel) → [label, buttonA, buttonB]; only the buttons are focusable.
+    fn tree() -> (UiManager, WidgetId, WidgetId) {
+        let mut m = UiManager::default();
+        let root = add(
+            &mut m,
+            WidgetKind::Panel(PanelState {
+                title: Signal::new(String::new()),
+                closable: false,
+                close_requested: false,
+            }),
+            None,
+        );
+        m.set_root(root);
+        let _label = add(
+            &mut m,
+            WidgetKind::Label(LabelState {
+                text: Signal::new(String::new()),
+                color: Signal::new([1.0; 4]),
+                font_size: 14,
+            }),
+            Some(root),
+        );
+        let a = button(&mut m, Some(root));
+        let b = button(&mut m, Some(root));
+        (m, a, b)
+    }
+
+    #[test]
+    fn focus_next_starts_at_first_focusable_and_wraps() {
+        let (mut m, a, b) = tree();
+        assert_eq!(m.focused(), None);
+        assert_eq!(m.focus_next(), Some(a)); // skips the non-focusable label
+        assert_eq!(m.focus_next(), Some(b));
+        assert_eq!(m.focus_next(), Some(a)); // wraps
+    }
+
+    #[test]
+    fn focus_prev_wraps_backwards() {
+        let (mut m, a, b) = tree();
+        assert_eq!(m.focus_prev(), Some(b)); // nothing focused → last
+        assert_eq!(m.focus_prev(), Some(a));
+        assert_eq!(m.focus_prev(), Some(b)); // wraps
+    }
+
+    #[test]
+    fn set_focus_rejects_non_focusable_and_accepts_focusable() {
+        let (mut m, a, _b) = tree();
+        // The label is the only non-focusable child; grab its id by walking root.
+        let root = m.root.unwrap();
+        let label = m.widgets.get(root).unwrap().children[0];
+        assert!(!m.set_focus(label));
+        assert_eq!(m.focused(), None);
+        assert!(m.set_focus(a));
+        assert_eq!(m.focused(), Some(a));
+        m.clear_focus();
+        assert_eq!(m.focused(), None);
     }
 }

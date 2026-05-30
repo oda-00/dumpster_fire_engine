@@ -31,6 +31,9 @@ pub struct Widget {
     /// Inline enum dispatch — eliminates Box<dyn LayoutSolver> heap allocation
     /// and vtable indirection. All concrete solvers are Copy-sized.
     pub layout_solver: LayoutDispatch,
+    /// Whether this widget can receive keyboard focus / tab navigation.
+    /// Defaults from `WidgetKind::default_focusable`.
+    pub focusable: bool,
     pub event_handlers: ThinVec<EventSink>,
     pub user_data: Option<Box<dyn std::any::Any>>,
 }
@@ -46,6 +49,21 @@ pub enum WidgetKind {
     VirtualList(VirtualListState),
     OutlinerTree(OutlinerState),
     PropertyGrid(PropertyGridState),
+}
+
+impl WidgetKind {
+    /// Whether a widget of this kind is interactive and should accept keyboard
+    /// focus by default. Containers and static content are not focusable.
+    pub fn default_focusable(&self) -> bool {
+        matches!(
+            self,
+            WidgetKind::Button(_)
+                | WidgetKind::Slider(_)
+                | WidgetKind::Checkbox(_)
+                | WidgetKind::Dropdown(_)
+                | WidgetKind::TextEdit(_)
+        )
+    }
 }
 
 pub struct LabelState {

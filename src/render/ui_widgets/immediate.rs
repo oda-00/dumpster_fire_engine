@@ -61,9 +61,11 @@ impl<'a> UiBuilder<'a> {
         let y = self.cursor[1];
         let vw = self.manager.viewport_width();
 
+        let kind = make_kind();
+        let focusable = kind.default_focusable();
         let id = self.manager.widgets.insert(Widget {
             id: sentinel_id(), // patched immediately below
-            kind: make_kind(),
+            kind,
             parent: self.current_parent,
             children: ThinVec::new(),
             dirty: DirtyFlags::LAYOUT as u8 | DirtyFlags::CONTENT as u8,
@@ -75,6 +77,7 @@ impl<'a> UiBuilder<'a> {
                 max_height: height,
             },
             layout_solver: LayoutDispatch::Null,
+            focusable,
             event_handlers: ThinVec::new(),
             user_data: None,
         });
