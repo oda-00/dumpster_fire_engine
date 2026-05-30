@@ -908,6 +908,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge_mesh"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "forge_gltf",
+ "thin-vec",
+]
+
+[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
