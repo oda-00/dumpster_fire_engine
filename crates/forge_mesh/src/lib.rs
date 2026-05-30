@@ -13,6 +13,7 @@
 //! undo, and sculpt land in later phases.
 
 pub mod half_edge;
+pub mod select;
 
 #[cfg(feature = "gltf")]
 pub mod bridge;

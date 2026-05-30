@@ -913,6 +913,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "forge_gltf",
+ "rayon",
  "thin-vec",
 ]
 
