@@ -45,6 +45,41 @@ pub fn subdivide_indexed(pos: &[[f32; 3]], idx: &[u32]) -> (Vec<[f32; 3]>, Vec<u
     (out_pos, out_idx)
 }
 
+/// Weld vertices that fall in the same `eps`-grid cell into one, remap indices,
+/// and drop triangles that become degenerate. Returns `(positions, indices)`.
+pub fn weld_indexed(pos: &[[f32; 3]], idx: &[u32], eps: f32) -> (Vec<[f32; 3]>, Vec<u32>) {
+    let inv = if eps > 0.0 { 1.0 / eps } else { f32::INFINITY };
+    let cell = |p: [f32; 3]| -> (i64, i64, i64) {
+        (
+            (p[0] * inv).floor() as i64,
+            (p[1] * inv).floor() as i64,
+            (p[2] * inv).floor() as i64,
+        )
+    };
+    let mut map: HashMap<(i64, i64, i64), u32> = HashMap::new();
+    let mut new_pos: Vec<[f32; 3]> = Vec::new();
+    let mut remap = vec![0u32; pos.len()];
+    for (i, &p) in pos.iter().enumerate() {
+        let rep = *map.entry(cell(p)).or_insert_with(|| {
+            new_pos.push(p);
+            (new_pos.len() - 1) as u32
+        });
+        remap[i] = rep;
+    }
+    let mut new_idx: Vec<u32> = Vec::with_capacity(idx.len());
+    for t in idx.chunks_exact(3) {
+        let (a, b, c) = (
+            remap[t[0] as usize],
+            remap[t[1] as usize],
+            remap[t[2] as usize],
+        );
+        if a != b && b != c && a != c {
+            new_idx.extend_from_slice(&[a, b, c]); // drop degenerate (collapsed) tris
+        }
+    }
+    (new_pos, new_idx)
+}
+
 /// Build a new index buffer dropping the listed faces (positions retained).
 pub fn delete_faces_indexed(idx: &[u32], faces: &[u32]) -> Vec<u32> {
     let drop: std::collections::HashSet<u32> = faces.iter().copied().collect();
@@ -62,6 +97,13 @@ impl HalfEdgeMesh {
     pub fn subdivided(&self) -> Result<HalfEdgeMesh, MeshError> {
         let (p, i) = self.to_indexed();
         let (np, ni) = subdivide_indexed(&p, &i);
+        HalfEdgeMesh::build_from_indexed(&np, &ni)
+    }
+
+    /// Return a new mesh with coincident vertices welded within `eps`.
+    pub fn welded(&self, eps: f32) -> Result<HalfEdgeMesh, MeshError> {
+        let (p, i) = self.to_indexed();
+        let (np, ni) = weld_indexed(&p, &i, eps);
         HalfEdgeMesh::build_from_indexed(&np, &ni)
     }
 
@@ -137,6 +179,24 @@ mod tests {
         let d = m.with_faces_deleted(&[1]).unwrap();
         assert_eq!(d.face_count(), 1);
         d.validate().unwrap();
+    }
+
+    #[test]
+    fn weld_merges_coincident_vertices() {
+        // Two triangles sharing edge A–C, but with the shared corners duplicated
+        // (6 verts, indices 0..5). Welding collapses to 4 unique verts, 2 tris.
+        let a = [0.0, 0.0, 0.0];
+        let b = [1.0, 0.0, 0.0];
+        let c = [0.0, 1.0, 0.0];
+        let d = [-1.0, 0.0, 0.0];
+        let pos = vec![a, b, c, a, c, d]; // verts 3==0, 4==2 (coincident)
+        let idx = vec![0, 1, 2, 3, 4, 5];
+        let m = HalfEdgeMesh::build_from_indexed(&pos, &idx).unwrap();
+        assert_eq!(m.vertex_count(), 6);
+        let w = m.welded(1e-4).unwrap();
+        assert_eq!(w.vertex_count(), 4);
+        assert_eq!(w.face_count(), 2);
+        w.validate().unwrap();
     }
 
     #[test]
