@@ -746,6 +746,7 @@ dependencies = [
  "divan",
  "fontdue",
  "forge_gltf",
+ "forge_mesh",
  "glam",
  "gltf",
  "hashbrown 0.14.5",
