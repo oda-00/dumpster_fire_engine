@@ -13,6 +13,7 @@
 //! undo, and sculpt land in later phases.
 
 pub mod half_edge;
+pub mod ops;
 pub mod select;
 pub mod transform;
 
