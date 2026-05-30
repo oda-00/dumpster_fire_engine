@@ -15,6 +15,9 @@ pub struct UiManager {
     pub event_bus: EventBus,
     pub controllers: ThinVec<Arc<dyn Controller>>,
     viewport_rect: Rect,
+    /// Persistent layout measurement cache, reused across frames so clean
+    /// subtrees are served from cache instead of re-measured (GUI_research.md §3.2).
+    layout_cache: LayoutContext,
     /// Call-site key → WidgetId mapping. Keyed by a `u64` path hash
     /// (`id::path_key`) instead of an allocated `String`, eliminating the
     /// per-frame path allocation the immediate builder used to pay for every
@@ -31,6 +34,7 @@ impl UiManager {
             event_bus: EventBus::new(),
             controllers: ThinVec::new(),
             viewport_rect,
+            layout_cache: LayoutContext::new(),
             key_to_id: ThinVec::new(),
         }
     }
@@ -97,26 +101,48 @@ impl UiManager {
 
     pub fn layout(&mut self) {
         if let Some(root) = self.root {
-            let mut ctx = LayoutContext::new();
             let constraint = Constraint {
                 min_width: 0.0,
                 max_width: self.viewport_rect.w,
                 min_height: 0.0,
                 max_height: self.viewport_rect.h,
             };
+            // Take the persistent cache out so `measure` can borrow `self`
+            // mutably; restore it afterwards (the engine's mem::take scratch idiom).
+            let mut ctx = std::mem::take(&mut self.layout_cache);
             self.measure(root, &mut ctx, constraint);
+            self.layout_cache = ctx;
             self.arrange(root, self.viewport_rect);
         }
     }
 
     fn measure(&mut self, id: WidgetId, ctx: &mut LayoutContext, constraint: Constraint) -> Size {
+        // Dirty-subtree skip: `mark_widget_dirty` propagates LAYOUT dirtiness up
+        // to ancestors, so a node without the LAYOUT flag has no dirty descendants
+        // and its cached size (measured under the same constraint) is still valid.
+        let is_dirty = match self.widgets.get(id) {
+            Some(w) => w.dirty & DirtyFlags::LAYOUT as u8 != 0,
+            None => return Size { w: 0.0, h: 0.0 },
+        };
+        if !is_dirty {
+            if let Some(cached) = ctx.cached(id, &constraint) {
+                return cached;
+            }
+        }
+
         let Some(w) = self.widgets.get(id) else { return Size { w: 0.0, h: 0.0 } };
         let child_constraints: ThinVec<Constraint> =
             w.children.iter().map(|_| constraint).collect();
         let child_refs: ThinVec<(WidgetId, Constraint)> =
             w.children.iter().copied().zip(child_constraints).collect();
         let size = w.layout_solver.measure(&child_refs, &self.widgets, ctx);
-        ctx.set_size(id, size);
+        ctx.record(id, constraint, size);
+
+        // Freshly measured — clear the LAYOUT dirty bit so next frame is a cache hit
+        // unless something re-dirties this subtree.
+        if let Some(w) = self.widgets.get_mut(id) {
+            w.dirty &= !(DirtyFlags::LAYOUT as u8);
+        }
         size
     }
 
