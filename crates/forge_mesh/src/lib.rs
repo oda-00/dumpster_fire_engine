@@ -12,6 +12,7 @@
 //! bridge to/from `forge_gltf` primitives. Selection, operators, BVH, GPU kernels,
 //! undo, and sculpt land in later phases.
 
+pub mod bvh;
 pub mod half_edge;
 pub mod ops;
 pub mod select;
