@@ -3,8 +3,11 @@ use std::marker::PhantomData;
 use std::num::NonZeroU32;
 
 use dumpster_fire_engine::render::ui_core::{
-    id::WidgetId,
-    layout::{Constraint, LayoutContext, Rect, Size},
+    id::{WidgetArena, WidgetId},
+    layout::{
+        Alignment, ColumnLayout, Constraint, LayoutContext, LayoutDispatch, LayoutSolver, Rect,
+        RowLayout, Size,
+    },
     signal::Signal,
     event::{EventBus, UiEvent},
 };
@@ -47,7 +50,7 @@ fn bench_signal_get(c: &mut Criterion) {
 }
 
 fn bench_signal_set_change(c: &mut Criterion) {
-    let s = Signal::new(0u32);
+    let mut s = Signal::new(0u32);
     c.bench_function("Signal::set (value changes)", |b| {
         let mut v = 0u32;
         b.iter(|| {
@@ -58,7 +61,7 @@ fn bench_signal_set_change(c: &mut Criterion) {
 }
 
 fn bench_signal_set_noop(c: &mut Criterion) {
-    let s = Signal::new(42u32);
+    let mut s = Signal::new(42u32);
     c.bench_function("Signal::set (no-op same value)", |b| {
         b.iter(|| s.set(black_box(42u32)));
     });
@@ -67,7 +70,7 @@ fn bench_signal_set_noop(c: &mut Criterion) {
 fn bench_signal_subscribe(c: &mut Criterion) {
     c.bench_function("Signal::subscribe x100 unique", |b| {
         b.iter(|| {
-            let s = Signal::new(0u32);
+            let mut s = Signal::new(0u32);
             for i in 0..100u32 {
                 s.subscribe(dummy_id(i));
             }
@@ -103,8 +106,35 @@ fn bench_constraint_clamp(c: &mut Criterion) {
     });
 }
 
+// ── Layout dispatch (Phase 0 guard) ─────────────────────────────────────────
+// Tracks the enum-dispatch hot path from GUI_research.md §4.1 / exp1_dispatch.rs:
+// a homogeneous run of `LayoutDispatch::measure` must stay an inlined, register-only
+// loop (no per-element vtable call). Regressions here mean the dispatch win eroded.
+
+fn bench_layout_dispatch(c: &mut Criterion) {
+    let arena = WidgetArena::new();
+    let items: Vec<LayoutDispatch> = (0..1000u32)
+        .map(|i| match i % 3 {
+            0 => LayoutDispatch::Row(RowLayout { gap: 4.0, cross_alignment: Alignment::Start }),
+            1 => LayoutDispatch::Column(ColumnLayout { gap: 4.0, cross_alignment: Alignment::Start }),
+            _ => LayoutDispatch::Null,
+        })
+        .collect();
+    c.bench_function("LayoutDispatch::measure x1000 (enum dispatch)", |b| {
+        b.iter(|| {
+            let mut ctx = LayoutContext::new();
+            let mut acc = 0.0f32;
+            for it in &items {
+                acc += black_box(it).measure(&[], &arena, &mut ctx).w;
+            }
+            black_box(acc)
+        });
+    });
+}
+
 criterion_group!(
     benches,
+    bench_layout_dispatch,
     bench_layout_context_insert,
     bench_layout_context_lookup,
     bench_signal_get,

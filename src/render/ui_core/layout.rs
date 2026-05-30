@@ -251,6 +251,11 @@ impl LayoutSolver for LayoutDispatch {
     }
 }
 
+/// Guard the §4.1 dispatch win: `LayoutDispatch` must stay small enough to live
+/// in a register pair (no spill) so the inline `match` keeps beating a
+/// `Box<dyn LayoutSolver>` vtable call. See `docs/gui_research/asm/exp1_dispatch.rs`.
+const _: () = assert!(core::mem::size_of::<LayoutDispatch>() <= 16);
+
 #[cfg(test)]
 mod tests {
     use super::*;
