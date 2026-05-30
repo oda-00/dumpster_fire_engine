@@ -5,7 +5,8 @@ use crate::render::ui_core::signal::Signal;
 use crate::render::ui_core::widget::{
     ButtonState, CheckboxState, DirtyFlags, LabelState, PanelState, SliderState, Widget, WidgetKind,
 };
-use crate::render::ui_core::{Constraint, Rect, UiEvent, UiManager, WidgetId, WidgetIdPath};
+use crate::render::ui_core::id::path_key;
+use crate::render::ui_core::{Constraint, Rect, UiEvent, UiManager, WidgetId};
 
 /// Placeholder inserted before the arena hands back the real generational id.
 /// Immediately overwritten after `Arena::insert` returns.
@@ -37,13 +38,22 @@ impl<'a> UiBuilder<'a> {
     }
 
     /// Return an existing widget id for `name` in the current path scope, or
-    /// allocate a new one via the arena and register the path→id mapping.
-    fn resolve_or_create(&mut self, name: &'static str, kind: WidgetKind, height: f32) -> WidgetId {
-        self.id_stack.push(name);
-        let path = WidgetIdPath(self.id_stack.clone()).to_string();
-        self.id_stack.pop();
+    /// allocate a new one via the arena and register the key→id mapping.
+    ///
+    /// `make_kind` builds the widget's state and is invoked **only on a cache
+    /// miss** — on the common hit path nothing is allocated (no `String` path,
+    /// no `Signal`/`String` state), unlike the previous version which built the
+    /// state and a path `String` every frame and then discarded them on a hit
+    /// (GUI_research.md §4.2).
+    fn resolve_or_create(
+        &mut self,
+        name: &'static str,
+        make_kind: impl FnOnce() -> WidgetKind,
+        height: f32,
+    ) -> WidgetId {
+        let key = path_key(&self.id_stack, name);
 
-        if let Some(id) = self.manager.get_widget_by_path(&path) {
+        if let Some(id) = self.manager.get_widget_by_key(key) {
             return id;
         }
 
@@ -53,7 +63,7 @@ impl<'a> UiBuilder<'a> {
 
         let id = self.manager.widgets.insert(Widget {
             id: sentinel_id(), // patched immediately below
-            kind,
+            kind: make_kind(),
             parent: self.current_parent,
             children: ThinVec::new(),
             dirty: DirtyFlags::LAYOUT as u8 | DirtyFlags::CONTENT as u8,
@@ -74,7 +84,7 @@ impl<'a> UiBuilder<'a> {
             w.id = id;
         }
 
-        self.manager.register_widget_path(path, id);
+        self.manager.register_widget_key(key, id);
 
         if let Some(parent_id) = self.current_parent {
             if let Some(parent) = self.manager.widgets.get_mut(parent_id) {
@@ -86,27 +96,41 @@ impl<'a> UiBuilder<'a> {
     }
 
     pub fn label(&mut self, text: &str) {
-        let state = LabelState {
-            text: Signal::new(text.to_owned()),
-            color: Signal::new([1.0, 1.0, 1.0, 1.0]),
-            font_size: 14,
-        };
-        let id = self.resolve_or_create("label", WidgetKind::Label(state), 20.0);
+        let id = self.resolve_or_create(
+            "label",
+            || {
+                WidgetKind::Label(LabelState {
+                    text: Signal::new(text.to_owned()),
+                    color: Signal::new([1.0, 1.0, 1.0, 1.0]),
+                    font_size: 14,
+                })
+            },
+            20.0,
+        );
         if let Some(w) = self.manager.widgets.get_mut(id) {
             if let WidgetKind::Label(ref mut s) = w.kind {
-                s.text.set(text.to_owned());
+                // Only allocate a new String when the text actually changed —
+                // the common steady-state case allocates nothing.
+                if s.text.get_ref().as_str() != text {
+                    s.text.set(text.to_owned());
+                }
             }
         }
         self.cursor[1] += 20.0 + self.gap;
     }
 
     pub fn button(&mut self, text: &str) -> bool {
-        let state = ButtonState {
-            label: Signal::new(text.to_owned()),
-            enabled: Signal::new(true),
-            clicked: false,
-        };
-        let id = self.resolve_or_create("button", WidgetKind::Button(state), 30.0);
+        let id = self.resolve_or_create(
+            "button",
+            || {
+                WidgetKind::Button(ButtonState {
+                    label: Signal::new(text.to_owned()),
+                    enabled: Signal::new(true),
+                    clicked: false,
+                })
+            },
+            30.0,
+        );
 
         let clicked = self
             .manager
@@ -129,14 +153,20 @@ impl<'a> UiBuilder<'a> {
     }
 
     pub fn slider(&mut self, _label: &str, min: f32, max: f32, value: &mut f32) {
-        let state = crate::render::ui_core::widget::SliderState {
-            value: Signal::new(*value),
-            min,
-            max,
-            step: 0.01,
-            dragging: false,
-        };
-        let id = self.resolve_or_create("slider", WidgetKind::Slider(state), 25.0);
+        let init = *value;
+        let id = self.resolve_or_create(
+            "slider",
+            || {
+                WidgetKind::Slider(SliderState {
+                    value: Signal::new(init),
+                    min,
+                    max,
+                    step: 0.01,
+                    dragging: false,
+                })
+            },
+            25.0,
+        );
 
         if let Some(w) = self.manager.widgets.get(id) {
             if let WidgetKind::Slider(ref s) = w.kind {
@@ -148,11 +178,17 @@ impl<'a> UiBuilder<'a> {
     }
 
     pub fn checkbox(&mut self, _label: &str, value: &mut bool) {
-        let state = CheckboxState {
-            checked: Signal::new(*value),
-            label: Signal::new(String::new()),
-        };
-        let id = self.resolve_or_create("checkbox", WidgetKind::Checkbox(state), 20.0);
+        let init = *value;
+        let id = self.resolve_or_create(
+            "checkbox",
+            || {
+                WidgetKind::Checkbox(CheckboxState {
+                    checked: Signal::new(init),
+                    label: Signal::new(String::new()),
+                })
+            },
+            20.0,
+        );
 
         if let Some(w) = self.manager.widgets.get(id) {
             if let WidgetKind::Checkbox(ref s) = w.kind {
@@ -164,12 +200,17 @@ impl<'a> UiBuilder<'a> {
     }
 
     pub fn begin_column(&mut self, name: &'static str) {
-        let state = PanelState {
-            title: Signal::new(name.to_owned()),
-            closable: false,
-            close_requested: false,
-        };
-        let id = self.resolve_or_create(name, WidgetKind::Panel(state), 0.0);
+        let id = self.resolve_or_create(
+            name,
+            || {
+                WidgetKind::Panel(PanelState {
+                    title: Signal::new(name.to_owned()),
+                    closable: false,
+                    close_requested: false,
+                })
+            },
+            0.0,
+        );
         if let Some(w) = self.manager.widgets.get_mut(id) {
             w.layout_solver = LayoutDispatch::Column(ColumnLayout {
                 gap: self.gap,

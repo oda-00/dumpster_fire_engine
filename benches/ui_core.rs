@@ -3,11 +3,12 @@ use std::marker::PhantomData;
 use std::num::NonZeroU32;
 
 use dumpster_fire_engine::render::ui_core::{
-    id::{WidgetArena, WidgetId},
+    id::{path_key, WidgetArena, WidgetId},
     layout::{
         Alignment, ColumnLayout, Constraint, LayoutContext, LayoutDispatch, LayoutSolver, Rect,
         RowLayout, Size,
     },
+    manager::UiManager,
     signal::Signal,
     event::{EventBus, UiEvent},
 };
@@ -132,9 +133,33 @@ fn bench_layout_dispatch(c: &mut Criterion) {
     });
 }
 
+// ── Call-site identity (Phase 2) ────────────────────────────────────────────
+// The immediate builder now keys widgets by a u64 path hash instead of an
+// allocated String path (GUI_research.md §4.2 / exp2_arena.rs). These track the
+// hash + sorted-lookup cost that replaced the per-frame String allocation.
+
+fn bench_path_key(c: &mut Criterion) {
+    let stack = ["root", "panel", "section"];
+    c.bench_function("path_key (3-seg stack + name)", |b| {
+        b.iter(|| path_key(black_box(&stack), black_box("button")))
+    });
+}
+
+fn bench_key_lookup(c: &mut Criterion) {
+    let mut m = UiManager::default();
+    for i in 0..1000u64 {
+        m.register_widget_key(i, dummy_id(i as u32));
+    }
+    c.bench_function("UiManager::get_widget_by_key (hit)", |b| {
+        b.iter(|| m.get_widget_by_key(black_box(500)))
+    });
+}
+
 criterion_group!(
     benches,
     bench_layout_dispatch,
+    bench_path_key,
+    bench_key_lookup,
     bench_layout_context_insert,
     bench_layout_context_lookup,
     bench_signal_get,

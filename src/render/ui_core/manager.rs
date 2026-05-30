@@ -4,7 +4,7 @@ use thin_vec::ThinVec;
 
 use crate::render::ui_core::controller::Controller;
 use crate::render::ui_core::event::EventBus;
-use crate::render::ui_core::id::{WidgetArena, WidgetId, WidgetIdPath};
+use crate::render::ui_core::id::{WidgetArena, WidgetId};
 use crate::render::ui_core::layout::{Constraint, LayoutContext, LayoutSolver, Rect, Size};
 use crate::render::ui_core::widget::DirtyFlags;
 use crate::resource_manager::world_manager::World;
@@ -15,9 +15,12 @@ pub struct UiManager {
     pub event_bus: EventBus,
     pub controllers: ThinVec<Arc<dyn Controller>>,
     viewport_rect: Rect,
-    /// Path → WidgetId mapping. Sorted by path so lookup uses
+    /// Call-site key → WidgetId mapping. Keyed by a `u64` path hash
+    /// (`id::path_key`) instead of an allocated `String`, eliminating the
+    /// per-frame path allocation the immediate builder used to pay for every
+    /// widget (GUI_research.md §4.2). Sorted by key so lookup uses
     /// `partition_point` (O(log N), same pattern as ScriptManager::id_to_handle).
-    path_to_id: ThinVec<(String, WidgetId)>,
+    key_to_id: ThinVec<(u64, WidgetId)>,
 }
 
 impl UiManager {
@@ -28,7 +31,7 @@ impl UiManager {
             event_bus: EventBus::new(),
             controllers: ThinVec::new(),
             viewport_rect,
-            path_to_id: ThinVec::new(),
+            key_to_id: ThinVec::new(),
         }
     }
 
@@ -54,20 +57,23 @@ impl UiManager {
         self.viewport_rect.h
     }
 
-    pub fn get_widget_by_path(&self, path: &str) -> Option<WidgetId> {
-        let pos = self.path_to_id.partition_point(|(p, _)| p.as_str() < path);
-        self.path_to_id
+    /// Look up an immediate-mode widget by its call-site key (`id::path_key`).
+    pub fn get_widget_by_key(&self, key: u64) -> Option<WidgetId> {
+        let pos = self.key_to_id.partition_point(|(k, _)| *k < key);
+        self.key_to_id
             .get(pos)
-            .filter(|(p, _)| p.as_str() == path)
+            .filter(|(k, _)| *k == key)
             .map(|(_, id)| *id)
     }
 
-    pub fn register_widget_path(&mut self, path: String, id: WidgetId) {
-        let pos = self.path_to_id.partition_point(|(p, _)| p.as_str() < path.as_str());
-        if self.path_to_id.get(pos).map(|(p, _)| p.as_str()) == Some(path.as_str()) {
-            self.path_to_id[pos].1 = id; // update existing entry
+    /// Register (or update) the WidgetId for a call-site key, keeping
+    /// `key_to_id` sorted for `partition_point` lookup.
+    pub fn register_widget_key(&mut self, key: u64, id: WidgetId) {
+        let pos = self.key_to_id.partition_point(|(k, _)| *k < key);
+        if self.key_to_id.get(pos).map(|(k, _)| *k) == Some(key) {
+            self.key_to_id[pos].1 = id; // update existing entry
         } else {
-            self.path_to_id.insert(pos, (path, id));
+            self.key_to_id.insert(pos, (key, id));
         }
     }
 
