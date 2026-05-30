@@ -14,6 +14,7 @@
 
 pub mod half_edge;
 pub mod select;
+pub mod transform;
 
 #[cfg(feature = "gltf")]
 pub mod bridge;
