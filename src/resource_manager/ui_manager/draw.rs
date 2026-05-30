@@ -5,13 +5,11 @@ use thin_vec::ThinVec;
 /// degenerate-UV bypass and uses vertex color directly (no atlas sample).
 pub const SOLID: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct UiVertex {
-    pub pos: [f32; 2],
-    pub uv: [f32; 2],
-    pub color: [u8; 4],
-}
+// Unified with the canonical UI vertex — one `#[repr(C)]` UiVertex type across
+// the engine (GUI_research.md Phase 6 consolidation). Identical memory layout,
+// so the GPU vertex-attribute bindings in overlay/backend are unaffected. Path
+// kept as a re-export so existing `ui_manager::draw::UiVertex` users are unchanged.
+pub use crate::render::ui_render::vertex::UiVertex;
 
 pub struct DrawList {
     pub vertices: ThinVec<UiVertex>,
