@@ -136,6 +136,31 @@ impl VirtualListState {
         let last = (first + count).min(self.item_count);
         first..last
     }
+
+    /// Total content height of all items.
+    #[inline]
+    pub fn content_height(&self) -> f32 {
+        self.item_count as f32 * self.item_height
+    }
+
+    /// Largest valid `scroll_offset` for `viewport_height` — never negative, and
+    /// 0 when the content fits (so a short list can't scroll).
+    #[inline]
+    pub fn max_scroll(&self, viewport_height: f32) -> f32 {
+        (self.content_height() - viewport_height).max(0.0)
+    }
+
+    /// Set the scroll offset, clamped to `[0, max_scroll]`.
+    #[inline]
+    pub fn set_scroll(&mut self, offset: f32, viewport_height: f32) {
+        self.scroll_offset = offset.clamp(0.0, self.max_scroll(viewport_height));
+    }
+
+    /// Scroll by `delta` pixels (e.g. from a wheel event), clamped to range.
+    #[inline]
+    pub fn scroll_by(&mut self, delta: f32, viewport_height: f32) {
+        self.set_scroll(self.scroll_offset + delta, viewport_height);
+    }
 }
 
 pub struct OutlinerState {
@@ -176,4 +201,63 @@ pub enum PropertyKind {
     Bool,
     String,
     Vec3,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vlist(item_count: usize, item_height: f32) -> VirtualListState {
+        fn noop(_i: usize, _y: f32) {}
+        VirtualListState {
+            item_count,
+            item_height,
+            scroll_offset: 0.0,
+            item_builder: noop,
+            visible_widgets: ThinVec::new(),
+        }
+    }
+
+    #[test]
+    fn default_focusable_only_interactive_kinds() {
+        assert!(WidgetKind::Button(ButtonState {
+            label: crate::render::ui_core::signal::Signal::new(String::new()),
+            enabled: crate::render::ui_core::signal::Signal::new(true),
+            clicked: false,
+        })
+        .default_focusable());
+        assert!(!WidgetKind::Panel(PanelState {
+            title: crate::render::ui_core::signal::Signal::new(String::new()),
+            closable: false,
+            close_requested: false,
+        })
+        .default_focusable());
+    }
+
+    #[test]
+    fn visible_range_windows_to_viewport() {
+        let mut v = vlist(1000, 20.0);
+        // Top of a 100px viewport: items 0..=5 (5 fully visible + 1 spare).
+        assert_eq!(v.visible_range(100.0), 0..6);
+        v.scroll_offset = 100.0; // scrolled down 5 items
+        assert_eq!(v.visible_range(100.0), 5..11);
+    }
+
+    #[test]
+    fn scroll_clamps_to_content() {
+        let mut v = vlist(10, 20.0); // 200px content
+        assert_eq!(v.max_scroll(100.0), 100.0);
+        v.scroll_by(1000.0, 100.0); // overscroll down
+        assert_eq!(v.scroll_offset, 100.0);
+        v.scroll_by(-1000.0, 100.0); // overscroll up
+        assert_eq!(v.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn short_list_cannot_scroll() {
+        let mut v = vlist(2, 20.0); // 40px content, 100px viewport
+        assert_eq!(v.max_scroll(100.0), 0.0);
+        v.scroll_by(50.0, 100.0);
+        assert_eq!(v.scroll_offset, 0.0);
+    }
 }
