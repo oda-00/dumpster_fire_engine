@@ -746,6 +746,7 @@ dependencies = [
  "divan",
  "fontdue",
  "forge_gltf",
+ "forge_mesh",
  "glam",
  "gltf",
  "hashbrown 0.14.5",
@@ -904,6 +905,16 @@ dependencies = [
  "mikktspace",
  "rayon",
  "serde_json",
+ "thin-vec",
+]
+
+[[package]]
+name = "forge_mesh"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "forge_gltf",
+ "rayon",
  "thin-vec",
 ]
 

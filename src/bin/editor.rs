@@ -6,6 +6,13 @@
 //! Controls:
 //!   Tab         — cycle viewport layout
 //!   G / R / S   — Translate / Rotate / Scale gizmo mode
+//!   F           — frame (focus cameras on) the selected actor
+//!   X           — toggle gizmo snapping (grid / angle / scale steps)
+//!   Ctrl+D      — duplicate the selected actor
+//!   F2          — toggle the stats overlay
+//!   E           — toggle mesh edit mode for the selected mesh
+//!   1 / 2 / 3   — (edit mode) vertex / edge / face element select
+//!   Ctrl+Z      — (edit mode) undo;  Ctrl+Shift+Z — redo
 //!   Del         — despawn selected actor
 //!   Esc         — clear selection / close menus
 //!   LMB         — click-to-select actor (ray-AABB)
@@ -33,6 +40,10 @@ use dumpster_fire_engine::resource_manager::ui_manager::{
     panel::{Panel, PanelHandle},
     widget::{CheckboxData, DropdownData, Widget, WidgetHandle},
 };
+use dumpster_fire_engine::render::ui_editor::mesh_edit::{EditSession, ElementMode};
+use forge_gltf::asset::GltfAsset;
+use forge_gltf::mesh::PrimitiveTopology;
+use std::path::Path as FsPath;
 use dumpster_fire_engine::resource_manager::{
     ActorId, ActorType, Environment, EnvironmentId, LevelHandle, LevelId, StageHandle, StageId,
     Utility, UtilityId, World,
@@ -106,6 +117,16 @@ struct EditorApp {
     spawn_menu_open: bool,
     light_submenu_open: bool,
 
+    // ── tools: gizmo snapping (X toggles)
+    snap_enabled: bool,
+    snap_translate: f32,
+    snap_rotate_deg: f32,
+    snap_scale: f32,
+    // ── tools: stats overlay (F2 toggles)
+    stats_open: bool,
+    // ── modifier tracking (for Ctrl+D duplicate)
+    ctrl_held: bool,
+
     // ── file picker
     picker_open: bool,
     picker_filter: Arc<str>,
@@ -145,6 +166,21 @@ struct EditorApp {
 
     /// Active TRS-gizmo drag, set on click + cleared on release.
     gizmo_drag: Option<GizmoDrag>,
+
+    // ── mesh edit mode (None = object mode)
+    edit: Option<EditSession>,
+    edit_drag: Option<EditDrag>,
+    shift_held: bool,
+}
+
+/// Active edit-mode element translate-drag — a gizmo arrow grabbed at the
+/// current selection centroid.
+#[derive(Copy, Clone, Debug)]
+struct EditDrag {
+    axis: u8,
+    start_cursor: [f32; 2],
+    arrow_screen: [f32; 2],
+    arrow_world_len: f32,
 }
 
 impl EditorApp {
@@ -224,7 +260,7 @@ impl EditorApp {
         self.world.selection = Some(ah);
     }
 
-    fn do_spawn_mesh(&mut self, asset: GltfHandle) {
+    fn do_spawn_mesh(&mut self, asset: GltfHandle, path: Arc<str>) {
         let Some((lh, sh)) = self.main_stage else {
             return;
         };
@@ -238,7 +274,8 @@ impl EditorApp {
             ah,
             ActorType::Environment(Environment {
                 id: EnvironmentId::new(id.raw()),
-                name: Arc::from("mesh_actor"),
+                // Store the source path as the name so edit mode can reload geometry.
+                name: path,
                 visible: true,
                 physical: false,
                 mesh: Some(MeshRef { asset }),
@@ -540,6 +577,54 @@ impl AppLogic for EditorApp {
                         self.gizmo_mode = GizmoMode::Scale;
                         return true;
                     }
+                    PhysicalKey::Code(KeyCode::KeyF) => {
+                        self.frame_selected(ctx, app);
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::KeyX) => {
+                        self.snap_enabled = !self.snap_enabled;
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::F2) => {
+                        self.stats_open = !self.stats_open;
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::KeyD) if self.ctrl_held => {
+                        self.duplicate_selected();
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::KeyE) => {
+                        self.toggle_edit_mode();
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::Digit1) => {
+                        if let Some(e) = self.edit.as_mut() {
+                            e.mode = ElementMode::Vertex;
+                            return true;
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::Digit2) => {
+                        if let Some(e) = self.edit.as_mut() {
+                            e.mode = ElementMode::Edge;
+                            return true;
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::Digit3) => {
+                        if let Some(e) = self.edit.as_mut() {
+                            e.mode = ElementMode::Face;
+                            return true;
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::KeyZ) if self.ctrl_held => {
+                        if let Some(e) = self.edit.as_mut() {
+                            if self.shift_held {
+                                e.redo();
+                            } else {
+                                e.undo();
+                            }
+                            return true;
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::Delete) => {
                         if let (Some(ah), Some((lh, sh))) = (self.world.selection, self.main_stage)
                         {
@@ -554,9 +639,18 @@ impl AppLogic for EditorApp {
                         self.spawn_menu_open = false;
                         self.light_submenu_open = false;
                         self.picker_open = false;
+                        self.edit_drag = None;
+                        if let Some(e) = self.edit.as_mut() {
+                            e.clear_selection();
+                        }
                     }
                     _ => {}
                 }
+            }
+
+            WindowEvent::ModifiersChanged(mods) => {
+                self.ctrl_held = mods.state().control_key();
+                self.shift_held = mods.state().shift_key();
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -588,6 +682,9 @@ impl AppLogic for EditorApp {
                 }
                 if self.gizmo_drag.is_some() {
                     self.apply_gizmo_drag();
+                }
+                if self.edit_drag.is_some() {
+                    self.apply_edit_drag();
                 }
             }
 
@@ -621,6 +718,16 @@ impl AppLogic for EditorApp {
                     self.ui_consumed_click =
                         in_toolbar || in_outliner || in_inspector || in_picker || in_spawn;
                     if !self.ui_consumed_click {
+                        // Edit mode owns clicks in the viewport: grab a gizmo arrow
+                        // to translate the element selection, else pick an element.
+                        if self.edit.is_some() {
+                            if let Some(d) = self.start_edit_drag(ctx, app) {
+                                self.edit_drag = Some(d);
+                                return true;
+                            }
+                            self.edit_pick(ctx, app);
+                            return true;
+                        }
                         if let Some(drag) = self.start_gizmo_drag(ctx, app) {
                             self.gizmo_drag = Some(drag);
                             return true;
@@ -636,6 +743,11 @@ impl AppLogic for EditorApp {
                 }
                 ElementState::Released => {
                     self.ui_left_down = false;
+                    if self.edit_drag.take().is_some() {
+                        if let Some(e) = self.edit.as_mut() {
+                            e.commit_transform();
+                        }
+                    }
                     self.gizmo_drag = None;
                     self.div_drag = None;
                 }
@@ -693,6 +805,8 @@ impl AppLogic for EditorApp {
         self.draw_inspector(ctx, app);
         self.draw_bottom_panel(ctx, app);
         self.draw_trs_gizmo(ctx, app);
+        self.draw_edit_overlay(ctx, app);
+        self.draw_stats(win_w);
         if self.picker_open {
             self.draw_file_picker(ctx, app);
         }
@@ -1491,7 +1605,7 @@ impl EditorApp {
             if let Some(win) = self.win
                 && let Ok(asset) = ctx.load_gltf(win, PathBuf::from(path.as_ref()))
             {
-                self.do_spawn_mesh(asset);
+                self.do_spawn_mesh(asset, Arc::clone(&path));
             }
             self.picker_open = false;
         }
@@ -1612,6 +1726,13 @@ impl EditorApp {
                 let world_delta = axis * (t * drag.arrow_world_len);
                 let mut nl = drag.start_local;
                 nl.translation += glam::Vec3A::from(world_delta);
+                if self.snap_enabled {
+                    let a = drag.axis as usize;
+                    let s = self.snap_translate.max(1e-4);
+                    let mut tr = glam::Vec3::from(nl.translation);
+                    tr[a] = (tr[a] / s).round() * s; // snap dragged axis to grid
+                    nl.translation = glam::Vec3A::from(tr);
+                }
                 nl
             }
             GizmoMode::Scale => {
@@ -1620,7 +1741,11 @@ impl EditorApp {
                     return;
                 }
                 let t = (dx * drag.arrow_screen[0] + dy * drag.arrow_screen[1]) / arrow_len_sq;
-                let factor = (1.0 + t).max(0.01);
+                let mut factor = (1.0 + t).max(0.01);
+                if self.snap_enabled {
+                    let s = self.snap_scale.max(1e-4);
+                    factor = ((factor / s).round() * s).max(s); // snap scale to steps
+                }
                 let mut nl = drag.start_local;
                 let mut scale_vec = Vec3::ONE;
                 scale_vec[drag.axis as usize] = factor;
@@ -1633,7 +1758,11 @@ impl EditorApp {
                 let cy = drag.ring_origin[1];
                 let start_a = (drag.start_cursor[1] - cy).atan2(drag.start_cursor[0] - cx);
                 let cur_a = (cursor[1] - cy).atan2(cursor[0] - cx);
-                let angle = cur_a - start_a;
+                let mut angle = cur_a - start_a;
+                if self.snap_enabled {
+                    let step = self.snap_rotate_deg.to_radians().max(1e-4);
+                    angle = (angle / step).round() * step; // snap rotation to fixed angles
+                }
                 let rot = glam::Quat::from_axis_angle(axis, angle);
                 let mut nl = drag.start_local;
                 nl.matrix3 = glam::Mat3A::from_quat(rot) * drag.start_local.matrix3;
@@ -1641,6 +1770,402 @@ impl EditorApp {
             }
         };
         self.world.set_actor_local(lh, sh, drag.actor, new_local);
+    }
+}
+
+// ── Tools: frame-selected, duplicate, stats overlay ─────────────────────────
+
+impl EditorApp {
+    /// F — move/orbit all viewport cameras to focus the selected actor.
+    fn frame_selected(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
+        let Some(ah) = self.world.selection else { return };
+        let Some((lh, sh)) = self.main_stage else { return };
+        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else {
+            return;
+        };
+        let Some(world_t) = stage.worlds.get(ah.idx as usize) else { return };
+        let c = Vec3::from(world_t.translation);
+        let r = 2.0_f32; // focus box half-extent around the actor origin
+        let aabb = ([c.x - r, c.y - r, c.z - r], [c.x + r, c.y + r, c.z + r]);
+        ctx.fit_all_panes_to_aabb(app, &aabb);
+    }
+
+    /// Ctrl+D — clone the selected actor (transform + sub-entities) and select
+    /// the copy. Covers the kinds the editor creates: mesh `Environment` and
+    /// `Utility` (lights/empties); a light's `UtilityComponent` is recreated.
+    fn duplicate_selected(&mut self) {
+        let Some(src) = self.world.selection else { return };
+        let Some((lh, sh)) = self.main_stage else { return };
+
+        // Read the source actor first (immutable), then spawn (mutable).
+        let (local, subs) = {
+            let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else {
+                return;
+            };
+            let Some(actor) = stage.actors.get(src) else { return };
+            let local = stage
+                .locals
+                .get(src.idx as usize)
+                .copied()
+                .unwrap_or(Affine3A::IDENTITY);
+            let mut subs: ThinVec<(ActorType, Option<LightData>)> = ThinVec::new();
+            for se in actor.sub_entities.iter().flatten() {
+                let at = match &se.actor_type {
+                    ActorType::Environment(e) => ActorType::Environment(Environment {
+                        id: e.id,
+                        name: Arc::clone(&e.name),
+                        visible: e.visible,
+                        physical: e.physical,
+                        mesh: e.mesh.as_ref().map(|m| MeshRef { asset: m.asset }),
+                    }),
+                    ActorType::Utility(u) => ActorType::Utility(Utility {
+                        id: u.id,
+                        name: Arc::clone(&u.name),
+                        visible: u.visible,
+                        toggle: u.toggle,
+                        mesh: u.mesh.as_ref().map(|m| MeshRef { asset: m.asset }),
+                    }),
+                    _ => continue,
+                };
+                let light = match &se.components[ComponentType::Utility.index()] {
+                    Some(Component::Utility(uc)) => uc.light.clone(),
+                    _ => None,
+                };
+                subs.push((at, light));
+            }
+            (local, subs)
+        };
+        if subs.is_empty() {
+            return;
+        }
+
+        // Offset the copy so it's visibly distinct from the original.
+        let offset = Affine3A::from_translation(Vec3::new(0.5, 0.0, 0.5)) * local;
+        let id = ActorId::new(self.actors.len() as i64 + 500);
+        let Some(ah) = self.world.spawn_actor(lh, sh, id, offset) else { return };
+
+        for (at, light) in subs {
+            let is_util_light = matches!(&at, ActorType::Utility(_)) && light.is_some();
+            let _ = self.world.spawn_sub_entity(lh, sh, ah, at, Affine3A::IDENTITY);
+            if is_util_light {
+                let utility_idx = ActorType::Utility(Utility {
+                    id: UtilityId::new(0),
+                    name: Arc::from(""),
+                    visible: true,
+                    toggle: true,
+                    mesh: None,
+                })
+                .index();
+                self.world.add_component(
+                    lh,
+                    sh,
+                    ah,
+                    utility_idx,
+                    UtilityComponent {
+                        name: Arc::from("Light"),
+                        description: Arc::from(""),
+                        camera: None,
+                        light,
+                        render: None,
+                    },
+                );
+            }
+        }
+        self.actors.push(ah);
+        self.world.selection = Some(ah);
+    }
+
+    /// F2 — a small heads-up overlay with frame/scene stats.
+    fn draw_stats(&mut self, win_w: f32) {
+        if !self.stats_open {
+            return;
+        }
+        use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
+        let w = 210.0_f32;
+        let h = 176.0_f32;
+        let x = (win_w - self.inspector_w - w - 14.0).max(8.0);
+        let y = TOOLBAR_H + 12.0;
+        let frame_ms = if self.fps_display > 0.0 { 1000.0 / self.fps_display } else { 0.0 };
+        let sel = self.world.selection.map(|hh| hh.idx as i64).unwrap_or(-1);
+        let lines = [
+            format!("FPS {:.0}  ({frame_ms:.2} ms)", self.fps_display),
+            format!("actors {}", self.actors.len()),
+            format!("selection {sel}"),
+            format!("gizmo {:?}", self.gizmo_mode),
+            format!("snap {}", if self.snap_enabled { "ON" } else { "off" }),
+            "[F2] hide  [X] snap".to_string(),
+        ];
+        let input = self.ui_input();
+        let dl = &mut self.world.ui.draw_list;
+        dl.push_panel_bg(x, y, w, h, [18, 18, 26, 235]);
+        dl.push_title_bar(x, y, w, TITLEBAR_H, [40, 40, 58, 255], SEP);
+        let mut ui = Ui::with_input(
+            dl,
+            Rect { x: x + 8.0, y: y + TITLEBAR_H + 4.0, w: w - 16.0, h: h - TITLEBAR_H - 8.0 },
+            input,
+        );
+        ui.label("Stats");
+        for ln in &lines {
+            ui.label(ln.as_str());
+        }
+    }
+}
+
+// ── Mesh edit mode ──────────────────────────────────────────────────────────
+
+/// Cached focused-viewport projection data for edit-mode picking/drawing.
+struct EditView {
+    vp: Mat4,
+    px: f32,
+    py: f32,
+    pw: f32,
+    ph: f32,
+    cam_pos: Vec3,
+    is_ortho: bool,
+}
+
+impl EditorApp {
+    /// Toggle edit mode for the selected mesh actor (reloading its glTF geometry),
+    /// falling back to a unit cube when no editable source is available.
+    fn toggle_edit_mode(&mut self) {
+        if self.edit.is_some() {
+            self.edit = None;
+            self.edit_drag = None;
+            return;
+        }
+        let sess = self
+            .selected_mesh_path()
+            .and_then(|p| Self::load_edit_session(&p))
+            .unwrap_or_else(|| EditSession::cube(1.0));
+        self.edit = Some(sess);
+    }
+
+    /// Source path of the selected actor's mesh, if it names a real file.
+    fn selected_mesh_path(&self) -> Option<Arc<str>> {
+        let ah = self.world.selection?;
+        let (lh, sh) = self.main_stage?;
+        let stage = self.world.levels.get(lh)?.stages.get(sh)?;
+        let actor = stage.actors.get(ah)?;
+        for se in actor.sub_entities.iter().flatten() {
+            if let ActorType::Environment(e) = &se.actor_type {
+                if FsPath::new(e.name.as_ref()).is_file() {
+                    return Some(Arc::clone(&e.name));
+                }
+            }
+        }
+        None
+    }
+
+    /// Load the first triangle primitive of a glTF file into an edit session.
+    fn load_edit_session(path: &str) -> Option<EditSession> {
+        let asset = GltfAsset::load(path).ok()?;
+        for m in &asset.meshes {
+            for p in &m.primitives {
+                if p.topology == PrimitiveTopology::Triangles
+                    && !p.indices.is_empty()
+                    && !p.streams.positions.is_empty()
+                {
+                    if let Some(s) = EditSession::from_indexed(&p.streams.positions, &p.indices) {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn edit_view(&self, ctx: &AppCtx<'_>, app: AppHandle) -> Option<EditView> {
+        let grid = ctx.viewport_grid(app)?;
+        let vp = grid.get(grid.focused)?;
+        let cam = ctx.cameras.get(vp.camera_handle)?;
+        let (win_w, win_h) = (grid.win_w, grid.win_h);
+        let aspect = vp.rect.pixel_aspect(win_w, win_h);
+        Some(EditView {
+            vp: Mat4::from_cols_array(&cam.view_projection_matrix(aspect)),
+            px: vp.rect.x * win_w,
+            py: vp.rect.y * win_h,
+            pw: vp.rect.w * win_w,
+            ph: vp.rect.h * win_h,
+            cam_pos: Vec3::from_array(cam.position),
+            is_ortho: matches!(cam.projection, Some(ProjectionMode::Orthographic { .. })),
+        })
+    }
+
+    fn edit_pick(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        let Some(ev) = self.edit_view(ctx, app) else { return };
+        let cursor = self.ui_cursor;
+        let project = |p: Vec3| -> Option<[f32; 2]> {
+            let clip = ev.vp * Vec4::new(p.x, p.y, p.z, 1.0);
+            if clip.w <= 1e-5 {
+                return None;
+            }
+            Some([
+                ev.px + (clip.x / clip.w * 0.5 + 0.5) * ev.pw,
+                ev.py + (clip.y / clip.w * 0.5 + 0.5) * ev.ph,
+            ])
+        };
+        let Some(mode) = self.edit.as_ref().map(|e| e.mode) else { return };
+        match mode {
+            ElementMode::Vertex => {
+                let v = self
+                    .edit
+                    .as_ref()
+                    .unwrap()
+                    .nearest_vertex(cursor, |p| project(Vec3::from_array(p)), 14.0);
+                if let Some(v) = v {
+                    self.edit.as_mut().unwrap().toggle_vertex(v);
+                }
+            }
+            ElementMode::Edge => {
+                let e = self
+                    .edit
+                    .as_ref()
+                    .unwrap()
+                    .nearest_edge(cursor, |p| project(Vec3::from_array(p)), 10.0);
+                if let Some(e) = e {
+                    self.edit.as_mut().unwrap().toggle_edge(e);
+                }
+            }
+            ElementMode::Face => {
+                let lx = (cursor[0] - ev.px) / ev.pw;
+                let ly = (cursor[1] - ev.py) / ev.ph;
+                if !(0.0..=1.0).contains(&lx) || !(0.0..=1.0).contains(&ly) {
+                    return;
+                }
+                let ndc = Vec4::new(lx * 2.0 - 1.0, ly * 2.0 - 1.0, -1.0, 1.0);
+                let inv = ev.vp.inverse();
+                let near = inv * ndc;
+                let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+                let nw = near.xyz() / near.w;
+                let fw = far.xyz() / far.w;
+                let dir = (fw - nw).normalize();
+                let org = if ev.is_ortho { nw } else { ev.cam_pos };
+                let f = self
+                    .edit
+                    .as_ref()
+                    .unwrap()
+                    .pick_face([org.x, org.y, org.z], [dir.x, dir.y, dir.z]);
+                if let Some(f) = f {
+                    self.edit.as_mut().unwrap().toggle_face(f);
+                }
+            }
+        }
+    }
+
+    fn start_edit_drag(&mut self, ctx: &AppCtx<'_>, app: AppHandle) -> Option<EditDrag> {
+        let ev = self.edit_view(ctx, app)?;
+        let center = Vec3::from_array(self.edit.as_ref()?.selection_centroid()?);
+        let project = |p: Vec3| -> Option<[f32; 2]> {
+            let clip = ev.vp * Vec4::new(p.x, p.y, p.z, 1.0);
+            if clip.w <= 1e-5 {
+                return None;
+            }
+            Some([
+                ev.px + (clip.x / clip.w * 0.5 + 0.5) * ev.pw,
+                ev.py + (clip.y / clip.w * 0.5 + 0.5) * ev.ph,
+            ])
+        };
+        let origin_s = project(center)?;
+        let len = 0.15 * (ev.cam_pos - center).length().max(0.5);
+        let cursor = self.ui_cursor;
+        let mut best: Option<(u8, [f32; 2])> = None;
+        let mut bd = 22.0_f32;
+        for (i, axis) in [Vec3::X, Vec3::Y, Vec3::Z].iter().enumerate() {
+            let Some(tip) = project(center + *axis * len) else { continue };
+            let d = point_to_segment(cursor, origin_s, tip);
+            if d < bd {
+                bd = d;
+                best = Some((i as u8, [tip[0] - origin_s[0], tip[1] - origin_s[1]]));
+            }
+        }
+        let (axis_i, arrow_screen) = best?;
+        self.edit.as_mut().unwrap().begin_transform();
+        Some(EditDrag { axis: axis_i, start_cursor: cursor, arrow_screen, arrow_world_len: len })
+    }
+
+    fn apply_edit_drag(&mut self) {
+        let Some(drag) = self.edit_drag else { return };
+        let cursor = self.ui_cursor;
+        let dx = cursor[0] - drag.start_cursor[0];
+        let dy = cursor[1] - drag.start_cursor[1];
+        let axis = match drag.axis {
+            0 => Vec3::X,
+            1 => Vec3::Y,
+            _ => Vec3::Z,
+        };
+        let len2 = drag.arrow_screen[0].powi(2) + drag.arrow_screen[1].powi(2);
+        if len2 < 1.0 {
+            return;
+        }
+        let t = (dx * drag.arrow_screen[0] + dy * drag.arrow_screen[1]) / len2;
+        let mut wd = axis * (t * drag.arrow_world_len);
+        if self.snap_enabled {
+            let s = self.snap_translate.max(1e-4);
+            let a = drag.axis as usize;
+            let mut v = [wd.x, wd.y, wd.z];
+            v[a] = (v[a] / s).round() * s;
+            wd = Vec3::new(v[0], v[1], v[2]);
+        }
+        if let Some(e) = self.edit.as_mut() {
+            e.update_transform([wd.x, wd.y, wd.z]);
+        }
+    }
+
+    fn draw_edit_overlay(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        if self.edit.is_none() {
+            return;
+        }
+        let Some(ev) = self.edit_view(ctx, app) else { return };
+        let project = |p: Vec3| -> Option<[f32; 2]> {
+            let clip = ev.vp * Vec4::new(p.x, p.y, p.z, 1.0);
+            if clip.w <= 1e-5 {
+                return None;
+            }
+            Some([
+                ev.px + (clip.x / clip.w * 0.5 + 0.5) * ev.pw,
+                ev.py + (clip.y / clip.w * 0.5 + 0.5) * ev.ph,
+            ])
+        };
+        let sess = self.edit.as_ref().unwrap();
+        let dl = &mut self.world.ui.draw_list;
+        // Wireframe edges (selected edges highlighted).
+        for &(a, b) in sess.edges() {
+            let pa = sess.positions()[a as usize];
+            let pb = sess.positions()[b as usize];
+            if let (Some(sa), Some(sb)) =
+                (project(Vec3::from_array(pa)), project(Vec3::from_array(pb)))
+            {
+                let sel = sess.is_vertex_selected(a) && sess.is_vertex_selected(b);
+                let col = if sel { [255, 180, 60, 255] } else { [120, 120, 150, 200] };
+                dl.push_line(sa[0], sa[1], sb[0], sb[1], if sel { 2.0 } else { 1.0 }, col);
+            }
+        }
+        // Vertex handles.
+        for v in 0..sess.vertex_count() as u32 {
+            if let Some(s) = project(Vec3::from_array(sess.positions()[v as usize])) {
+                let selv = sess.is_vertex_selected(v);
+                let sz = if selv { 7.0 } else { 4.0 };
+                let col = if selv { [255, 210, 80, 255] } else { [180, 180, 200, 220] };
+                dl.push_rect(s[0] - sz * 0.5, s[1] - sz * 0.5, sz, sz, [0.0, 0.0, 1.0, 1.0], col);
+            }
+        }
+        // Translate gizmo at the selection centroid.
+        if let Some(c) = sess.selection_centroid() {
+            let center = Vec3::from_array(c);
+            if let Some(origin_s) = project(center) {
+                let len = 0.15 * (ev.cam_pos - center).length().max(0.5);
+                let axes = [
+                    (Vec3::X, [220, 60, 60, 255u8]),
+                    (Vec3::Y, [70, 200, 70, 255]),
+                    (Vec3::Z, [70, 100, 220, 255]),
+                ];
+                for (axis, col) in axes {
+                    if let Some(tip) = project(center + axis * len) {
+                        dl.push_line(origin_s[0], origin_s[1], tip[0], tip[1], 3.0, col);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1845,6 +2370,12 @@ fn main() -> ForgeResult<()> {
         gizmo_space: GizmoSpace::World,
         spawn_menu_open: false,
         light_submenu_open: false,
+        snap_enabled: false,
+        snap_translate: 0.25,
+        snap_rotate_deg: 15.0,
+        snap_scale: 0.1,
+        stats_open: false,
+        ctrl_held: false,
         picker_open: false,
         picker_filter: Arc::from(""),
         picker_paths: ThinVec::new(),
@@ -1869,6 +2400,9 @@ fn main() -> ForgeResult<()> {
         toolbar_gizmo_wh: None,
         toolbar_tonemap_wh: None,
         gizmo_drag: None,
+        edit: None,
+        edit_drag: None,
+        shift_held: false,
     })
     .run()
 }

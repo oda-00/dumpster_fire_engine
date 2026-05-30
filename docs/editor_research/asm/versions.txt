@@ -1,0 +1,3 @@
+# Generated 2026-05-30T01:31:40Z
+rustc 1.94.1 (e408947bf 2026-03-25)
+flags: -O -C opt-level=3 -C target-cpu=x86-64-v3 --emit asm      -C llvm-args=-x86-asm-syntax=intel --crate-type=lib

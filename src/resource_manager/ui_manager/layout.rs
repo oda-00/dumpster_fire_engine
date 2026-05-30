@@ -1,18 +1,9 @@
 use thin_vec::ThinVec;
 
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
-    }
-}
+// Unified with the canonical UI rect — one `Rect` type across the engine
+// (GUI_research.md Phase 6 consolidation). The path is kept as a re-export so
+// existing `ui_manager::layout::Rect` users (editor, overlay) compile unchanged.
+pub use crate::render::ui_core::layout::Rect;
 
 #[derive(Copy, Clone, Debug)]
 pub enum Sizing {

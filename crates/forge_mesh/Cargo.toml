@@ -1,0 +1,29 @@
+[package]
+name    = "forge_mesh"
+version = "0.1.0"
+edition = "2024"
+
+# Editable mesh-topology core for the editor: a struct-of-arrays, index-based
+# half-edge (see EDITOR_research.md §4). Kept as a leaf workspace crate with no
+# engine/Vulkan dependency — GPU-free and unit-testable, exactly like forge_gltf.
+# The glTF bridge is gated behind the `gltf` feature so the core stays lean.
+
+[features]
+default = []
+gltf = ["dep:forge_gltf"]
+
+[dependencies]
+thin-vec = "0.2"
+rayon = "1"
+forge_gltf = { path = "../forge_gltf", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "mesh_core"
+harness = false
+
+[[bench]]
+name = "mesh_select"
+harness = false

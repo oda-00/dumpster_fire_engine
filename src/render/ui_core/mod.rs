@@ -1,3 +1,4 @@
+pub mod anim;
 pub mod controller;
 pub mod event;
 pub mod id;
@@ -7,6 +8,7 @@ pub mod signal;
 pub mod theme;
 pub mod widget;
 
+pub use anim::{Easing, Tween};
 pub use controller::Controller;
 pub use event::{EventBus, EventHandler, UiEvent};
 pub use id::{WidgetArena, WidgetId, WidgetIdPath};

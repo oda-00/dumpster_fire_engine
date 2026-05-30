@@ -17,6 +17,13 @@ impl Rect {
             h: self.h,
         }
     }
+
+    /// True if point `(px, py)` lies inside the rect (half-open on the far edges).
+    /// Used for pointer hit-testing.
+    #[inline]
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -25,7 +32,7 @@ pub struct Size {
     pub h: f32,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Constraint {
     pub min_width: f32,
     pub max_width: f32,
@@ -50,11 +57,19 @@ impl Constraint {
 /// reused each layout pass to avoid allocations.
 pub struct LayoutContext {
     sizes: ThinVec<Option<Size>>,
+    /// The constraint each `id` was last measured under, parallel to `sizes`.
+    /// Persisted across frames (the manager keeps one `LayoutContext`) so a
+    /// clean subtree can be served from cache instead of re-measured — the
+    /// Yoga "measure once" optimization (GUI_research.md §3.2).
+    constraints: ThinVec<Option<Constraint>>,
 }
 
 impl LayoutContext {
     pub fn new() -> Self {
-        Self { sizes: ThinVec::new() }
+        Self {
+            sizes: ThinVec::new(),
+            constraints: ThinVec::new(),
+        }
     }
 
     #[inline]
@@ -69,6 +84,33 @@ impl LayoutContext {
     #[inline]
     pub fn get_size(&self, id: WidgetId) -> Option<Size> {
         self.sizes.get(id.idx as usize).copied().flatten()
+    }
+
+    /// Cross-frame cache probe: the cached size for `id`, but only if it was
+    /// last measured under an equal `constraint`. `None` forces a re-measure.
+    #[inline]
+    pub fn cached(&self, id: WidgetId, constraint: &Constraint) -> Option<Size> {
+        let idx = id.idx as usize;
+        if self.constraints.get(idx).copied().flatten().as_ref() == Some(constraint) {
+            self.sizes.get(idx).copied().flatten()
+        } else {
+            None
+        }
+    }
+
+    /// Record a measured size together with the constraint it was measured under,
+    /// so a later `cached` probe can reuse it.
+    #[inline]
+    pub fn record(&mut self, id: WidgetId, constraint: Constraint, size: Size) {
+        let idx = id.idx as usize;
+        if idx >= self.sizes.len() {
+            self.sizes.resize(idx + 1, None);
+        }
+        if idx >= self.constraints.len() {
+            self.constraints.resize(idx + 1, None);
+        }
+        self.sizes[idx] = Some(size);
+        self.constraints[idx] = Some(constraint);
     }
 }
 
@@ -251,6 +293,45 @@ impl LayoutSolver for LayoutDispatch {
     }
 }
 
+/// Guard the §4.1 dispatch win: `LayoutDispatch` must stay small enough to live
+/// in a register pair (no spill) so the inline `match` keeps beating a
+/// `Box<dyn LayoutSolver>` vtable call. See `docs/gui_research/asm/exp1_dispatch.rs`.
+const _: () = assert!(core::mem::size_of::<LayoutDispatch>() <= 16);
+
+/// Flattened (SoA) sizing input for the flex grow pass.
+///
+/// A child's contribution is pre-lowered to a fixed pixel amount plus a fill
+/// mask (`1.0` if it grows, else `0.0`). Summing this flat stream is branchless
+/// and auto-vectorizes (`vaddps`, 8× unrolled) — versus a per-child
+/// `match Sizing { Fill/Fixed/Hug }` which stays scalar. See GUI_research.md
+/// §4.4 / `docs/gui_research/asm/exp4_layout.rs`. This is the lowering the
+/// unified Fill/Fixed/Hug layout uses for its distribution pass.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FillItem {
+    /// Fixed + hug pixels already resolved for this child.
+    pub fixed_px: f32,
+    /// `1.0` if this child grows to fill remaining space, else `0.0`.
+    pub is_fill: f32,
+}
+
+/// Returns the per-fill pixel size: leftover space (`avail` minus all fixed/hug
+/// pixels) divided across the growing children. Branchless inner loop.
+#[inline]
+pub fn distribute_fill(items: &[FillItem], avail: f32) -> f32 {
+    let mut used = 0.0f32;
+    let mut fills = 0.0f32;
+    for it in items {
+        used += it.fixed_px;
+        fills += it.is_fill;
+    }
+    let remaining = (avail - used).max(0.0);
+    if fills == 0.0 {
+        remaining
+    } else {
+        remaining / fills
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +360,37 @@ mod tests {
             _tag: std::marker::PhantomData,
         };
         assert!(ctx.get_size(id).is_none());
+    }
+
+    #[test]
+    fn layout_cache_reuses_only_on_matching_constraint() {
+        let mut ctx = LayoutContext::new();
+        let id = crate::render::ui_core::id::WidgetId {
+            idx: 3,
+            generation: std::num::NonZeroU32::new(1).unwrap(),
+            _tag: std::marker::PhantomData,
+        };
+        let c1 = Constraint { min_width: 0.0, max_width: 100.0, min_height: 0.0, max_height: 50.0 };
+        ctx.record(id, c1, Size { w: 80.0, h: 20.0 });
+        // Same constraint → cache hit.
+        assert!(ctx.cached(id, &c1).is_some());
+        // Different constraint → cache miss (forces re-measure).
+        let c2 = Constraint { max_width: 200.0, ..c1 };
+        assert!(ctx.cached(id, &c2).is_none());
+    }
+
+    #[test]
+    fn distribute_fill_splits_remaining_space() {
+        // 100 px available, one 30 px fixed child, two fill children → 35 each.
+        let items = [
+            FillItem { fixed_px: 30.0, is_fill: 0.0 },
+            FillItem { fixed_px: 0.0, is_fill: 1.0 },
+            FillItem { fixed_px: 0.0, is_fill: 1.0 },
+        ];
+        assert!((distribute_fill(&items, 100.0) - 35.0).abs() < 1e-6);
+        // No fills → all remaining returned as the single leftover.
+        let fixed = [FillItem { fixed_px: 40.0, is_fill: 0.0 }];
+        assert!((distribute_fill(&fixed, 100.0) - 60.0).abs() < 1e-6);
     }
 
     #[test]

@@ -1,3 +1,4 @@
 *.glb    binary
 *.spv    binary
 *.o      binary
+*.ttf    binary
