@@ -1285,6 +1285,17 @@ impl AsyncGltfLoader {
         Self { rx }
     }
 
+    /// Parse a glTF/GLB asset from in-memory bytes off-thread. Used when the
+    /// asset was resolved through the [`crate::vfs::Vfs`] (embedded pack, memory
+    /// mount, or a `Dir` override) rather than read directly from a disk path.
+    pub fn spawn_bytes(bytes: Vec<u8>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(GltfAsset::load_slice(&bytes)).ok();
+        });
+        Self { rx }
+    }
+
     pub fn try_recv(&mut self) -> Option<Result<GltfAsset, GltfError>> {
         self.rx.try_recv().ok()
     }

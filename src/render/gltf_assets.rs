@@ -178,6 +178,13 @@ pub struct GltfAssetCache {
     slots: Arena<GltfTag, Option<LoadedGltf>>,
     pending: ThinVec<PendingLoad>,
     by_path: ThinVec<(Arc<str>, GltfHandle)>,
+    /// Shared virtual file system. When a load path resolves here (an embedded
+    /// pack, memory mount, or `Dir` override under `assets/`) the bytes are
+    /// parsed directly; otherwise the loader falls back to direct disk I/O on
+    /// the path (absolute / user-picked files, multi-file glTF). This is the
+    /// single integration point that puts asset loading behind the VFS without
+    /// changing the handle-based ECS above it.
+    vfs: Arc<crate::vfs::Vfs>,
 }
 
 impl Default for GltfAssetCache {
@@ -192,7 +199,18 @@ impl GltfAssetCache {
             slots: Arena::new(),
             pending: ThinVec::new(),
             by_path: ThinVec::new(),
+            vfs: Arc::new(crate::vfs::engine_default()),
         }
+    }
+
+    /// Replace the asset VFS (e.g. mount a shipped asset pack at startup).
+    pub fn set_vfs(&mut self, vfs: Arc<crate::vfs::Vfs>) {
+        self.vfs = vfs;
+    }
+
+    /// The asset VFS this cache resolves loads through.
+    pub fn vfs(&self) -> &crate::vfs::Vfs {
+        &self.vfs
     }
 
     /// Register a glTF asset for loading; deduplicated by path.
@@ -215,7 +233,14 @@ impl GltfAssetCache {
         let skin_pool = create_skin_palette_pool(&device, 256)?;
         let instance_layout = create_instance_set_layout(&device)?;
         let instance_pool = create_instance_pool(&device, 4096)?;
-        let loader = AsyncGltfLoader::spawn(PathBuf::from(path.as_ref()));
+        // Resolve through the VFS first: a virtual path that hits an embedded
+        // pack / memory mount / `Dir` override parses from bytes; anything else
+        // (absolute or user-picked paths, multi-file glTF) falls back to direct
+        // disk I/O exactly as before — so default behavior is unchanged.
+        let loader = match self.vfs.read(path.as_ref()) {
+            Ok(bytes) => AsyncGltfLoader::spawn_bytes(bytes.into_owned()),
+            Err(_) => AsyncGltfLoader::spawn(PathBuf::from(path.as_ref())),
+        };
         let handle = self.slots.insert(None);
         self.by_path.push((path.clone(), handle));
         self.pending.push(PendingLoad {

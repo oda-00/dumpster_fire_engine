@@ -81,6 +81,23 @@ pub fn compile_to_object(
 
     cg.compile(hir)?;
 
+    // On Windows, PE/COFF only exports symbols explicitly marked `dllexport`
+    // (ELF exports every global by default). Mark each defined external-linkage
+    // `df_*` ABI function as DLLExport so the `libloading`-based loader can
+    // resolve them from the produced DLL. No-op on Unix.
+    #[cfg(windows)]
+    {
+        use inkwell::module::Linkage;
+        let mut next = cg.module.get_first_function();
+        while let Some(func) = next {
+            if func.count_basic_blocks() > 0 && func.get_linkage() == Linkage::External {
+                func.as_global_value()
+                    .set_dll_storage_class(inkwell::DLLStorageClass::Export);
+            }
+            next = func.get_next_function();
+        }
+    }
+
     let passes = match opt_level {
         OptimizationLevel::None => "default<O0>",
         OptimizationLevel::Less => "default<O1>",

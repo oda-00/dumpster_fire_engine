@@ -36,7 +36,8 @@
 7. [Full feature set](#7-full-feature-set)
 8. [Design proposal mapped to the engine](#8-design-proposal)
 9. [Roadmap & how we measurably beat Blender](#9-roadmap)
-10. [References](#10-references)
+10. [Ray-traced rendering path](#10-ray-traced-rendering-path)
+11. [References](#11-references)
 
 ---
 
@@ -391,7 +392,105 @@ selection, O(touched) edits/undo, single-digit-ms subdivision, and no DynTopo
 memory-fetch cliff — each backed by the kernels proven in §5 and the GPU compute path
 the engine already runs.
 
-## 10. References
+## 10. Ray-traced rendering path
+
+The editor's renderer ships a **complete but unwired** hardware ray-tracing
+pipeline. This section is the web-sourced design study for switching it on and
+preferring it — the counterpart to the mesh-editing study above, aimed at the
+*lighting* path rather than topology.
+
+### 10.1 Vulkan hardware RT, end to end
+Vulkan exposes GPU ray tracing through three extensions that this engine already
+loads when present (`VulkanContext::has_ray_tracing`):
+`VK_KHR_acceleration_structure` (build BLAS/TLAS),
+`VK_KHR_ray_tracing_pipeline` (the `raygen`/`miss`/`closest-hit`/`any-hit`/
+`intersection` stages + `vkCmdTraceRaysKHR`), and `VK_KHR_buffer_device_address`
+(geometry is referenced by raw device address). The model is **two-level**: a
+**BLAS** holds the triangles of one mesh in an opaque, driver-optimized layout; a
+**TLAS** holds *instances*, each a `VkAccelerationStructureInstanceKHR` = a 3×4
+transform + a BLAS device address + a visibility mask + an SBT offset. The
+**Shader Binding Table** is a GPU buffer of shader-group handles that
+`vkCmdTraceRaysKHR` indexes (raygen region, miss region, hit region) — exactly
+the layout `rt_pipeline.rs` already builds, aligned to
+`shaderGroupHandleAlignment` / `shaderGroupBaseAlignment`. See the Khronos
+[ray-tracing extensions overview](https://www.khronos.org/blog/ray-tracing-in-vulkan),
+the [Vulkan spec ray-traversal chapter](https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap40.html),
+and the canonical [nvpro-samples `vk_raytracing_tutorial_KHR`](https://github.com/nvpro-samples/vk_raytracing_tutorial_KHR)
+(NVIDIA's step-by-step BLAS→TLAS→SBT→trace walkthrough) and
+[SaschaWillems Vulkan RT examples](https://github.com/SaschaWillems/Vulkan#ray-tracing).
+
+### 10.2 TLAS refit vs rebuild, and build flags
+The single biggest per-frame cost lever is **how** the TLAS is updated:
+- **Rebuild** (`MODE_BUILD`) reconstructs the structure — required when the
+  *set* of instances changes (spawn/despawn, topology edits) or a BLAS is
+  rebuilt.
+- **Refit** (`MODE_UPDATE`) keeps the existing tree and only repositions
+  instances — valid when **only transforms changed** and instance count is
+  identical. Refit is multiplicatively cheaper and is the right path for a
+  gizmo drag or animation tick. It requires the structure to have been built
+  with `ALLOW_UPDATE`.
+
+Build-flag policy follows the IHV guidance: BLAS get
+`PREFER_FAST_TRACE` (they're built once, traced forever — `blas.rs` already does
+this); the TLAS gets `PREFER_FAST_BUILD | ALLOW_UPDATE` because it is rebuilt or
+refit *every frame*. For the editor's scenes (< ~200 instances) even a full
+rebuild is microseconds, so `rt_pipeline.rs`'s blocking per-frame rebuild is
+acceptable as a first cut, with refit as the obvious optimization. Sources:
+[NVIDIA "Best Practices: Using Vulkan/DXR Acceleration Structures"](https://developer.nvidia.com/blog/best-practices-for-using-nvidia-rtx-ray-tracing-updated/),
+[nvpro AS-management chapter](https://nvpro-samples.github.io/vk_raytracing_tutorial_KHR/),
+[Vulkan spec acceleration-structure build modes](https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap37.html).
+
+### 10.3 Instance culling into the TLAS
+Because the TLAS instance list is rebuilt from the scene each frame, the engine
+gets **CPU frustum culling for free**: only emit a
+`VkAccelerationStructureInstanceKHR` for instances that pass the same
+`extract_frustum_planes` test the raster path already runs
+(`render_world.rs`). This shrinks the TLAS, cuts traversal cost, and — unlike the
+raster path — also removes off-screen geometry from *secondary* rays' reach when
+that's desired (or keep it in via the visibility `mask` when shadows/reflections
+need off-screen occluders). The instance `mask` byte lets a single TLAS serve
+multiple ray types (camera vs. shadow vs. reflection) without separate
+structures.
+
+### 10.4 Hybrid raster + RT (the pragmatic target)
+Pure path tracing is too costly for an interactive viewport. The shipping
+consensus is **hybrid**: rasterize a G-buffer (depth/normal/albedo) for primary
+visibility, then trace **sparse secondary effects** — shadows, reflections,
+ambient occlusion — at **1–2 samples per pixel**, and **denoise**. This reuses
+the rasterizer's perfect primary hits (no aliasing on edges) and spends the ray
+budget only where RT wins. Khronos and the IHVs document this pattern
+extensively; Blender's **EEVEE-Next** is the most relevant DCC datapoint — it
+adds real ray-traced reflections/shadows/AO to a *real-time viewport* via exactly
+this raster-primary + traced-secondary + denoise structure. The engine's existing
+shaders (`primary_chit` + `shadow_miss`) already encode full-RT-primary + traced
+shadows; hybrid G-buffer reuse and a denoiser are the natural follow-ups.
+Sources: [Khronos "Ray Tracing in Vulkan" blog](https://www.khronos.org/blog/ray-tracing-in-vulkan),
+[NVIDIA hybrid rendering / RTXGI notes](https://developer.nvidia.com/rtx/ray-tracing),
+[Blender EEVEE-Next ray tracing manual](https://docs.blender.org/manual/en/latest/render/eevee/render_settings/raytracing.html),
+[EEVEE-Next development overview](https://code.blender.org/2023/04/eevee-next/).
+
+### 10.5 Wiring this engine's dead pipeline
+The frame already composites the UI over an **HDR scene image**
+(`overlay.rs::hdr_images`, `R16G16B16A16_SFLOAT`) via tonemap → overlay. The
+whole RT switch-on therefore reduces to *making RT write that HDR image*:
+1. Call `Window::init_rt_pipeline(vulkan)` at graphics bring-up (guarded by
+   `has_ray_tracing`).
+2. Give the per-image HDR target `STORAGE` usage and bind it as the raygen
+   shader's `outputImage` (`set=0, binding=1, rgba16f`), alongside the TLAS
+   (`binding 0`) and the lights UBO (`binding 2`) the shader already declares.
+3. Each frame, walk the scene draw list and emit one TLAS instance per visible
+   primitive from `LoadedGltf.blas` (device address via
+   `blas::blas_device_address`) + its world 3×4; `rebuild_tlas` (or refit).
+4. `vkCmdTraceRaysKHR` into the HDR image (barrier `GENERAL` for the trace →
+   `SHADER_READ_ONLY_OPTIMAL` for tonemap), then run the existing tonemap +
+   overlay passes unchanged.
+5. Branch the frame on a `LightingMode { Raster, RayTraced }`; **degrade to
+   raster on any missing/failed RT resource** so the working editor never
+   regresses. Headless (lavapipe) validates *compiles + initializes + traces
+   without crashing*, not pixel correctness — so raster stays the guaranteed
+   fallback.
+
+## 11. References
 
 **Engine code:** `crates/forge_gltf/src/mesh.rs` (SoA `VertexStreams`),
 `src/forge_master/{ore,forge,master}.rs` (compute dispatch),
@@ -419,3 +518,13 @@ the engine already runs.
 **Editor frameworks:** [Unreal Interactive Tools Framework](http://www.gradientspace.com/tutorials/2021/01/19/the-interactive-tools-framework-in-ue426) ·
 [Godot UndoRedo](https://docs.godotengine.org/en/stable/classes/class_undoredo.html) ·
 [Godot editor plugins](https://deepwiki.com/godotengine/godot/9-editor-plugins)
+
+**Ray tracing:** [Khronos — Ray Tracing in Vulkan](https://www.khronos.org/blog/ray-tracing-in-vulkan) ·
+[Vulkan spec — ray traversal](https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap40.html) ·
+[Vulkan spec — acceleration structures](https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap37.html) ·
+[nvpro-samples `vk_raytracing_tutorial_KHR`](https://github.com/nvpro-samples/vk_raytracing_tutorial_KHR) ·
+[nvpro AS-management tutorial](https://nvpro-samples.github.io/vk_raytracing_tutorial_KHR/) ·
+[SaschaWillems Vulkan RT examples](https://github.com/SaschaWillems/Vulkan#ray-tracing) ·
+[NVIDIA RTX ray-tracing best practices](https://developer.nvidia.com/blog/best-practices-for-using-nvidia-rtx-ray-tracing-updated/) ·
+[Blender EEVEE-Next ray tracing](https://docs.blender.org/manual/en/latest/render/eevee/render_settings/raytracing.html) ·
+[EEVEE-Next overview](https://code.blender.org/2023/04/eevee-next/)

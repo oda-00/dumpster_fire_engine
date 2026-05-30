@@ -19,6 +19,52 @@ use thin_vec::ThinVec;
 use crate::forge_master::master::{ForgeError, ForgeResult};
 use crate::forge_master::ore::ForgeBuffer;
 use crate::render::vulkan::VulkanContext;
+use crate::resource_manager::gltf_driver::LightsUBO;
+
+/// Push-constant block for the raygen shader (`assets/shaders/raygen.rgen`,
+/// `Cam`). 144 bytes, std430-compatible scalar layout — must match the GLSL
+/// declaration field-for-field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RayCameraPush {
+    pub inv_vp: [f32; 16],
+    pub cam_pos: [f32; 3],
+    pub is_ortho: u32,
+    pub cam_forward: [f32; 3],
+    pub frame_count: u32,
+    pub aperture_radius: f32,
+    pub focus_distance: f32,
+    pub samples_per_pix: u32,
+    pub aperture_blades: u32,
+    pub pane_offset_px: [u32; 2],
+    pub pane_size_px: [u32; 2],
+    pub exposure_scale: f32,
+    pub _pad: [f32; 3],
+}
+
+impl RayCameraPush {
+    /// A reasonable single-sample default for the given inverse view-projection
+    /// and camera, filling the whole `extent` as one pane.
+    pub fn new(inv_vp: [f32; 16], cam_pos: [f32; 3], cam_forward: [f32; 3], extent: vk::Extent2D) -> Self {
+        Self {
+            inv_vp,
+            cam_pos,
+            is_ortho: 0,
+            cam_forward,
+            frame_count: 0,
+            aperture_radius: 0.0,
+            focus_distance: 1.0,
+            samples_per_pix: 1,
+            aperture_blades: 0,
+            pane_offset_px: [0, 0],
+            pane_size_px: [extent.width, extent.height],
+            exposure_scale: 1.0,
+            _pad: [0.0; 3],
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<RayCameraPush>() == 144);
 
 pub struct RtPipeline {
     pub pipeline: vk::Pipeline,
@@ -38,6 +84,16 @@ pub struct RtPipeline {
     pub tlas: vk::AccelerationStructureKHR,
     pub tlas_buf: Option<ForgeBuffer>,
     pub tlas_scratch: Option<ForgeBuffer>,
+
+    /// Descriptor set bound during `record_trace`: TLAS + HDR storage image +
+    /// lights UBO. Updated each frame (the TLAS handle changes per rebuild).
+    pub desc_pool: vk::DescriptorPool,
+    pub desc_set: vk::DescriptorSet,
+    /// Host-visible lights UBO (binding 2), refilled each trace.
+    pub lights_buf: ForgeBuffer,
+    /// Cloned ray-tracing-pipeline loader so `record_trace` can
+    /// `cmd_trace_rays` without threading a `VulkanContext` through the frame.
+    pub trace_loader: ash::khr::ray_tracing_pipeline::Device,
 }
 
 impl RtPipeline {
@@ -82,11 +138,11 @@ impl RtPipeline {
                 .map_err(ForgeError::Vk)?
         };
 
-        // RayCameraPush — 128 bytes per plan §2.
+        // RayCameraPush — 144 bytes; matches the raygen `Cam` block exactly.
         let push_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR)
             .offset(0)
-            .size(128);
+            .size(std::mem::size_of::<RayCameraPush>() as u32);
         let set_layouts = [set_layout];
         let push_ranges = [push_range];
         let pipeline_layout = unsafe {
@@ -245,6 +301,53 @@ impl RtPipeline {
             .size(hit_size);
         let callable_region = vk::StridedDeviceAddressRegionKHR::default();
 
+        // ── Descriptor pool + set (TLAS / HDR storage image / lights UBO) ──
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                descriptor_count: 1,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                descriptor_count: 1,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+            },
+        ];
+        let desc_pool = unsafe {
+            device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(1)
+                        .pool_sizes(&pool_sizes),
+                    None,
+                )
+                .map_err(ForgeError::Vk)?
+        };
+        let alloc_layouts = [set_layout];
+        let desc_set = unsafe {
+            device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(desc_pool)
+                        .set_layouts(&alloc_layouts),
+                )
+                .map_err(ForgeError::Vk)?[0]
+        };
+
+        // Host-visible lights UBO (binding 2), refilled per trace.
+        let lights_buf = ForgeBuffer::create(
+            device,
+            &vulkan.memory_properties,
+            std::mem::size_of::<LightsUBO>() as u64,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+
+        let trace_loader = rt_loader.clone();
+
         Ok(Self {
             pipeline,
             pipeline_layout,
@@ -258,6 +361,10 @@ impl RtPipeline {
             tlas: vk::AccelerationStructureKHR::null(),
             tlas_buf: None,
             tlas_scratch: None,
+            desc_pool,
+            desc_set,
+            lights_buf,
+            trace_loader,
         })
     }
 
@@ -440,6 +547,104 @@ impl RtPipeline {
         Ok(())
     }
 
+    /// Record a full-frame ray-trace into the HDR storage image `hdr_view`.
+    /// Updates the descriptor set (TLAS / storage image / lights), pushes the
+    /// camera block, and dispatches `cmd_trace_rays` over the pane size in
+    /// `push`. The caller is responsible for transitioning `hdr_view`'s image
+    /// to `GENERAL` before and to `SHADER_READ_ONLY_OPTIMAL` after.
+    ///
+    /// Returns `false` (dispatching nothing) when the TLAS is empty/null, so
+    /// the caller can clear the HDR target and continue without a crash.
+    pub fn record_trace(
+        &mut self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        hdr_view: vk::ImageView,
+        push: &RayCameraPush,
+        lights: &LightsUBO,
+    ) -> bool {
+        if self.tlas == vk::AccelerationStructureKHR::null() {
+            return false;
+        }
+
+        // Refill the lights UBO.
+        let lbytes = unsafe {
+            std::slice::from_raw_parts(
+                lights as *const LightsUBO as *const u8,
+                std::mem::size_of::<LightsUBO>(),
+            )
+        };
+        let _ = self.lights_buf.write_bytes(device, lbytes);
+
+        // Re-point the descriptor set at the current TLAS, this frame's HDR
+        // storage image, and the lights UBO. The TLAS handle changes on every
+        // rebuild, so this write happens each frame.
+        let as_handles = [self.tlas];
+        let mut as_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+            .acceleration_structures(&as_handles);
+        let mut w_as = vk::WriteDescriptorSet::default()
+            .dst_set(self.desc_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .push_next(&mut as_info);
+        w_as.descriptor_count = 1;
+
+        let img_info = [vk::DescriptorImageInfo::default()
+            .image_view(hdr_view)
+            .image_layout(vk::ImageLayout::GENERAL)];
+        let w_img = vk::WriteDescriptorSet::default()
+            .dst_set(self.desc_set)
+            .dst_binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .image_info(&img_info);
+
+        let buf_info = [vk::DescriptorBufferInfo::default()
+            .buffer(self.lights_buf.handle)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        let w_buf = vk::WriteDescriptorSet::default()
+            .dst_set(self.desc_set)
+            .dst_binding(2)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&buf_info);
+
+        unsafe {
+            device.update_descriptor_sets(&[w_as, w_img, w_buf], &[]);
+
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::RAY_TRACING_KHR, self.pipeline);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::RAY_TRACING_KHR,
+                self.pipeline_layout,
+                0,
+                &[self.desc_set],
+                &[],
+            );
+            let push_bytes = std::slice::from_raw_parts(
+                push as *const RayCameraPush as *const u8,
+                std::mem::size_of::<RayCameraPush>(),
+            );
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::RAYGEN_KHR,
+                0,
+                push_bytes,
+            );
+            self.trace_loader.cmd_trace_rays(
+                cmd,
+                &self.raygen_region,
+                &self.miss_region,
+                &self.hit_region,
+                &self.callable_region,
+                push.pane_size_px[0].max(1),
+                push.pane_size_px[1].max(1),
+                1,
+            );
+        }
+        true
+    }
+
     /// # Safety
     /// All GPU work using this RT pipeline must have completed and `vulkan`
     /// must be the context used to create it.
@@ -455,6 +660,11 @@ impl RtPipeline {
             if self.set_layout != vk::DescriptorSetLayout::null() {
                 device.destroy_descriptor_set_layout(self.set_layout, None);
             }
+            if self.desc_pool != vk::DescriptorPool::null() {
+                device.destroy_descriptor_pool(self.desc_pool, None);
+                self.desc_pool = vk::DescriptorPool::null();
+            }
+            self.lights_buf.destroy(device);
             self.sbt_buffer.destroy(device);
             if let Some(mut b) = self.instance_buf.take() {
                 b.destroy(device);

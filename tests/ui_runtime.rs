@@ -56,6 +56,26 @@ fn vulkan_device_initializes() {
 }
 
 #[test]
+fn rt_pipeline_initializes_when_supported() {
+    // Plan §Verification(4): RT-pipeline-init test that skips when the device
+    // has no ray-tracing extensions (e.g. lavapipe), and otherwise proves the
+    // previously-dead pipeline builds + an empty TLAS rebuild is a safe no-op.
+    let Some(ctx) = try_vulkan() else { return };
+    if !ctx.has_ray_tracing {
+        eprintln!("rt_pipeline test skipped: device has no ray-tracing extensions");
+        return;
+    }
+    match dumpster_fire_engine::render::rt_pipeline::RtPipeline::new(&ctx) {
+        Ok(mut rt) => {
+            // Empty instance list → no-op (RT misses/clears), never a crash.
+            rt.rebuild_tlas(&ctx, &[]).expect("empty TLAS rebuild should succeed");
+            unsafe { rt.destroy(&ctx) };
+        }
+        Err(e) => panic!("RT pipeline failed to build on an RT-capable device: {e:?}"),
+    }
+}
+
+#[test]
 fn push_rect_emits_one_quad() {
     // CPU-only: one rect is one quad, regardless of GPU/font.
     let mut dl = DrawList::new();

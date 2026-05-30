@@ -10,6 +10,7 @@
 //!   X           — toggle gizmo snapping (grid / angle / scale steps)
 //!   Ctrl+D      — duplicate the selected actor
 //!   F2          — toggle the stats overlay
+//!   L           — toggle lighting mode (raster ↔ ray tracing, if RT-capable)
 //!   E           — toggle mesh edit mode for the selected mesh
 //!   1 / 2 / 3   — (edit mode) vertex / edge / face element select
 //!   Ctrl+Z      — (edit mode) undo;  Ctrl+Shift+Z — redo
@@ -585,6 +586,14 @@ impl AppLogic for EditorApp {
                         self.snap_enabled = !self.snap_enabled;
                         return true;
                     }
+                    PhysicalKey::Code(KeyCode::KeyL) => {
+                        let rt = ctx.toggle_lighting_mode(app);
+                        println!(
+                            "Lighting mode: {}",
+                            if rt { "RayTraced" } else { "Raster" }
+                        );
+                        return true;
+                    }
                     PhysicalKey::Code(KeyCode::F2) => {
                         self.stats_open = !self.stats_open;
                         return true;
@@ -898,31 +907,23 @@ impl EditorApp {
             ui.htile(22.0, 20.0, t_col);
             ui.htile(22.0, 20.0, r_col);
             ui.htile(22.0, 20.0, s_col);
-            // Labels on tiles
-            ui.draw.push_rect(
-                tile_x + 2.0,
-                tile_y + 2.0,
-                8.0,
-                16.0,
-                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('T'),
-                [210, 210, 220, 255],
-            );
-            ui.draw.push_rect(
-                tile_x + 24.0,
-                tile_y + 2.0,
-                8.0,
-                16.0,
-                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('R'),
-                [210, 210, 220, 255],
-            );
-            ui.draw.push_rect(
-                tile_x + 46.0,
-                tile_y + 2.0,
-                8.0,
-                16.0,
-                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('S'),
-                [210, 210, 220, 255],
-            );
+            // Gizmo-mode icons on tiles (handrolled Lucide rasterizations from
+            // the UI atlas; tinted via vertex color like glyphs).
+            use dumpster_fire_engine::resource_manager::ui_manager::{Icon, font as uifont};
+            let icon_tint = [210, 210, 220, 255];
+            for (i, ic) in [Icon::Move, Icon::RotateGizmo, Icon::Scale]
+                .into_iter()
+                .enumerate()
+            {
+                ui.draw.push_rect(
+                    tile_x + 3.0 + i as f32 * 22.0,
+                    tile_y + 2.0,
+                    16.0,
+                    16.0,
+                    uifont::icon_rect(ic.slot()),
+                    icon_tint,
+                );
+            }
             ui.hgap(6.0);
 
             let tc = ui.hbutton(tm_label, 48.0);

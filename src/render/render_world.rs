@@ -248,6 +248,99 @@ pub fn collect_and_submit(
     Ok(compute_signal)
 }
 
+// ── Ray-tracing scene gather ───────────────────────────────────────────────────
+
+/// Build the per-frame TLAS instance list from the scene's BLAS
+/// (`LoadedGltf.blas`, one per primitive) and actor world transforms. One
+/// `VkAccelerationStructureInstanceKHR` per visible primitive: BLAS device
+/// address + the actor's world 3×4 (row-major) + full visibility mask.
+///
+/// Returns empty when RT is unavailable or nothing is loaded — `rebuild_tlas`
+/// treats an empty list as a no-op (RT then misses/clears, never crashes).
+pub fn gather_tlas_instances(
+    world: &World,
+    asset_cache: &GltfAssetCache,
+    vulkan: &VulkanContext,
+) -> ThinVec<vk::AccelerationStructureInstanceKHR> {
+    let mut out: ThinVec<vk::AccelerationStructureInstanceKHR> = ThinVec::new();
+    let Some(accel) = vulkan.rt_accel.as_ref() else {
+        return out;
+    };
+
+    for level in world.levels.values() {
+        for stage in level.stages.values() {
+            for (actor_h, actor) in stage.actors.entries() {
+                let world_affine: Affine3A = stage.worlds[actor_h.idx as usize];
+                let m = Mat4::from(world_affine).to_cols_array();
+                // Column-major Mat4 → row-major 3×4 VkTransformMatrixKHR.
+                let transform = vk::TransformMatrixKHR {
+                    matrix: [
+                        m[0], m[4], m[8], m[12], //
+                        m[1], m[5], m[9], m[13], //
+                        m[2], m[6], m[10], m[14],
+                    ],
+                };
+                for sub in actor.sub_entities.iter().flatten() {
+                    let (visible, mesh_opt) = sub.actor_type.visibility_and_mesh();
+                    if !visible {
+                        continue;
+                    }
+                    if let Some(mr) = mesh_opt
+                        && let Some(loaded) = asset_cache.get(mr.asset)
+                    {
+                        for &blas in loaded.blas.iter() {
+                            if blas == vk::AccelerationStructureKHR::null() {
+                                continue;
+                            }
+                            let addr = crate::render::blas::blas_device_address(accel, blas);
+                            out.push(vk::AccelerationStructureInstanceKHR {
+                                transform,
+                                instance_custom_index_and_mask: vk::Packed24_8::new(0, 0xFF),
+                                instance_shader_binding_table_record_offset_and_flags:
+                                    vk::Packed24_8::new(0, 0),
+                                acceleration_structure_reference:
+                                    vk::AccelerationStructureReferenceKHR {
+                                        device_handle: addr,
+                                    },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Collect light views from the World (for `pack_lights_ubo`). Mirrors the
+/// light-collection pass of `collect_and_submit` so the RT path can pack the
+/// same lights the raster path uses.
+pub fn gather_light_views(world: &World) -> ThinVec<LightView> {
+    let mut lights: ThinVec<LightView> = ThinVec::new();
+    for level in world.levels.values() {
+        for stage in level.stages.values() {
+            for (actor_h, actor) in stage.actors.entries() {
+                let world_affine: Affine3A = stage.worlds[actor_h.idx as usize];
+                for sub in actor.sub_entities.iter().flatten() {
+                    if let Some(Component::Utility(uc)) = sub.component(ComponentType::Utility)
+                        && let Some(ld) = &uc.light
+                    {
+                        let pos = world_affine.translation;
+                        lights.push(LightView {
+                            position: [pos.x, pos.y, pos.z],
+                            color: ld.color,
+                            intensity: ld.intensity,
+                            range: ld.range,
+                            kind: ld.kind.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    lights
+}
+
 // ── Culling helpers ───────────────────────────────────────────────────────────
 
 pub fn extract_frustum_planes(vp: &[f32; 16]) -> [Vec4; 6] {

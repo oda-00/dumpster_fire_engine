@@ -166,9 +166,6 @@ path = "src/bin/render_demo.rs"
 name = "editor"
 path = "src/bin/editor.rs"
 
-[patch.crates-io]
-llvm-sys = { path = "vendor/llvm-sys" }
-
 [profile.release]
 lto           = "fat"
 codegen-units = 1

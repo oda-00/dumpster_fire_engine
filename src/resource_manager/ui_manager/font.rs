@@ -10,8 +10,23 @@ pub const ROWS: u32 = 6;
 pub const ATLAS_W: u32 = GLYPH_W * COLS;
 pub const ATLAS_H: u32 = GLYPH_H * ROWS;
 
+// ── Combined font + icon atlas geometry ─────────────────────────────────────
+// UI icons are baked below the font block in the *same* R8 atlas. The atlas
+// keeps the font's width (so glyph U coordinates are unchanged); only the
+// height grows, so glyph V divides by `ATLAS_FULL_H` and icons occupy the rows
+// from `ATLAS_H` downward. Icon cells are `ICON_CELL`² packed left-to-right.
+pub const ICON_CELL: u32 = 24;
+pub const ICON_COLS: u32 = ATLAS_W / ICON_CELL; // 5 cells across a 128-wide atlas
+pub const ICON_ROWS: u32 = 4; // capacity = ICON_COLS * ICON_ROWS = 20 icons
+pub const ICON_CAP: u32 = ICON_COLS * ICON_ROWS;
+pub const ATLAS_FULL_W: u32 = ATLAS_W; // 128
+pub const ATLAS_FULL_H: u32 = ATLAS_H + ICON_CELL * ICON_ROWS; // 96 + 96 = 192
+
 /// UV rect (u0,v0,u1,v1) for ASCII char `c`. Returns `[0,0,0,0]` for chars
 /// outside the printable range (treated as zero-width / skipped).
+///
+/// V coordinates divide by the *full* (font + icon) atlas height because the
+/// font block now shares one texture with the icon block below it.
 pub fn glyph_rect(c: char) -> [f32; 4] {
     let cu = c as u32;
     if !(0x20..0x80).contains(&cu) {
@@ -20,10 +35,24 @@ pub fn glyph_rect(c: char) -> [f32; 4] {
     let idx = cu - 0x20;
     let col = idx % COLS;
     let row = idx / COLS;
-    let u0 = (col * GLYPH_W) as f32 / ATLAS_W as f32;
-    let v0 = (row * GLYPH_H) as f32 / ATLAS_H as f32;
-    let u1 = u0 + (GLYPH_W as f32 / ATLAS_W as f32);
-    let v1 = v0 + (GLYPH_H as f32 / ATLAS_H as f32);
+    let u0 = (col * GLYPH_W) as f32 / ATLAS_FULL_W as f32;
+    let v0 = (row * GLYPH_H) as f32 / ATLAS_FULL_H as f32;
+    let u1 = u0 + (GLYPH_W as f32 / ATLAS_FULL_W as f32);
+    let v1 = v0 + (GLYPH_H as f32 / ATLAS_FULL_H as f32);
+    [u0, v0, u1, v1]
+}
+
+/// UV rect (u0,v0,u1,v1) for icon `slot` (0..`ICON_CAP`) in the icon block
+/// below the font glyphs.
+pub fn icon_rect(slot: u32) -> [f32; 4] {
+    let col = slot % ICON_COLS;
+    let row = slot / ICON_COLS;
+    let x0 = col * ICON_CELL;
+    let y0 = ATLAS_H + row * ICON_CELL;
+    let u0 = x0 as f32 / ATLAS_FULL_W as f32;
+    let v0 = y0 as f32 / ATLAS_FULL_H as f32;
+    let u1 = (x0 + ICON_CELL) as f32 / ATLAS_FULL_W as f32;
+    let v1 = (y0 + ICON_CELL) as f32 / ATLAS_FULL_H as f32;
     [u0, v0, u1, v1]
 }
 

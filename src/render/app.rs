@@ -573,6 +573,14 @@ impl<'a> AppCtx<'a> {
                 graphics_forge,
             )?;
             let wh = renderer.add_window(window);
+            // Bring up the hardware ray-tracing pipeline if the device supports
+            // it; this flips the window's preferred lighting mode to RayTraced.
+            // No-op (stays Raster) on devices without RT.
+            if let Some(window) = renderer.window_mut(wh)
+                && let Err(e) = window.init_rt_pipeline(ctx)
+            {
+                eprintln!("init_rt_pipeline: {e:?}");
+            }
             let ml = renderer
                 .window(wh)
                 .and_then(|w| w.graphics.as_ref())
@@ -688,6 +696,18 @@ impl<'a> AppCtx<'a> {
         self.gltf_assets.load(path_str, device, material_layout)
     }
 
+    /// The asset VFS the glTF manager resolves loads through. Asset loads hit
+    /// embedded packs / `Dir` overrides here before falling back to disk I/O.
+    pub fn vfs(&self) -> &crate::vfs::Vfs {
+        self.gltf_assets.vfs()
+    }
+
+    /// Replace the asset VFS (e.g. mount a shipped asset pack at startup). The
+    /// ECS is unaffected — it references assets by handle, not path.
+    pub fn set_asset_vfs(&mut self, vfs: std::sync::Arc<crate::vfs::Vfs>) {
+        self.gltf_assets.set_vfs(vfs);
+    }
+
     /// Drive background loaders; GPU-upload any that have completed.
     pub fn poll_gltf_loaders(&mut self, _app: AppHandle) -> ForgeResult<()> {
         let Some(ctx) = self.vulkan else {
@@ -785,6 +805,58 @@ impl<'a> AppCtx<'a> {
             }
         }
 
+        // ── Ray-tracing staging ────────────────────────────────────────────
+        // When the window prefers RT, gather the scene into a TLAS, pack the
+        // lights, and stage the camera push for the draw step. Pure no-op in
+        // Raster mode or when RT is unavailable (so the raster path below is
+        // the guaranteed fallback).
+        let rt_mode = renderer.window(window_h).map(|w| w.lighting_mode())
+            == Some(crate::render::window::LightingMode::RayTraced);
+        if rt_mode {
+            let extent = renderer
+                .window(window_h)
+                .and_then(|w| w.graphics.as_ref())
+                .map(|g| g.swapchain_extent)
+                .unwrap_or(vk::Extent2D {
+                    width: 1,
+                    height: 1,
+                });
+            let (pos, forward, vp) = {
+                let cam_h = self.windows.get(app).map(|r| {
+                    r.viewport_grid
+                        .as_ref()
+                        .and_then(|g| g.focused_camera())
+                        .unwrap_or(r.camera_handle)
+                });
+                let aspect = self.windows.get(app).map(|r| r.aspect).unwrap_or(1.0);
+                match cam_h.and_then(|h| self.cameras.get(h)) {
+                    Some(cam) => {
+                        let (sy, cy) = cam.yaw.sin_cos();
+                        let (sp, cp) = cam.pitch.sin_cos();
+                        (
+                            cam.position,
+                            [cp * cy, sp, cp * sy],
+                            cam.view_projection_matrix(aspect),
+                        )
+                    }
+                    None => ([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], MAT4_IDENTITY),
+                }
+            };
+            let inv_vp = glam::Mat4::from_cols_array(&vp).inverse().to_cols_array();
+            let push =
+                crate::render::rt_pipeline::RayCameraPush::new(inv_vp, pos, forward, extent);
+            let instances =
+                crate::render::render_world::gather_tlas_instances(world, self.gltf_assets, ctx);
+            let light_views = crate::render::render_world::gather_light_views(world);
+            let lights = Box::new(crate::render::render_world::pack_lights_ubo(&light_views));
+            if let Some(window) = renderer.window_mut(window_h) {
+                if let Err(e) = window.rt_rebuild_tlas(ctx, &instances) {
+                    eprintln!("rt_rebuild_tlas: {e:?}");
+                }
+                window.set_rt_frame(push, lights);
+            }
+        }
+
         collect_and_submit(
             world,
             self.gltf_assets,
@@ -793,6 +865,25 @@ impl<'a> AppCtx<'a> {
             ctx,
             &cam_views,
             elapsed,
+        )
+    }
+
+    /// Toggle the window's lighting mode (raster ↔ ray tracing). Returns `true`
+    /// if the window is now in RayTraced mode. No-op (returns `false`) when no
+    /// RT pipeline is present.
+    pub fn toggle_lighting_mode(&mut self, app: AppHandle) -> bool {
+        let Some(wh) = self.windows.get(app).map(|r| r.window_handle) else {
+            return false;
+        };
+        let Some(renderer) = self.renderer.as_deref_mut() else {
+            return false;
+        };
+        let Some(window) = renderer.window_mut(wh) else {
+            return false;
+        };
+        matches!(
+            window.toggle_lighting_mode(),
+            crate::render::window::LightingMode::RayTraced
         )
     }
 
@@ -1509,26 +1600,65 @@ impl<T: AppLogic> AppRunner<T> {
             && let Some(window) = renderer.window_mut(window_h)
         {
             unsafe {
-                let result = if specs.count > 0 {
-                    window.draw_frame_with_viewports(
-                        &ctx.instance,
-                        &ctx.device,
-                        ctx.queue,
-                        &compute_sems,
-                        &specs.data[..specs.count],
-                    )
+                // RayTraced path when the window prefers it and a frame was
+                // staged; falls back to raster on any missing RT resource.
+                let staged = if window.lighting_mode()
+                    == crate::render::window::LightingMode::RayTraced
+                {
+                    window.take_rt_frame()
                 } else {
-                    window.draw_frame_with_compute_wait(
+                    None
+                };
+                let result = if let Some((push, lights)) = staged {
+                    match window.draw_frame_ray_traced(
                         &ctx.instance,
                         &ctx.device,
                         ctx.queue,
                         &compute_sems,
-                    )
+                        push,
+                        &lights,
+                    ) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Self::raster_draw(window, ctx, &specs, &compute_sems),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    Self::raster_draw(window, ctx, &specs, &compute_sems)
                 };
                 if let Err(e) = result {
                     eprintln!("draw_frame error: {e:?}");
                     event_loop.exit();
                 }
+            }
+        }
+    }
+
+    /// Raster draw helper — the guaranteed path / RT fallback.
+    ///
+    /// # Safety
+    /// All Vulkan handles must be valid and `ctx.queue` the graphics queue.
+    unsafe fn raster_draw(
+        window: &mut Window,
+        ctx: &VulkanContext,
+        specs: &ViewportSpecBuf,
+        compute_sems: &[vk::Semaphore],
+    ) -> ForgeResult<()> {
+        unsafe {
+            if specs.count > 0 {
+                window.draw_frame_with_viewports(
+                    &ctx.instance,
+                    &ctx.device,
+                    ctx.queue,
+                    compute_sems,
+                    &specs.data[..specs.count],
+                )
+            } else {
+                window.draw_frame_with_compute_wait(
+                    &ctx.instance,
+                    &ctx.device,
+                    ctx.queue,
+                    compute_sems,
+                )
             }
         }
     }

@@ -107,7 +107,13 @@ impl OverlayPipeline {
                 extent.width,
                 extent.height,
                 HDR_FORMAT,
-                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                // STORAGE so the ray-tracing raygen shader can `imageStore` into
+                // this same HDR target; the raster path still uses it as a
+                // COLOR_ATTACHMENT / SAMPLED source. One compositing surface for
+                // both lighting modes (see LightingMode in window.rs).
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::STORAGE,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 vk::SampleCountFlags::TYPE_1,
             )?;
@@ -630,9 +636,12 @@ fn build_ui_render(
     queue: vk::Queue,
     command_pool: vk::CommandPool,
 ) -> ForgeResult<UiRender> {
-    let atlas_bytes = crate::resource_manager::ui_manager::font::bake_atlas();
-    let atlas_w = crate::resource_manager::ui_manager::font::ATLAS_W;
-    let atlas_h = crate::resource_manager::ui_manager::font::ATLAS_H;
+    // Combined font + icon atlas (handrolled vector rasterizer bakes the
+    // Lucide icons below the font block at runtime).
+    let atlas = crate::resource_manager::ui_manager::Atlas::build();
+    let atlas_bytes = atlas.pixels;
+    let atlas_w = atlas.width;
+    let atlas_h = atlas.height;
 
     let font_image = ForgeImage::create_2d(
         device,

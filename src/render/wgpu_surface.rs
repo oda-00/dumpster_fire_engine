@@ -149,13 +149,16 @@ impl WgpuSurface {
         let (hdr_tex, hdr_view) = create_hdr_texture(&device, width, height);
         let (depth_tex, depth_view) = create_depth_texture(&device, width, height);
 
-        // ── Font atlas ─────────────────────────────────────────────────────
-        let atlas = font::bake_atlas();
+        // ── Combined font + icon atlas ─────────────────────────────────────
+        let atlas_built = crate::resource_manager::ui_manager::Atlas::build();
+        let atlas: &[u8] = &atlas_built.pixels;
+        let atlas_w = atlas_built.width;
+        let atlas_h = atlas_built.height;
         let font_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("font-atlas"),
             size: wgpu::Extent3d {
-                width: font::ATLAS_W,
-                height: font::ATLAS_H,
+                width: atlas_w,
+                height: atlas_h,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -167,15 +170,15 @@ impl WgpuSurface {
         });
         queue.write_texture(
             font_tex.as_image_copy(),
-            &atlas,
+            atlas,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(font::ATLAS_W),
-                rows_per_image: Some(font::ATLAS_H),
+                bytes_per_row: Some(atlas_w),
+                rows_per_image: Some(atlas_h),
             },
             wgpu::Extent3d {
-                width: font::ATLAS_W,
-                height: font::ATLAS_H,
+                width: atlas_w,
+                height: atlas_h,
                 depth_or_array_layers: 1,
             },
         );

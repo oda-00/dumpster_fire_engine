@@ -28,7 +28,8 @@
 5. [Synthesis — patterns worth stealing](#5-synthesis--patterns-worth-stealing)
 6. [Full redesign proposal](#6-full-redesign-proposal)
 7. [Migration roadmap](#7-migration-roadmap)
-8. [References](#8-references)
+8. [UI graphics: icons + RT compositing](#8-ui-graphics-icons--rt-compositing)
+9. [References](#9-references)
 
 ---
 
@@ -563,7 +564,83 @@ corresponding engine code changes, and confirm the embedded listings still hold.
 
 ---
 
-## 8. References
+## 8. UI graphics: icons + RT compositing
+
+Two UI concerns the redesign must close, both consistent with the engine's
+**zero-dependency, handrolled** stance (the UI font is a Rust `const` bitmap
+table in `ui_manager/font.rs`): real **icon graphics** in the atlas, and a UI
+that **composites correctly over a ray-traced scene**.
+
+### 8.1 Open-source icon sources & licenses
+The bundled set is **Lucide** (vendored at `assets/icons/lucide/`), chosen for
+its permissive license and clean, single-stroke 24×24 geometry that rasterizes
+crisply at small sizes. Alternatives surveyed:
+
+| Source | License | Style / notes |
+|---|---|---|
+| [Lucide](https://lucide.dev/) | **ISC** | Fork of Feather; consistent 24px, 2px stroke, round caps. *(in use)* |
+| [Tabler Icons](https://tabler.io/icons) | MIT | 24px stroke set, very large catalog. |
+| [Heroicons](https://heroicons.com/) | MIT | Tailwind's set; outline + solid. |
+| [Ionicons](https://ionic.io/ionicons) | MIT | Mobile-oriented, outline + filled. |
+| [Material Symbols](https://fonts.google.com/icons) | Apache-2.0 | Variable axes (weight/fill/grade); huge coverage. |
+| [Kenney](https://kenney.nl/assets) / [OpenGameArt](https://opengameart.org/) | **CC0** | Game UI/sprite art, public domain. |
+| [Iconify](https://iconify.design/) | aggregator | Unifies 200k+ icons across the above under their own licenses. |
+
+ISC/MIT/Apache-2.0/CC0 are all attribution-or-less and compatible with shipping
+the rasterized result inside the engine binary. The license text travels with the
+vendored SVGs.
+
+### 8.2 Zero-dependency SVG → atlas pipeline (handrolled, runtime)
+Rather than a Cargo SVG crate (`usvg`/`resvg`) or an offline system tool
+(`rsvg-convert`/ImageMagick/Inkscape), the engine rasterizes the icon SVGs with
+its **own** handrolled rasterizer (`ui_manager/vector.rs`), the vector-graphics
+analogue of the hand-coded bitmap font. It parses the SVG subset these icons use
+— `<path>` (`M/L/H/V/C/S/Q/T/A/Z`, absolute + relative), `<circle>`, `<rect>` —
+flattens curves/arcs to line segments, and rasterizes **round-capped /
+round-joined strokes** via a signed-distance coverage pass: each segment is a
+capsule, and a pixel's alpha is `clamp(half_width + 0.5 − dist_to_nearest, 0, 1)`,
+giving 1px antialiasing and correct joins for free. It runs **at runtime** — the
+atlas bakes all icons through it at startup (so the source of truth stays the SVG,
+not a committed PNG), and gameplay code can rasterize arbitrary SVG-subset art the
+same way.
+
+Atlas integration (`ui_manager/{atlas.rs,font.rs}`): the icons are packed into the
+**same** R8 atlas as the font, in a block **below** the glyph rows. The atlas
+keeps the font's width so glyph **U** coordinates are unchanged; only the height
+grows, so glyph **V** divides by the full atlas height and icons occupy cells from
+`ATLAS_H` downward (`font::icon_rect(slot)`). A named `Icon` enum
+(`Move`/`RotateGizmo`/`Scale`/`Grid`/`Eye`/`Trash`/`Copy`/`Undo`/`Redo`/`Add`/…)
+indexes the atlas slots; toolbar code draws an icon exactly like a glyph
+(`push_rect` with the icon's UV rect), tinted through the vertex color — so icons
+get theming for free and add **no new pipeline state** (same atlas texture, same
+draw batch). This is the Dear ImGui model: icons are just glyphs in the font
+atlas. Sources: [Lucide](https://lucide.dev/), [Tabler](https://tabler.io/icons),
+[Heroicons](https://heroicons.com/), [Material Symbols](https://fonts.google.com/icons),
+[Iconify](https://iconify.design/), [Kenney assets](https://kenney.nl/assets),
+[Dear ImGui font/icon atlas (FONTS.md)](https://github.com/ocornut/imgui/blob/master/docs/FONTS.md),
+[SVG paths spec (W3C)](https://www.w3.org/TR/SVG2/paths.html),
+[SVG arc implementation notes (F.6)](https://www.w3.org/TR/SVG2/implnote.html#ArcImplementationNotes).
+
+### 8.3 Compositing the UI over an HDR / ray-traced scene
+The overlay already draws **last**, over the tonemapped scene: the frame graph is
+`scene → HDR image → tonemap pass (HDR→swapchain) → overlay pass (LOAD_OP_LOAD,
+alpha-blended UI)` (`overlay.rs`). The crucial property is that the UI pass is
+**agnostic to how the HDR image was produced**. If the scene is rasterized, the
+HDR image is the raster result; if the scene is ray-traced (raygen writes the same
+`R16G16B16A16_SFLOAT` storage image), the *identical* tonemap + overlay passes run
+unchanged. So the UI composites over RT **for free** — exactly the
+**ImGui-over-RT** integration model, where the UI is a final, separately-blended
+pass on top of the final scene color, never entangled with how that color was
+shaded. The only requirements are that the UI pass uses `LOAD_OP_LOAD` (preserve
+the scene), draws after tonemap (so UI is in display space, not HDR-linear), and
+alpha-blends (`SRC_ALPHA, ONE_MINUS_SRC_ALPHA`) — all already true. Editor overlays
+(gizmo, wireframe, mesh-edit handles) that share the same `DrawList` therefore land
+on top in both lighting modes. Sources:
+[Dear ImGui Vulkan backend](https://github.com/ocornut/imgui/blob/master/backends/imgui_impl_vulkan.cpp),
+[Khronos — Ray Tracing in Vulkan](https://www.khronos.org/blog/ray-tracing-in-vulkan),
+[Sascha Willems — deferred/compositing passes](https://github.com/SaschaWillems/Vulkan).
+
+## 9. References
 
 **Engine code (this repo):** `src/render/ui_core/{widget,layout,signal,event,theme,id,manager}.rs`,
 `src/render/ui_render/{drawlist,vertex,font,renderer}.rs`,

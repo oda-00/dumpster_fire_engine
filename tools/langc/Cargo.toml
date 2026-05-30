@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 lang_frontend = { path = "../../crates/lang_frontend" }
 thin-vec      = "0.2"
-inkwell       = { version = "0.5", features = ["llvm18-0"] }
+inkwell       = { version = "0.8", features = ["llvm21-1"] }

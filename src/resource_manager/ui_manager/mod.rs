@@ -20,6 +20,7 @@ pub mod scripts;
 pub mod slider;
 pub mod slider_vec3;
 pub mod tag;
+pub mod vector;
 pub mod widget;
 
 pub use atlas::Atlas;
@@ -27,7 +28,7 @@ pub use button::{ButtonData, ButtonState};
 pub use checkbox::CheckboxData;
 pub use draw::{DrawList, UiVertex};
 pub use dropdown::DropdownData;
-pub use icon::{IconData, IconId};
+pub use icon::{Icon, IconData, IconId};
 pub use immediate::Ui;
 pub use input::{Modifiers, UiInputState};
 pub use label::LabelData;

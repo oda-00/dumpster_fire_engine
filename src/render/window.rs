@@ -37,6 +37,21 @@ pub type WindowId = Id<WindowMarker>;
 ///   rendering with triple-buffered presents.
 pub const FRAMES_IN_FLIGHT: usize = 3;
 
+/// Which lighting/scene path produces the HDR image each frame.
+///
+/// Both modes feed the *same* HDR target (`overlay.hdr_images`), so the
+/// tonemap + UI-overlay compositor is identical regardless of mode — the UI
+/// composites over a ray-traced scene exactly as it does over a rasterized one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LightingMode {
+    /// Forward raster scene pass (the guaranteed-available path / fallback).
+    #[default]
+    Raster,
+    /// Hardware ray tracing: raygen writes the HDR storage image directly.
+    /// Falls back to `Raster` whenever an RT resource is missing or fails.
+    RayTraced,
+}
+
 // ── Graphics plumbing ───────────────────────────────────────────────────────
 
 pub struct GraphicsState {
@@ -106,6 +121,13 @@ pub struct GraphicsState {
     /// Phase 9 — RT pipeline + SBT + TLAS. Same lazy-init pattern; `None`
     /// when `has_ray_tracing == false` or build failed.
     pub rt: Option<crate::render::rt_pipeline::RtPipeline>,
+    /// Active lighting path. Defaults to `Raster`; flipped to `RayTraced` only
+    /// when an RT pipeline is present (see `set_lighting_mode`).
+    pub lighting_mode: LightingMode,
+    /// Pending RT frame data, staged during the scene walk (which has the
+    /// World) and consumed by the draw step. `None` outside RayTraced mode.
+    pub rt_camera_push: Option<crate::render::rt_pipeline::RayCameraPush>,
+    pub rt_lights: Option<Box<crate::resource_manager::gltf_driver::LightsUBO>>,
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -296,6 +318,9 @@ impl Window {
                 needs_resize: false,
                 overlay: None,
                 rt: None,
+                lighting_mode: LightingMode::Raster,
+                rt_camera_push: None,
+                rt_lights: None,
             }),
         })
     }
@@ -374,7 +399,80 @@ impl Window {
         }
         let rt = crate::render::rt_pipeline::RtPipeline::new(vulkan)?;
         gfx.rt = Some(rt);
+        // Prefer ray tracing once the pipeline is live (plan §B6). The frame
+        // path still falls back to raster on any missing/failed resource.
+        gfx.lighting_mode = LightingMode::RayTraced;
         Ok(())
+    }
+
+    /// Current lighting mode (`Raster` on a headless window).
+    pub fn lighting_mode(&self) -> LightingMode {
+        self.graphics
+            .as_ref()
+            .map(|g| g.lighting_mode)
+            .unwrap_or(LightingMode::Raster)
+    }
+
+    /// Set the lighting mode. `RayTraced` is only honored when an RT pipeline
+    /// is present; otherwise it is clamped to `Raster`.
+    pub fn set_lighting_mode(&mut self, mode: LightingMode) {
+        if let Some(gfx) = self.graphics.as_mut() {
+            gfx.lighting_mode = match mode {
+                LightingMode::RayTraced if gfx.rt.is_some() => LightingMode::RayTraced,
+                _ => LightingMode::Raster,
+            };
+        }
+    }
+
+    /// Flip between raster and ray tracing (no-op toward RayTraced if no RT
+    /// pipeline exists). Returns the resulting mode.
+    pub fn toggle_lighting_mode(&mut self) -> LightingMode {
+        let next = match self.lighting_mode() {
+            LightingMode::Raster => LightingMode::RayTraced,
+            LightingMode::RayTraced => LightingMode::Raster,
+        };
+        self.set_lighting_mode(next);
+        self.lighting_mode()
+    }
+
+    /// Rebuild the TLAS from a caller-supplied instance list (gathered from the
+    /// scene's `LoadedGltf.blas` device addresses). No-op when RT is absent.
+    pub fn rt_rebuild_tlas(
+        &mut self,
+        vulkan: &crate::render::vulkan::VulkanContext,
+        instances: &[vk::AccelerationStructureInstanceKHR],
+    ) -> ForgeResult<()> {
+        if let Some(gfx) = self.graphics.as_mut()
+            && let Some(rt) = gfx.rt.as_mut()
+        {
+            rt.rebuild_tlas(vulkan, instances)?;
+        }
+        Ok(())
+    }
+
+    /// Stage the RT camera push + packed lights for this frame (set during the
+    /// scene walk, consumed by `draw_frame_ray_traced`).
+    pub fn set_rt_frame(
+        &mut self,
+        push: crate::render::rt_pipeline::RayCameraPush,
+        lights: Box<crate::resource_manager::gltf_driver::LightsUBO>,
+    ) {
+        if let Some(gfx) = self.graphics.as_mut() {
+            gfx.rt_camera_push = Some(push);
+            gfx.rt_lights = Some(lights);
+        }
+    }
+
+    /// Take the staged RT frame data (if any).
+    #[allow(clippy::type_complexity)]
+    pub fn take_rt_frame(
+        &mut self,
+    ) -> Option<(
+        crate::render::rt_pipeline::RayCameraPush,
+        Box<crate::resource_manager::gltf_driver::LightsUBO>,
+    )> {
+        let gfx = self.graphics.as_mut()?;
+        Some((gfx.rt_camera_push.take()?, gfx.rt_lights.take()?))
     }
 
     /// Phase 12 — upload UI draw data for the next frame. `verts` is the
@@ -1449,6 +1547,227 @@ impl Window {
 
         gfx.current_frame = (gfx.current_frame + 1) % FRAMES_IN_FLIGHT;
         Ok(())
+    }
+
+    /// Draw one frame via the **ray-tracing** path: `raygen` writes the HDR
+    /// storage image, then the *same* tonemap + UI-overlay compositor used by
+    /// the raster path runs — so the UI composites over the ray-traced scene
+    /// for free (plan Parts B & C). The caller must have called
+    /// `rt_rebuild_tlas` for this frame and supply the camera push + packed
+    /// lights.
+    ///
+    /// Returns `Ok(false)` (having done nothing) when an RT/overlay resource is
+    /// missing, so the caller can fall back to a raster draw with no regression.
+    ///
+    /// # Safety
+    /// All Vulkan handles must be valid and `queue` must be the graphics queue
+    /// for `device`.
+    pub unsafe fn draw_frame_ray_traced(
+        &mut self,
+        instance: &ash::Instance,
+        device: &ash::Device,
+        queue: vk::Queue,
+        compute_wait: &[vk::Semaphore],
+        camera_push: crate::render::rt_pipeline::RayCameraPush,
+        lights: &crate::resource_manager::gltf_driver::LightsUBO,
+    ) -> ForgeResult<bool> {
+        if self.graphics.as_ref().is_some_and(|g| g.needs_resize) {
+            self.recreate_swapchain(instance, device)?;
+        }
+        let gfx = self
+            .graphics
+            .as_mut()
+            .expect("draw_frame_ray_traced called on a headless window");
+
+        // Require both RT + overlay resources; otherwise signal raster fallback.
+        if gfx.rt.is_none() || gfx.overlay.is_none() {
+            return Ok(false);
+        }
+        if gfx.swapchain_extent.width == 0 || gfx.swapchain_extent.height == 0 {
+            return Ok(true);
+        }
+
+        let frame = gfx.current_frame;
+        let img_avail = gfx.image_available_semaphores[frame];
+        let in_flight = gfx.in_flight_fences[frame];
+
+        unsafe {
+            device
+                .wait_for_fences(&[in_flight], true, u64::MAX)
+                .map_err(ForgeError::Vk)?;
+        }
+        let acquire = unsafe {
+            gfx.swapchain_loader.acquire_next_image(
+                gfx.swapchain,
+                u64::MAX,
+                img_avail,
+                vk::Fence::null(),
+            )
+        };
+        let (image_index, _) = match acquire {
+            Ok(t) => t,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                gfx.needs_resize = true;
+                return Ok(true);
+            }
+            Err(e) => return Err(ForgeError::Vk(e)),
+        };
+        unsafe {
+            device.reset_fences(&[in_flight]).map_err(ForgeError::Vk)?;
+        }
+
+        let command_buffer = gfx.command_buffers[frame];
+
+        // Copy out the HDR handles for this image (Copy types — releases the
+        // overlay borrow before we re-borrow gfx.rt / gfx.overlay below).
+        let (hdr_img, hdr_view) = {
+            let img = &gfx.overlay.as_ref().unwrap().hdr_images[image_index as usize];
+            (img.handle, img.view)
+        };
+
+        let full_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            device
+                .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(ForgeError::Vk)?;
+            device
+                .begin_command_buffer(command_buffer, &begin_info)
+                .map_err(ForgeError::Vk)?;
+
+            // HDR: UNDEFINED → GENERAL for the raygen imageStore.
+            let to_general = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::NONE)
+                .dst_stage_mask(vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR)
+                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .image(hdr_img)
+                .subresource_range(full_range);
+            device.cmd_pipeline_barrier2(
+                command_buffer,
+                &vk::DependencyInfo::default()
+                    .image_memory_barriers(std::slice::from_ref(&to_general)),
+            );
+
+            // Trace into the HDR image (or clear it if the TLAS is empty).
+            let traced = gfx.rt.as_mut().unwrap().record_trace(
+                device,
+                command_buffer,
+                hdr_view,
+                &camera_push,
+                lights,
+            );
+            if !traced {
+                let clear = vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                };
+                device.cmd_clear_color_image(
+                    command_buffer,
+                    hdr_img,
+                    vk::ImageLayout::GENERAL,
+                    &clear,
+                    std::slice::from_ref(&full_range),
+                );
+            }
+
+            // HDR: GENERAL → COLOR_ATTACHMENT_OPTIMAL so the overlay's standard
+            // COLOR_ATTACHMENT→SHADER_READ barrier (in `record`) applies next.
+            let to_color = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR
+                        | vk::PipelineStageFlags2::CLEAR,
+                )
+                .src_access_mask(
+                    vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
+                )
+                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .image(hdr_img)
+                .subresource_range(full_range);
+            device.cmd_pipeline_barrier2(
+                command_buffer,
+                &vk::DependencyInfo::default()
+                    .image_memory_barriers(std::slice::from_ref(&to_color)),
+            );
+
+            // Shared tonemap + UI overlay compositor (UI over the RT scene).
+            gfx.overlay.as_mut().unwrap().record(
+                device,
+                command_buffer,
+                image_index,
+                crate::render::overlay::TonemapPush {
+                    exposure_scale: 1.0,
+                    op: 2,
+                    _pad: [0; 2],
+                },
+                frame,
+            );
+
+            device
+                .end_command_buffer(command_buffer)
+                .map_err(ForgeError::Vk)?;
+        }
+
+        let render_done = gfx.render_finished_semaphores[image_index as usize];
+        let mut wait_infos: Vec<vk::SemaphoreSubmitInfo> =
+            Vec::with_capacity(1 + compute_wait.len());
+        wait_infos.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(img_avail)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+        );
+        for &sem in compute_wait {
+            wait_infos.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(sem)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            );
+        }
+        let cb_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)];
+        let signal_infos = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(render_done)
+            .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS)];
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait_infos)
+            .command_buffer_infos(&cb_infos)
+            .signal_semaphore_infos(&signal_infos);
+
+        let signal_semaphores = [render_done];
+        let present_swapchains = [gfx.swapchain];
+        let present_image_indices = [image_index];
+
+        unsafe {
+            device
+                .queue_submit2(queue, &[submit_info], in_flight)
+                .map_err(ForgeError::Vk)?;
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&signal_semaphores)
+                .swapchains(&present_swapchains)
+                .image_indices(&present_image_indices);
+            match gfx.swapchain_loader.queue_present(queue, &present_info) {
+                Ok(suboptimal) if suboptimal => gfx.needs_resize = true,
+                Ok(_) => {}
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
+                    gfx.needs_resize = true;
+                }
+                Err(e) => return Err(ForgeError::Vk(e)),
+            }
+        }
+
+        gfx.current_frame = (gfx.current_frame + 1) % FRAMES_IN_FLIGHT;
+        Ok(true)
     }
 }
 

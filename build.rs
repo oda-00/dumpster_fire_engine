@@ -238,20 +238,23 @@ fn ensure_llvm_windows() {
     if std::env::consts::OS != "windows" {
         return;
     }
-    let prefix = std::env::var("LLVM_SYS_180_PREFIX").unwrap_or_else(|_| ".llvm/18".to_string());
+    // Matches `.cargo/config.toml` and inkwell's `llvm21-1` (→ llvm-sys 211).
+    let prefix = std::env::var("LLVM_SYS_211_PREFIX").unwrap_or_else(|_| ".llvm/21".to_string());
     let llvm_path = Path::new(&prefix);
     if llvm_path.join("bin/llvm-config.exe").exists() {
         return;
     }
-    println!("cargo::warning=Downloading prebuilt LLVM 18 for Windows...");
-    let url = "https://github.com/PLC-lang/llvm-package-windows/releases/download/llvm-18.1.8/llvm-18.1.8-msvc19-x86_64.zip";
-    let zip_path = llvm_path.with_extension("zip");
+    println!("cargo::warning=Downloading prebuilt LLVM 21 (static, all targets) for Windows...");
+    // PLC-lang prebuilt: full static LLVM libs + llvm-config, built with ALL
+    // LLVM targets (inkwell references every target's init symbols at link
+    // time, so a target-restricted build — e.g. X86-only — fails to link).
+    let url = "https://github.com/PLC-lang/llvm-package-windows/releases/download/v21.1.7/LLVM-21.1.7-win64.7z";
+    let archive = llvm_path.with_extension("7z");
     std::fs::create_dir_all(llvm_path).unwrap();
 
-    // Download with curl or PowerShell
     let ok = if Command::new("curl").arg("--version").output().is_ok() {
         Command::new("curl")
-            .args(["-L", "-o", zip_path.to_str().unwrap(), url])
+            .args(["-L", "-o", archive.to_str().unwrap(), url])
             .status()
     } else {
         Command::new("powershell")
@@ -260,7 +263,7 @@ fn ensure_llvm_windows() {
                 &format!(
                     "Invoke-WebRequest -Uri {} -OutFile {}",
                     url,
-                    zip_path.display()
+                    archive.display()
                 ),
             ])
             .status()
@@ -269,59 +272,62 @@ fn ensure_llvm_windows() {
     .unwrap_or(false);
 
     if !ok {
-        println!("cargo::warning=Failed to download LLVM");
+        println!("cargo::warning=Failed to download LLVM 21");
         return;
     }
 
-    // Extract using PowerShell (or fallback to tar)
+    // A `.7z` needs a real 7-Zip — PowerShell's Expand-Archive can't read it.
     let temp = llvm_path.join("temp_extract");
     std::fs::create_dir_all(&temp).unwrap();
-    let extract_ok = if Command::new("powershell").output().is_ok() {
-        Command::new("powershell")
+    let mut extract_ok = false;
+    for sz in [
+        "7z",
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ] {
+        if Command::new(sz)
             .args([
-                "-Command",
-                &format!(
-                    "Expand-Archive -Path {} -DestinationPath {} -Force",
-                    zip_path.display(),
-                    temp.display()
-                ),
+                "x",
+                archive.to_str().unwrap(),
+                &format!("-o{}", temp.display()),
+                "-y",
             ])
             .status()
-    } else {
-        Command::new("tar")
-            .args([
-                "-xf",
-                zip_path.to_str().unwrap(),
-                "-C",
-                temp.to_str().unwrap(),
-            ])
-            .status()
-    }
-    .map(|s| s.success())
-    .unwrap_or(false);
-
-    if extract_ok {
-        // The zip contains one subfolder like "llvm-18.1.8-msvc19-x86_64"
-        let entries: Vec<_> = std::fs::read_dir(&temp)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .collect();
-        let source = if entries.len() == 1 && entries[0].path().is_dir() {
-            entries[0].path()
-        } else {
-            temp.clone()
-        };
-        for entry in std::fs::read_dir(source).unwrap() {
-            let entry = entry.unwrap();
-            let dest = llvm_path.join(entry.file_name());
-            std::fs::rename(entry.path(), &dest).unwrap();
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            extract_ok = true;
+            break;
         }
-        std::fs::remove_dir_all(temp).ok();
-        std::fs::remove_file(zip_path).ok();
-        println!("cargo::warning=LLVM installed to {}", llvm_path.display());
-    } else {
-        println!("cargo::warning=Failed to extract LLVM");
     }
+    if !extract_ok {
+        println!(
+            "cargo::warning=Could not extract LLVM 21. Install 7-Zip, or manually extract {} into {} (so {}/bin/llvm-config.exe exists).",
+            archive.display(),
+            llvm_path.display(),
+            llvm_path.display()
+        );
+        return;
+    }
+
+    // The archive holds one top-level folder; move its contents into the prefix.
+    let entries: Vec<_> = std::fs::read_dir(&temp)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    let source = if entries.len() == 1 && entries[0].path().is_dir() {
+        entries[0].path()
+    } else {
+        temp.clone()
+    };
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let dest = llvm_path.join(entry.file_name());
+        std::fs::rename(entry.path(), &dest).ok();
+    }
+    std::fs::remove_dir_all(&temp).ok();
+    std::fs::remove_file(&archive).ok();
+    println!("cargo::warning=LLVM 21 installed to {}", llvm_path.display());
 }
 fn ensure_shaderc_dll_windows() {
     if std::env::consts::OS != "windows" {

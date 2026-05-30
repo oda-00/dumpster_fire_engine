@@ -1,2 +1,6 @@
 [env]
-LLVM_SYS_180_PREFIX = { value = ".llvm/18", relative = true, force = true }
+# Point llvm-sys (pulled by inkwell for the `langc` scripting compiler) at the
+# engine-managed LLVM 21 tree. `relative = true` makes Cargo pass an absolute
+# path (resolved against the workspace root) to every build script, including
+# llvm-sys's own, which a build.rs cannot otherwise set for a sibling crate.
+LLVM_SYS_211_PREFIX = { value = ".llvm/21", relative = true, force = true }
