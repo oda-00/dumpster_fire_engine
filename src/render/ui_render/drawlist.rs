@@ -98,39 +98,64 @@ impl DrawList {
         color: [u8; 4],
     ) {
         let mut x = pos[0];
-        for ch in text.chars() {
-            let g = font.get_glyph(ch, 14);
-            let w = g.w;
-            let h = g.h;
-            let uv = [g.u0, g.v0, g.u1, g.v1];
-
-            let base = self.vertices.len() as u32;
-            self.vertices.extend_from_slice(&[
-                UiVertex {
-                    pos: [x + g.off_x, pos[1] + g.off_y],
-                    uv: [uv[0], uv[1]],
-                    color,
-                },
-                UiVertex {
-                    pos: [x + g.off_x + w, pos[1] + g.off_y],
-                    uv: [uv[2], uv[1]],
-                    color,
-                },
-                UiVertex {
-                    pos: [x + g.off_x + w, pos[1] + g.off_y + h],
-                    uv: [uv[2], uv[3]],
-                    color,
-                },
-                UiVertex {
-                    pos: [x + g.off_x, pos[1] + g.off_y + h],
-                    uv: [uv[0], uv[3]],
-                    color,
-                },
-            ]);
-            self.indices
-                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-            x += g.advance;
+        // ASCII fast path: iterate raw bytes, skipping the UTF-8 decode that
+        // `chars()` performs on every character. UI labels are overwhelmingly
+        // ASCII; this halves the per-glyph work (GUI_research.md §4.6 /
+        // docs/gui_research/asm/exp6_glyph.rs). Output is identical to the
+        // `chars()` path for ASCII text; non-ASCII falls back to `chars()`.
+        if text.is_ascii() {
+            for &b in text.as_bytes() {
+                x = self.push_glyph(b as char, font, x, pos[1], color);
+            }
+        } else {
+            for ch in text.chars() {
+                x = self.push_glyph(ch, font, x, pos[1], color);
+            }
         }
+    }
+
+    /// Emit one glyph quad at pen position `x` on baseline `baseline_y`, returning
+    /// the advanced pen position. Shared by both `push_text` code paths.
+    #[inline]
+    fn push_glyph(
+        &mut self,
+        ch: char,
+        font: &mut super::font::FontAtlas,
+        x: f32,
+        baseline_y: f32,
+        color: [u8; 4],
+    ) -> f32 {
+        let g = font.get_glyph(ch, 14);
+        let w = g.w;
+        let h = g.h;
+        let uv = [g.u0, g.v0, g.u1, g.v1];
+
+        let base = self.vertices.len() as u32;
+        self.vertices.extend_from_slice(&[
+            UiVertex {
+                pos: [x + g.off_x, baseline_y + g.off_y],
+                uv: [uv[0], uv[1]],
+                color,
+            },
+            UiVertex {
+                pos: [x + g.off_x + w, baseline_y + g.off_y],
+                uv: [uv[2], uv[1]],
+                color,
+            },
+            UiVertex {
+                pos: [x + g.off_x + w, baseline_y + g.off_y + h],
+                uv: [uv[2], uv[3]],
+                color,
+            },
+            UiVertex {
+                pos: [x + g.off_x, baseline_y + g.off_y + h],
+                uv: [uv[0], uv[3]],
+                color,
+            },
+        ]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        x + g.advance
     }
 }
 
