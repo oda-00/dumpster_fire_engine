@@ -6,6 +6,10 @@
 //! Controls:
 //!   Tab         — cycle viewport layout
 //!   G / R / S   — Translate / Rotate / Scale gizmo mode
+//!   F           — frame (focus cameras on) the selected actor
+//!   X           — toggle gizmo snapping (grid / angle / scale steps)
+//!   Ctrl+D      — duplicate the selected actor
+//!   F2          — toggle the stats overlay
 //!   Del         — despawn selected actor
 //!   Esc         — clear selection / close menus
 //!   LMB         — click-to-select actor (ray-AABB)
@@ -105,6 +109,16 @@ struct EditorApp {
     gizmo_space: GizmoSpace,
     spawn_menu_open: bool,
     light_submenu_open: bool,
+
+    // ── tools: gizmo snapping (X toggles)
+    snap_enabled: bool,
+    snap_translate: f32,
+    snap_rotate_deg: f32,
+    snap_scale: f32,
+    // ── tools: stats overlay (F2 toggles)
+    stats_open: bool,
+    // ── modifier tracking (for Ctrl+D duplicate)
+    ctrl_held: bool,
 
     // ── file picker
     picker_open: bool,
@@ -540,6 +554,22 @@ impl AppLogic for EditorApp {
                         self.gizmo_mode = GizmoMode::Scale;
                         return true;
                     }
+                    PhysicalKey::Code(KeyCode::KeyF) => {
+                        self.frame_selected(ctx, app);
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::KeyX) => {
+                        self.snap_enabled = !self.snap_enabled;
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::F2) => {
+                        self.stats_open = !self.stats_open;
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::KeyD) if self.ctrl_held => {
+                        self.duplicate_selected();
+                        return true;
+                    }
                     PhysicalKey::Code(KeyCode::Delete) => {
                         if let (Some(ah), Some((lh, sh))) = (self.world.selection, self.main_stage)
                         {
@@ -557,6 +587,10 @@ impl AppLogic for EditorApp {
                     }
                     _ => {}
                 }
+            }
+
+            WindowEvent::ModifiersChanged(mods) => {
+                self.ctrl_held = mods.state().control_key();
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -693,6 +727,7 @@ impl AppLogic for EditorApp {
         self.draw_inspector(ctx, app);
         self.draw_bottom_panel(ctx, app);
         self.draw_trs_gizmo(ctx, app);
+        self.draw_stats(win_w);
         if self.picker_open {
             self.draw_file_picker(ctx, app);
         }
@@ -1612,6 +1647,13 @@ impl EditorApp {
                 let world_delta = axis * (t * drag.arrow_world_len);
                 let mut nl = drag.start_local;
                 nl.translation += glam::Vec3A::from(world_delta);
+                if self.snap_enabled {
+                    let a = drag.axis as usize;
+                    let s = self.snap_translate.max(1e-4);
+                    let mut tr = glam::Vec3::from(nl.translation);
+                    tr[a] = (tr[a] / s).round() * s; // snap dragged axis to grid
+                    nl.translation = glam::Vec3A::from(tr);
+                }
                 nl
             }
             GizmoMode::Scale => {
@@ -1620,7 +1662,11 @@ impl EditorApp {
                     return;
                 }
                 let t = (dx * drag.arrow_screen[0] + dy * drag.arrow_screen[1]) / arrow_len_sq;
-                let factor = (1.0 + t).max(0.01);
+                let mut factor = (1.0 + t).max(0.01);
+                if self.snap_enabled {
+                    let s = self.snap_scale.max(1e-4);
+                    factor = ((factor / s).round() * s).max(s); // snap scale to steps
+                }
                 let mut nl = drag.start_local;
                 let mut scale_vec = Vec3::ONE;
                 scale_vec[drag.axis as usize] = factor;
@@ -1633,7 +1679,11 @@ impl EditorApp {
                 let cy = drag.ring_origin[1];
                 let start_a = (drag.start_cursor[1] - cy).atan2(drag.start_cursor[0] - cx);
                 let cur_a = (cursor[1] - cy).atan2(cursor[0] - cx);
-                let angle = cur_a - start_a;
+                let mut angle = cur_a - start_a;
+                if self.snap_enabled {
+                    let step = self.snap_rotate_deg.to_radians().max(1e-4);
+                    angle = (angle / step).round() * step; // snap rotation to fixed angles
+                }
                 let rot = glam::Quat::from_axis_angle(axis, angle);
                 let mut nl = drag.start_local;
                 nl.matrix3 = glam::Mat3A::from_quat(rot) * drag.start_local.matrix3;
@@ -1641,6 +1691,144 @@ impl EditorApp {
             }
         };
         self.world.set_actor_local(lh, sh, drag.actor, new_local);
+    }
+}
+
+// ── Tools: frame-selected, duplicate, stats overlay ─────────────────────────
+
+impl EditorApp {
+    /// F — move/orbit all viewport cameras to focus the selected actor.
+    fn frame_selected(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
+        let Some(ah) = self.world.selection else { return };
+        let Some((lh, sh)) = self.main_stage else { return };
+        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else {
+            return;
+        };
+        let Some(world_t) = stage.worlds.get(ah.idx as usize) else { return };
+        let c = Vec3::from(world_t.translation);
+        let r = 2.0_f32; // focus box half-extent around the actor origin
+        let aabb = ([c.x - r, c.y - r, c.z - r], [c.x + r, c.y + r, c.z + r]);
+        ctx.fit_all_panes_to_aabb(app, &aabb);
+    }
+
+    /// Ctrl+D — clone the selected actor (transform + sub-entities) and select
+    /// the copy. Covers the kinds the editor creates: mesh `Environment` and
+    /// `Utility` (lights/empties); a light's `UtilityComponent` is recreated.
+    fn duplicate_selected(&mut self) {
+        let Some(src) = self.world.selection else { return };
+        let Some((lh, sh)) = self.main_stage else { return };
+
+        // Read the source actor first (immutable), then spawn (mutable).
+        let (local, subs) = {
+            let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else {
+                return;
+            };
+            let Some(actor) = stage.actors.get(src) else { return };
+            let local = stage
+                .locals
+                .get(src.idx as usize)
+                .copied()
+                .unwrap_or(Affine3A::IDENTITY);
+            let mut subs: ThinVec<(ActorType, Option<LightData>)> = ThinVec::new();
+            for se in actor.sub_entities.iter().flatten() {
+                let at = match &se.actor_type {
+                    ActorType::Environment(e) => ActorType::Environment(Environment {
+                        id: e.id,
+                        name: Arc::clone(&e.name),
+                        visible: e.visible,
+                        physical: e.physical,
+                        mesh: e.mesh.as_ref().map(|m| MeshRef { asset: m.asset }),
+                    }),
+                    ActorType::Utility(u) => ActorType::Utility(Utility {
+                        id: u.id,
+                        name: Arc::clone(&u.name),
+                        visible: u.visible,
+                        toggle: u.toggle,
+                        mesh: u.mesh.as_ref().map(|m| MeshRef { asset: m.asset }),
+                    }),
+                    _ => continue,
+                };
+                let light = match &se.components[ComponentType::Utility.index()] {
+                    Some(Component::Utility(uc)) => uc.light.clone(),
+                    _ => None,
+                };
+                subs.push((at, light));
+            }
+            (local, subs)
+        };
+        if subs.is_empty() {
+            return;
+        }
+
+        // Offset the copy so it's visibly distinct from the original.
+        let offset = Affine3A::from_translation(Vec3::new(0.5, 0.0, 0.5)) * local;
+        let id = ActorId::new(self.actors.len() as i64 + 500);
+        let Some(ah) = self.world.spawn_actor(lh, sh, id, offset) else { return };
+
+        for (at, light) in subs {
+            let is_util_light = matches!(&at, ActorType::Utility(_)) && light.is_some();
+            let _ = self.world.spawn_sub_entity(lh, sh, ah, at, Affine3A::IDENTITY);
+            if is_util_light {
+                let utility_idx = ActorType::Utility(Utility {
+                    id: UtilityId::new(0),
+                    name: Arc::from(""),
+                    visible: true,
+                    toggle: true,
+                    mesh: None,
+                })
+                .index();
+                self.world.add_component(
+                    lh,
+                    sh,
+                    ah,
+                    utility_idx,
+                    UtilityComponent {
+                        name: Arc::from("Light"),
+                        description: Arc::from(""),
+                        camera: None,
+                        light,
+                        render: None,
+                    },
+                );
+            }
+        }
+        self.actors.push(ah);
+        self.world.selection = Some(ah);
+    }
+
+    /// F2 — a small heads-up overlay with frame/scene stats.
+    fn draw_stats(&mut self, win_w: f32) {
+        if !self.stats_open {
+            return;
+        }
+        use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
+        let w = 210.0_f32;
+        let h = 176.0_f32;
+        let x = (win_w - self.inspector_w - w - 14.0).max(8.0);
+        let y = TOOLBAR_H + 12.0;
+        let frame_ms = if self.fps_display > 0.0 { 1000.0 / self.fps_display } else { 0.0 };
+        let sel = self.world.selection.map(|hh| hh.idx as i64).unwrap_or(-1);
+        let lines = [
+            format!("FPS {:.0}  ({frame_ms:.2} ms)", self.fps_display),
+            format!("actors {}", self.actors.len()),
+            format!("selection {sel}"),
+            format!("gizmo {:?}", self.gizmo_mode),
+            format!("snap {}", if self.snap_enabled { "ON" } else { "off" }),
+            "[F2] hide  [X] snap".to_string(),
+        ];
+        let input = self.ui_input();
+        let dl = &mut self.world.ui.draw_list;
+        dl.push_panel_bg(x, y, w, h, [18, 18, 26, 235]);
+        dl.push_title_bar(x, y, w, TITLEBAR_H, [40, 40, 58, 255], SEP);
+        let mut ui = Ui::with_input(
+            dl,
+            Rect { x: x + 8.0, y: y + TITLEBAR_H + 4.0, w: w - 16.0, h: h - TITLEBAR_H - 8.0 },
+            input,
+        );
+        ui.label("Stats");
+        for ln in &lines {
+            ui.label(ln.as_str());
+        }
     }
 }
 
@@ -1845,6 +2033,12 @@ fn main() -> ForgeResult<()> {
         gizmo_space: GizmoSpace::World,
         spawn_menu_open: false,
         light_submenu_open: false,
+        snap_enabled: false,
+        snap_translate: 0.25,
+        snap_rotate_deg: 15.0,
+        snap_scale: 0.1,
+        stats_open: false,
+        ctrl_held: false,
         picker_open: false,
         picker_filter: Arc::from(""),
         picker_paths: ThinVec::new(),
