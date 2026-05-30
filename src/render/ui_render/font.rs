@@ -31,9 +31,12 @@ pub struct FontAtlas {
 
 impl FontAtlas {
     pub fn new(vulkan: &VulkanContext) -> Self {
-        let default_font_bytes: &[u8] = include_bytes!("../../../assets/fonts/FiraCode-Regular.ttf");
+        // DejaVu Sans Mono — a real, freely-licensed monospace TTF. (Replaces the
+        // previously-bundled FiraCode-Regular.ttf, which was actually a saved HTML
+        // page, not a font, and panicked here at runtime.)
+        let default_font_bytes: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSansMono.ttf");
         let font = Font::from_bytes(default_font_bytes, FontSettings::default())
-            .expect("bundled FiraCode-Regular.ttf failed to parse");
+            .expect("bundled DejaVuSansMono.ttf failed to parse");
 
         let texture = ForgeImage::create_2d(
             &vulkan.device,

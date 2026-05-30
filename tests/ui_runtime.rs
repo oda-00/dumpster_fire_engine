@@ -35,7 +35,7 @@ fn try_vulkan() -> Option<VulkanContext> {
 /// Validate the on-disk copy has a real sfnt signature before relying on it, so
 /// a broken asset skips the font cases rather than panicking inside fontdue.
 fn bundled_font_is_valid() -> bool {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/FiraCode-Regular.ttf");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/DejaVuSansMono.ttf");
     match std::fs::read(&path) {
         Ok(bytes) if bytes.len() >= 4 => {
             let m = &bytes[..4];
