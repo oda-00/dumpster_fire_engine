@@ -1430,7 +1430,9 @@ pub struct LightsUBO {
     pub env_idx: u32,
     /// 1 when any `AnalyticSky` light is present; 0 otherwise.
     pub sky_present: u32,
-    pub _pad: u32,
+    /// Bit 0: composite the editor floor grid in the RT miss shader
+    /// (mirrors `World::grid_enabled` so raster and RT modes agree).
+    pub flags: u32,
     pub lights: [LightGpu; MAX_LIGHTS],
 }
 
@@ -1440,7 +1442,7 @@ impl Default for LightsUBO {
             count: 0,
             env_idx: u32::MAX,
             sky_present: 0,
-            _pad: 0,
+            flags: 0,
             lights: [LightGpu::default(); MAX_LIGHTS],
         }
     }

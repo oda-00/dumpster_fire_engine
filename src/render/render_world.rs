@@ -298,7 +298,8 @@ pub fn collect_and_submit(
                 },
             });
         }
-        let lights_ubo = pack_lights_ubo(&lights);
+        let mut lights_ubo = pack_lights_ubo(&lights);
+        lights_ubo.flags |= world.grid_enabled as u32; // bit 0: RT-miss grid
         if let Some(window) = renderer.window_mut(window_h)
             && let Err(e) = window.ensure_rt_frame(vulkan, &lights_ubo, &rt_instances)
         {
