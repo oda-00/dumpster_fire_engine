@@ -51,9 +51,9 @@ use dumpster_fire_engine::resource_manager::{
 
 // ── Layout constants ───────────────────────────────────────────────────────
 
-const TOOLBAR_H: f32 = 28.0;
+const MENUBAR_H: f32 = 22.0;
+const TOOLBAR_H: f32 = 50.0; // menu row (0..MENUBAR_H) + icon row
 const TITLEBAR_H: f32 = 22.0;
-const BOTTOM_H: f32 = 140.0;
 const SEP: [u8; 4] = [58, 58, 74, 255];
 const PANEL_BG: [u8; 4] = [22, 22, 28, 240];
 const TITLEBAR_BG: [u8; 4] = [35, 35, 45, 255];
@@ -174,6 +174,35 @@ struct EditorApp {
 
     /// Tooltip deferred from a hovered toolbar icon, drawn last (always on top).
     pending_tooltip: Option<(f32, f32, String)>,
+
+    /// Open menu-bar dropdown (index into MENUS) and its screen rect.
+    menu_open: Option<usize>,
+    menu_rect: (f32, f32, f32, f32),
+    /// Output-log panel height (drag the top edge to resize).
+    bottom_h: f32,
+    quit_requested: bool,
+    /// Output log lines: (text, color). Newest appended at the end.
+    log: ThinVec<(String, [u8; 4])>,
+}
+
+/// Menu-bar definition: label + entries. Entry actions are routed in
+/// `draw_menus` by (menu_idx, entry_idx).
+const MENUS: [(&str, &[&str]); 4] = [
+    ("File", &["Open glTF...", "Quit"]),
+    ("Edit", &["Undo", "Redo", "Duplicate", "Delete"]),
+    (
+        "Window",
+        &["Layout: Single", "Layout: 2 Cols", "Layout: 2 Rows", "Layout: Quad", "Toggle Stats"],
+    ),
+    ("Help", &["About"]),
+];
+
+fn menu_label_x(idx: usize) -> f32 {
+    let mut x = 8.0;
+    for (label, _) in MENUS.iter().take(idx) {
+        x += label.chars().count() as f32 * 8.0 + 18.0;
+    }
+    x
 }
 
 /// Click results of the icon toolbar, applied after the draw-list borrow ends.
@@ -384,7 +413,7 @@ impl EditorApp {
         if self.ui_initialized {
             return;
         }
-        let panel_h = win_h - TOOLBAR_H - BOTTOM_H;
+        let panel_h = win_h - TOOLBAR_H - self.bottom_h;
 
         let tp = self.world.ui.spawn_panel(Panel::new(
             dumpster_fire_engine::resource_manager::ui_manager::layout::Rect {
@@ -688,17 +717,23 @@ impl AppLogic for EditorApp {
                 self.ui_cursor = [position.x as f32, position.y as f32];
                 let cx = self.ui_cursor[0];
                 let cy = self.ui_cursor[1];
-                let (win_w, _) = ctx
+                let (win_w, win_h) = ctx
                     .viewport_grid(app)
                     .map(|g| (g.win_w, g.win_h))
                     .unwrap_or((1280.0, 720.0));
                 let left_div_x = self.outliner_w;
                 let right_div_x = win_w - self.inspector_w;
+                let bottom_div_y = win_h - self.bottom_h;
                 if cy >= TOOLBAR_H {
                     if (cx - left_div_x).abs() < 5.0 {
                         self.div_hover = Some(0);
                     } else if (cx - right_div_x).abs() < 5.0 {
                         self.div_hover = Some(1);
+                    } else if (cy - bottom_div_y).abs() < 5.0
+                        && cx >= left_div_x
+                        && cx < right_div_x
+                    {
+                        self.div_hover = Some(2);
                     } else {
                         self.div_hover = None;
                     }
@@ -708,7 +743,8 @@ impl AppLogic for EditorApp {
                 if let Some(side) = self.div_drag {
                     match side {
                         0 => self.outliner_w = cx.clamp(80.0, 600.0),
-                        _ => self.inspector_w = (win_w - cx).clamp(80.0, 600.0),
+                        1 => self.inspector_w = (win_w - cx).clamp(80.0, 600.0),
+                        _ => self.bottom_h = (win_h - cy).clamp(60.0, 420.0),
                     }
                 }
                 if self.gizmo_drag.is_some() {
@@ -741,13 +777,20 @@ impl AppLogic for EditorApp {
                     let in_inspector = self.ui_cursor[0] >= win_w - self.inspector_w
                         && self.ui_cursor[1] >= TOOLBAR_H;
                     let in_picker = self.picker_open;
+                    let in_menu = self.menu_open.is_some() && {
+                        let (mx, my, mw, mh) = self.menu_rect;
+                        self.ui_cursor[0] >= mx
+                            && self.ui_cursor[0] < mx + mw
+                            && self.ui_cursor[1] >= my
+                            && self.ui_cursor[1] < my + mh
+                    };
                     let in_spawn = self.spawn_menu_open
                         && self.ui_cursor[0] > 200.0
                         && self.ui_cursor[0] < 370.0
                         && self.ui_cursor[1] >= TOOLBAR_H
                         && self.ui_cursor[1] < TOOLBAR_H + 220.0;
                     self.ui_consumed_click =
-                        in_toolbar || in_outliner || in_inspector || in_picker || in_spawn;
+                        in_toolbar || in_outliner || in_inspector || in_picker || in_spawn || in_menu;
                     if !self.ui_consumed_click {
                         // Edit mode owns clicks in the viewport: grab a gizmo arrow
                         // to translate the element selection, else pick an element.
@@ -841,6 +884,7 @@ impl AppLogic for EditorApp {
         if self.picker_open {
             self.draw_file_picker(ctx, app);
         }
+        self.draw_menus(ctx, app);
         // Deferred toolbar tooltip — drawn after every panel so it sits on top.
         if let Some((tx, ty, text)) = self.pending_tooltip.take() {
             dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui::draw_tooltip(
@@ -860,7 +904,7 @@ impl AppLogic for EditorApp {
             Ok(None) => {}
             Err(e) => eprintln!("render_world error: {e:?}"),
         }
-        true
+        !self.quit_requested
     }
 }
 
@@ -900,19 +944,59 @@ impl EditorApp {
             Some(dumpster_fire_engine::render::window::LightingMode::RayTraced)
         );
 
-        let (a, tip) = {
+        let menu_open = self.menu_open;
+        let (a, tip, menu_toggle) = {
             let dl = &mut self.world.ui.draw_list;
             dl.push_panel_bg(0.0, 0.0, win_w, TOOLBAR_H, TOOLBAR_BG);
+            dl.push_hsep(0.0, MENUBAR_H, win_w, [44, 44, 58, 255]);
             dl.push_hsep(0.0, TOOLBAR_H, win_w, SEP);
+
+            // Menu bar row (File / Edit / Window / Help)
+            let mut menu_toggle: Option<usize> = None;
+            {
+                use dumpster_fire_engine::resource_manager::ui_manager::font;
+                let cx = input.cursor[0];
+                let cy = input.cursor[1];
+                for (i, (label, _)) in MENUS.iter().enumerate() {
+                    let lx = menu_label_x(i);
+                    let lw = label.chars().count() as f32 * 8.0 + 14.0;
+                    let hovered = cy < MENUBAR_H && cx >= lx - 7.0 && cx < lx - 7.0 + lw;
+                    let open = menu_open == Some(i);
+                    if open || hovered {
+                        let bg = if open {
+                            [52, 70, 110, 255]
+                        } else {
+                            [44, 44, 60, 255]
+                        };
+                        let solid = dumpster_fire_engine::resource_manager::ui_manager::draw::SOLID;
+                        dl.push_rect(lx - 7.0, 0.0, lw, MENUBAR_H, solid, bg);
+                    }
+                    if hovered && input.left_just_pressed {
+                        menu_toggle = Some(i);
+                    }
+                    // Hover-switch while a menu is open, DCC-style.
+                    if hovered && menu_open.is_some() && menu_open != Some(i) {
+                        menu_toggle = Some(i);
+                    }
+                    let mut tx = lx;
+                    for c in label.chars() {
+                        let uv = font::glyph_rect(c);
+                        if uv != [0.0_f32; 4] {
+                            dl.push_rect(tx, 3.0, 8.0, 16.0, uv, [205, 210, 222, 255]);
+                        }
+                        tx += 8.0;
+                    }
+                }
+            }
 
             // Horizontal icon toolbar — grouped tools with active-state accents
             let mut ui = Ui::with_input(
                 dl,
                 Rect {
                     x: 4.0,
-                    y: 3.0,
+                    y: MENUBAR_H + 3.0,
                     w: win_w - 8.0,
-                    h: TOOLBAR_H - 4.0,
+                    h: TOOLBAR_H - MENUBAR_H - 4.0,
                 },
                 input.clone(),
             );
@@ -966,9 +1050,16 @@ impl EditorApp {
             ui.text_at(win_w - st_w - 10.0, by + 3.0, &status, [130, 180, 130, 255]);
 
             let tip = ui.pending_tooltip.take();
-            (a, tip)
+            (a, tip, menu_toggle)
         };
         self.pending_tooltip = tip;
+        if let Some(i) = menu_toggle {
+            self.menu_open = if self.menu_open == Some(i) && self.ui_left_just_pressed {
+                None
+            } else {
+                Some(i)
+            };
+        }
 
         if a.spawn {
             self.spawn_menu_open = !self.spawn_menu_open;
@@ -1102,12 +1193,123 @@ impl EditorApp {
 // ── Outliner ───────────────────────────────────────────────────────────────
 
 impl EditorApp {
+    fn push_log(&mut self, text: impl Into<String>, color: [u8; 4]) {
+        self.log.push((text.into(), color));
+        if self.log.len() > 200 {
+            self.log.remove(0);
+        }
+    }
+
+    /// Draw the open menu dropdown and route entry clicks. Called after all
+    /// panels so the dropdown sits on top of the outliner/viewport.
+    fn draw_menus(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
+        use dumpster_fire_engine::resource_manager::ui_manager::{draw as uidraw, font};
+        let Some(mi) = self.menu_open else {
+            self.menu_rect = (0.0, 0.0, 0.0, 0.0);
+            return;
+        };
+        let entries = MENUS[mi].1;
+        let mx = menu_label_x(mi) - 7.0;
+        let my = MENUBAR_H;
+        let mw = 176.0_f32;
+        let mh = entries.len() as f32 * 24.0 + 8.0;
+        self.menu_rect = (mx, my, mw, mh);
+
+        let cx = self.ui_cursor[0];
+        let cy = self.ui_cursor[1];
+        let jp = self.ui_left_just_pressed;
+        let mut chosen: Option<usize> = None;
+        {
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_panel_bg(mx, my, mw, mh, [26, 26, 36, 250]);
+            dl.push_line(mx, my, mx + mw, my, 1.0, SEP);
+            dl.push_line(mx + mw, my, mx + mw, my + mh, 1.0, SEP);
+            dl.push_line(mx, my + mh, mx + mw, my + mh, 1.0, SEP);
+            dl.push_line(mx, my, mx, my + mh, 1.0, SEP);
+            for (i, entry) in entries.iter().enumerate() {
+                let iy = my + i as f32 * 24.0 + 4.0;
+                let hov = cx >= mx + 2.0 && cx < mx + mw - 2.0 && cy >= iy && cy < iy + 20.0;
+                let bg = if hov {
+                    [62, 84, 130, 255]
+                } else {
+                    [30, 30, 42, 255]
+                };
+                dl.push_rect(mx + 2.0, iy, mw - 4.0, 20.0, uidraw::SOLID, bg);
+                let mut ex = mx + 10.0;
+                for c in entry.chars() {
+                    let uv = font::glyph_rect(c);
+                    if c != ' ' && uv != [0.0_f32; 4] {
+                        dl.push_rect(ex, iy + 2.0, 8.0, 16.0, uv, [205, 208, 220, 255]);
+                    }
+                    ex += 8.0;
+                }
+                if hov && jp {
+                    chosen = Some(i);
+                }
+            }
+        }
+
+        // Click outside the dropdown and below the menu bar closes it.
+        if jp && chosen.is_none() && cy >= MENUBAR_H {
+            let inside = cx >= mx && cx < mx + mw && cy >= my && cy < my + mh;
+            if !inside {
+                self.menu_open = None;
+            }
+        }
+
+        let Some(ei) = chosen else { return };
+        self.menu_open = None;
+        match (mi, ei) {
+            (0, 0) => self.picker_open = true,
+            (0, 1) => self.quit_requested = true,
+            (1, 0) => {
+                if let Some(e) = self.edit.as_mut() {
+                    e.undo();
+                } else {
+                    self.push_log("LogEditor: undo — enter mesh edit mode (E).", [180, 160, 110, 255]);
+                }
+            }
+            (1, 1) => {
+                if let Some(e) = self.edit.as_mut() {
+                    e.redo();
+                }
+            }
+            (1, 2) => self.duplicate_selected(),
+            (1, 3) => {
+                if let (Some(ah), Some((lh, sh))) = (self.world.selection, self.main_stage) {
+                    self.world.despawn_actor(lh, sh, ah);
+                    self.actors.retain(|&h| h != ah);
+                    self.world.selection = None;
+                }
+            }
+            (2, 4) => self.stats_open = !self.stats_open,
+            (2, li) => {
+                let layout = match li {
+                    0 => ViewportLayout::Single,
+                    1 => ViewportLayout::TwoColumns,
+                    2 => ViewportLayout::TwoRows,
+                    _ => ViewportLayout::FourQuadrant,
+                };
+                if let Some(grid) = ctx.viewport_grid_mut(app) {
+                    grid.set_layout(layout, &[]);
+                }
+            }
+            (3, _) => {
+                self.push_log(
+                    "LogEditor: DumpsterFire — native GUI + RT lighting, zero UI deps.",
+                    [130, 180, 220, 255],
+                );
+            }
+            _ => {}
+        }
+    }
+
     fn draw_outliner(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
         let (_, win_h) = ctx
             .viewport_grid(app)
             .map(|g| (g.win_w, g.win_h))
             .unwrap_or((1280.0, 720.0));
-        let panel_h = win_h - TOOLBAR_H - BOTTOM_H;
+        let panel_h = win_h - TOOLBAR_H - self.bottom_h;
         let ow = self.outliner_w;
         let x = 0.0_f32;
         let y = TOOLBAR_H;
@@ -1118,7 +1320,13 @@ impl EditorApp {
 
         // Collect actor rows before taking draw_list borrow.
         // Each row: (handle, icon_color, is_selected, hovered, clicked)
-        let mut rows: ThinVec<(ActorHandle, [u8; 4], bool, bool, bool)> = ThinVec::new();
+        let mut rows: ThinVec<(
+            ActorHandle,
+            (dumpster_fire_engine::resource_manager::ui_manager::font::IconId, [u8; 4]),
+            bool,
+            bool,
+            bool,
+        )> = ThinVec::new();
         let mut clicked_ah: Option<ActorHandle> = None;
         if let Some((lh, sh)) = self.main_stage
             && let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh))
@@ -1143,7 +1351,7 @@ impl EditorApp {
                 if clicked {
                     clicked_ah = Some(ah);
                 }
-                rows.push((ah, actor_icon_color(actor), is_sel, hovered, clicked));
+                rows.push((ah, actor_icon(actor), is_sel, hovered, clicked));
                 row_y += row_h;
             }
         }
@@ -1173,7 +1381,7 @@ impl EditorApp {
         } else {
             SEP
         };
-        dl.push_vsep(x + ow, y, panel_h + BOTTOM_H, div_col);
+        dl.push_vsep(x + ow, y, panel_h + self.bottom_h, div_col);
 
         let mut row_y = content_y;
         if let Some((lh, sh)) = self.main_stage
@@ -1187,7 +1395,7 @@ impl EditorApp {
         if let Some((lh, sh)) = self.main_stage
             && let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh))
         {
-            for (ah, icon_col, is_sel, hovered, _) in &rows {
+            for (ah, (icon_id, icon_col), is_sel, hovered, _) in &rows {
                 let bg = if *is_sel {
                     [55, 95, 155, 255]
                 } else if *hovered {
@@ -1198,7 +1406,7 @@ impl EditorApp {
                     [24, 24, 30, 255]
                 };
                 dl.push_rect(x, row_y, ow, row_h - 1.0, uidraw::SOLID, bg);
-                dl.push_rect(x + 6.0, row_y + 4.0, 14.0, 14.0, uidraw::SOLID, *icon_col);
+                dl.push_rect(x + 5.0, row_y + 3.0, 16.0, 16.0, font::icon_rect(*icon_id), *icon_col);
                 let label: &str = stage
                     .actors
                     .get(*ah)
@@ -1238,6 +1446,38 @@ impl EditorApp {
     }
 }
 
+/// (icon, tint) for an outliner row: lights get the grip cluster, cameras the
+/// 3D axis, meshes the box; anything else the layers glyph.
+fn actor_icon(
+    actor: &dumpster_fire_engine::resource_manager::manager::Actor,
+) -> (dumpster_fire_engine::resource_manager::ui_manager::font::IconId, [u8; 4]) {
+    use dumpster_fire_engine::resource_manager::ui_manager::font::IconId;
+    let color = actor_icon_color(actor);
+    for se in actor.sub_entities.iter().flatten() {
+        if let ActorType::Utility(_) = &se.actor_type
+            && let Some(Component::Utility(uc)) = &se.components[ComponentType::Utility.index()]
+        {
+            if uc.light.is_some() {
+                return (IconId::Grip, color);
+            }
+            if uc.camera.is_some() {
+                return (IconId::Axis, color);
+            }
+        }
+    }
+    let is_mesh = actor.sub_entities.iter().flatten().any(|se| {
+        matches!(
+            &se.actor_type,
+            ActorType::Environment(_) | ActorType::Character(_) | ActorType::Item(_)
+        )
+    });
+    if is_mesh {
+        (IconId::Box, color)
+    } else {
+        (IconId::Layers, color)
+    }
+}
+
 fn actor_icon_color(actor: &dumpster_fire_engine::resource_manager::manager::Actor) -> [u8; 4] {
     for se in actor.sub_entities.iter().flatten() {
         match &se.actor_type {
@@ -1270,7 +1510,7 @@ impl EditorApp {
             .viewport_grid(app)
             .map(|g| (g.win_w, g.win_h))
             .unwrap_or((1280.0, 720.0));
-        let panel_h = win_h - TOOLBAR_H - BOTTOM_H;
+        let panel_h = win_h - TOOLBAR_H - self.bottom_h;
         let iw = self.inspector_w;
         let ix = win_w - iw;
         let iy = TOOLBAR_H;
@@ -1296,7 +1536,7 @@ impl EditorApp {
             } else {
                 SEP
             };
-            dl.push_vsep(ix, iy, panel_h + BOTTOM_H, div_col);
+            dl.push_vsep(ix, iy, panel_h + self.bottom_h, div_col);
         };
 
         // Helper: draw empty panel chrome and return
@@ -1496,11 +1736,16 @@ impl EditorApp {
             .viewport_grid(app)
             .map(|g| (g.win_w, g.win_h))
             .unwrap_or((1280.0, 720.0));
-        let by = win_h - BOTTOM_H;
+        let by = win_h - self.bottom_h;
         let dl = &mut self.world.ui.draw_list;
 
-        dl.push_panel_bg(0.0, by, win_w, BOTTOM_H, PANEL_BG);
-        dl.push_hsep(0.0, by, win_w, SEP);
+        dl.push_panel_bg(0.0, by, win_w, self.bottom_h, PANEL_BG);
+        let div_col = if self.div_hover == Some(2) || self.div_drag == Some(2) {
+            [120, 160, 220, 255u8]
+        } else {
+            SEP
+        };
+        dl.push_hsep(0.0, by, win_w, div_col);
         dl.push_title_bar(0.0, by, win_w, TITLEBAR_H, TITLEBAR_BG, SEP);
 
         // Title "OUTPUT LOG"
@@ -1548,15 +1793,11 @@ impl EditorApp {
         // Divider between stats and content
         dl.push_hsep(0.0, stats_y + 18.0, win_w, [42, 42, 56, 255]);
 
-        // Log content area — static placeholder lines in UE style
-        let log_lines: &[(&str, [u8; 4])] = &[
-            ("LogInit: Engine initialized.", [140, 200, 140, 255]),
-            ("LogRenderer: Overlay pipeline online.", [130, 180, 220, 255]),
-            ("LogEditor: Scene loaded.", [180, 180, 180, 255]),
-            ("LogEditor: Ready.", [100, 140, 100, 255]),
-        ];
+        // Log content — newest lines that fit, tail-anchored.
         let line_y_start = stats_y + 22.0;
-        for (i, (text, color)) in log_lines.iter().enumerate() {
+        let avail = ((win_h - 6.0 - line_y_start) / 18.0).max(0.0) as usize;
+        let skip = self.log.len().saturating_sub(avail);
+        for (i, (text, color)) in self.log.iter().skip(skip).enumerate() {
             let ly = line_y_start + i as f32 * 18.0;
             if ly + 16.0 > win_h - 4.0 {
                 break;
@@ -2464,6 +2705,18 @@ fn main() -> ForgeResult<()> {
         edit_drag: None,
         shift_held: false,
         pending_tooltip: None,
+        menu_open: None,
+        menu_rect: (0.0, 0.0, 0.0, 0.0),
+        bottom_h: 140.0,
+        quit_requested: false,
+        log: {
+            let mut l = ThinVec::new();
+            l.push(("LogInit: Engine initialized.".to_string(), [140, 200, 140, 255u8]));
+            l.push(("LogRenderer: Overlay pipeline online.".to_string(), [130, 180, 220, 255]));
+            l.push(("LogEditor: Scene loaded.".to_string(), [180, 180, 180, 255]));
+            l.push(("LogEditor: Ready.".to_string(), [100, 140, 100, 255]));
+            l
+        },
     })
     .run()
 }
