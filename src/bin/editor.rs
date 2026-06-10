@@ -171,6 +171,30 @@ struct EditorApp {
     edit: Option<EditSession>,
     edit_drag: Option<EditDrag>,
     shift_held: bool,
+
+    /// Tooltip deferred from a hovered toolbar icon, drawn last (always on top).
+    pending_tooltip: Option<(f32, f32, String)>,
+}
+
+/// Click results of the icon toolbar, applied after the draw-list borrow ends.
+#[derive(Default)]
+struct ToolbarActions {
+    spawn: bool,
+    object_mode: bool,
+    edit_mode: bool,
+    t: bool,
+    r: bool,
+    s: bool,
+    snap: bool,
+    grid: bool,
+    dup: bool,
+    del: bool,
+    undo: bool,
+    redo: bool,
+    frame: bool,
+    layout: bool,
+    tonemap: bool,
+    stats: bool,
 }
 
 /// Active edit-mode element translate-drag — a gizmo arrow grabbed at the
@@ -810,6 +834,15 @@ impl AppLogic for EditorApp {
         if self.picker_open {
             self.draw_file_picker(ctx, app);
         }
+        // Deferred toolbar tooltip — drawn after every panel so it sits on top.
+        if let Some((tx, ty, text)) = self.pending_tooltip.take() {
+            dumpster_fire_engine::resource_manager::ui_manager::immediate::Ui::draw_tooltip(
+                &mut self.world.ui.draw_list,
+                tx,
+                ty,
+                &text,
+            );
+        }
 
         self.ui_left_just_pressed = false;
         self.ui_consumed_click = false;
@@ -851,119 +884,130 @@ impl EditorApp {
         };
         let fps_str = format!("{:.0}fps", self.fps_display);
         let gizmo_mode = self.gizmo_mode;
-        let mut grid_enabled = self.grid_enabled;
+        let in_edit = self.edit.is_some();
+        let snap = self.snap_enabled;
+        let stats = self.stats_open;
+        let grid_on = self.grid_enabled;
 
-        let t_col = if gizmo_mode == GizmoMode::Translate {
-            [70, 160, 80, 255u8]
-        } else {
-            [55, 55, 70, 255]
-        };
-        let r_col = if gizmo_mode == GizmoMode::Rotate {
-            [70, 160, 80, 255u8]
-        } else {
-            [55, 55, 70, 255]
-        };
-        let s_col = if gizmo_mode == GizmoMode::Scale {
-            [70, 160, 80, 255u8]
-        } else {
-            [55, 55, 70, 255]
-        };
-
-        let (lc, fc, sc, tc, tile_x, tile_y) = {
+        let (a, tip) = {
             let dl = &mut self.world.ui.draw_list;
             dl.push_panel_bg(0.0, 0.0, win_w, TOOLBAR_H, TOOLBAR_BG);
             dl.push_hsep(0.0, TOOLBAR_H, win_w, SEP);
 
-            // Horizontal toolbar — cursor advances on X axis
+            // Horizontal icon toolbar — grouped tools with active-state accents
             let mut ui = Ui::with_input(
                 dl,
                 Rect {
                     x: 4.0,
-                    y: 4.0,
+                    y: 3.0,
                     w: win_w - 8.0,
                     h: TOOLBAR_H - 4.0,
                 },
                 input.clone(),
             );
 
-            let lc = ui.hbutton(layout_label, 52.0);
-            ui.hcheckbox("Grid", &mut grid_enabled);
-            let fc = ui.hbutton("Frame", 48.0);
-            let sc = ui.hbutton("+Actor", 56.0);
-            ui.hgap(6.0);
-
-            // Gizmo T / R / S tiles
-            let tile_x = ui.cursor[0];
-            let tile_y = ui.cursor[1];
-            ui.htile(22.0, 20.0, t_col);
-            ui.htile(22.0, 20.0, r_col);
-            ui.htile(22.0, 20.0, s_col);
-            // Labels on tiles
-            ui.draw.push_rect(
-                tile_x + 2.0,
-                tile_y + 2.0,
-                8.0,
-                16.0,
-                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('T'),
-                [210, 210, 220, 255],
+            use dumpster_fire_engine::resource_manager::ui_manager::font::IconId;
+            let mut a = ToolbarActions::default();
+            a.spawn = ui.hicon(IconId::Plus, false, "Add actor");
+            ui.hsep_v(22.0);
+            a.object_mode = ui.hicon(IconId::Pointer, !in_edit, "Object mode");
+            a.edit_mode = ui.hicon(IconId::Box, in_edit, "Mesh edit mode (E)");
+            ui.hsep_v(22.0);
+            a.t = ui.hicon(
+                IconId::Move,
+                gizmo_mode == GizmoMode::Translate,
+                "Translate (G)",
             );
-            ui.draw.push_rect(
-                tile_x + 24.0,
-                tile_y + 2.0,
-                8.0,
-                16.0,
-                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('R'),
-                [210, 210, 220, 255],
+            a.r = ui.hicon(IconId::Rotate, gizmo_mode == GizmoMode::Rotate, "Rotate (R)");
+            a.s = ui.hicon(IconId::Scale, gizmo_mode == GizmoMode::Scale, "Scale (S)");
+            a.snap = ui.hicon(IconId::Ruler, snap, "Snap (X)");
+            a.grid = ui.hicon(IconId::Grid, grid_on, "Grid");
+            ui.hsep_v(22.0);
+            a.dup = ui.hicon(IconId::Copy, false, "Duplicate (Ctrl+D)");
+            a.del = ui.hicon(IconId::Trash, false, "Delete (Del)");
+            a.undo = ui.hicon(IconId::Undo, false, "Undo (Ctrl+Z)");
+            a.redo = ui.hicon(IconId::Redo, false, "Redo (Ctrl+Shift+Z)");
+            ui.hsep_v(22.0);
+            a.frame = ui.hicon(IconId::Axis, false, "Frame (F)");
+            a.layout = ui.hicon(IconId::Layers, false, "Viewport layout");
+            a.tonemap = ui.hicon(IconId::Settings, false, "Tonemap");
+            a.stats = ui.hicon(
+                if stats { IconId::Eye } else { IconId::EyeOff },
+                stats,
+                "Stats (F2)",
             );
-            ui.draw.push_rect(
-                tile_x + 46.0,
-                tile_y + 2.0,
-                8.0,
-                16.0,
-                dumpster_fire_engine::resource_manager::ui_manager::font::glyph_rect('S'),
-                [210, 210, 220, 255],
-            );
-            ui.hgap(6.0);
+            ui.hgap(10.0);
 
-            let tc = ui.hbutton(tm_label, 48.0);
-            ui.hgap(8.0);
-            // FPS as inline text (no button chrome)
-            let fps_x = ui.cursor[0];
-            let fps_y = ui.cursor[1];
-            ui.text_at(fps_x, fps_y + 2.0, &fps_str, [130, 180, 130, 255]);
+            // Mode badge + right-aligned status line
+            let by = ui.cursor[1];
+            let badge = if in_edit { "EDIT" } else { "OBJ" };
+            let bc = if in_edit {
+                [255, 190, 90, 255]
+            } else {
+                [150, 160, 180, 255]
+            };
+            let bx = ui.cursor[0];
+            ui.text_at(bx, by + 3.0, badge, bc);
+            let status = format!("{layout_label} | {tm_label} | {fps_str}");
+            let st_w = status.chars().count() as f32 * 8.0;
+            ui.text_at(win_w - st_w - 10.0, by + 3.0, &status, [130, 180, 130, 255]);
 
-            (lc, fc, sc, tc, tile_x, tile_y)
+            let tip = ui.pending_tooltip.take();
+            (a, tip)
         };
+        self.pending_tooltip = tip;
 
-        self.grid_enabled = grid_enabled;
-
-        // Gizmo tile click detection
-        if self.ui_left_just_pressed {
-            let cx = self.ui_cursor[0];
-            let cy = self.ui_cursor[1];
-            if cy >= tile_y && cy < tile_y + 20.0 {
-                if cx >= tile_x && cx < tile_x + 22.0 {
-                    self.gizmo_mode = GizmoMode::Translate;
-                } else if cx >= tile_x + 22.0 && cx < tile_x + 44.0 {
-                    self.gizmo_mode = GizmoMode::Rotate;
-                } else if cx >= tile_x + 44.0 && cx < tile_x + 66.0 {
-                    self.gizmo_mode = GizmoMode::Scale;
-                }
+        if a.spawn {
+            self.spawn_menu_open = !self.spawn_menu_open;
+        }
+        if (a.object_mode && self.edit.is_some()) || (a.edit_mode && self.edit.is_none()) {
+            self.toggle_edit_mode();
+        }
+        if a.t {
+            self.gizmo_mode = GizmoMode::Translate;
+        }
+        if a.r {
+            self.gizmo_mode = GizmoMode::Rotate;
+        }
+        if a.s {
+            self.gizmo_mode = GizmoMode::Scale;
+        }
+        if a.snap {
+            self.snap_enabled = !self.snap_enabled;
+        }
+        if a.grid {
+            self.grid_enabled = !self.grid_enabled;
+        }
+        if a.dup {
+            self.duplicate_selected();
+        }
+        if a.del && let (Some(ah), Some((lh, sh))) = (self.world.selection, self.main_stage) {
+            self.world.despawn_actor(lh, sh, ah);
+            self.actors.retain(|&h| h != ah);
+            self.world.selection = None;
+        }
+        if a.undo && let Some(e) = self.edit.as_mut() {
+            e.undo();
+        }
+        if a.redo && let Some(e) = self.edit.as_mut() {
+            e.redo();
+        }
+        if a.frame {
+            if self.world.selection.is_some() {
+                self.frame_selected(ctx, app);
+            } else if let Some(aabb) = ctx.gltf_union_aabb_for_world(&self.world) {
+                ctx.fit_all_panes_to_aabb(app, &aabb);
             }
         }
-
-        if lc && let Some(grid) = ctx.viewport_grid_mut(app) {
+        if a.layout && let Some(grid) = ctx.viewport_grid_mut(app) {
             let next = grid.layout.next();
             grid.set_layout(next, &[]);
         }
-        if fc && let Some(aabb) = ctx.gltf_union_aabb_for_world(&self.world) {
-            ctx.fit_all_panes_to_aabb(app, &aabb);
-        }
-        if sc {
-            self.spawn_menu_open = !self.spawn_menu_open;
-        }
-        if tc {
+        if a.tonemap {
             self.world.tonemap_op = (self.world.tonemap_op + 1) % 3;
+        }
+        if a.stats {
+            self.stats_open = !self.stats_open;
         }
 
         // Spawn dropdown menu
@@ -2403,6 +2447,7 @@ fn main() -> ForgeResult<()> {
         edit: None,
         edit_drag: None,
         shift_held: false,
+        pending_tooltip: None,
     })
     .run()
 }

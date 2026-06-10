@@ -13,6 +13,9 @@ pub struct Ui<'a> {
     pub input: UiInputState,
     pub cursor: [f32; 2],
     pub width: f32,
+    /// Tooltip requested by a hovered widget this frame: `(x, y, text)`.
+    /// Deferred so the caller can draw it after all panels (always on top).
+    pub pending_tooltip: Option<(f32, f32, String)>,
 }
 
 impl<'a> Ui<'a> {
@@ -22,6 +25,7 @@ impl<'a> Ui<'a> {
             input: UiInputState::default(),
             cursor: [rect.x, rect.y],
             width: rect.w,
+            pending_tooltip: None,
         }
     }
 
@@ -31,6 +35,7 @@ impl<'a> Ui<'a> {
             input,
             cursor: [rect.x, rect.y],
             width: rect.w,
+            pending_tooltip: None,
         }
     }
 
@@ -297,5 +302,85 @@ impl<'a> Ui<'a> {
     /// Horizontal gap — advances cursor[0] without drawing.
     pub fn hgap(&mut self, px: f32) {
         self.cursor[0] += px;
+    }
+
+    /// Thin vertical separator for horizontal toolbars (tool-group divider).
+    pub fn hsep_v(&mut self, h: f32) {
+        self.draw.push_rect(
+            self.cursor[0] + 3.0,
+            self.cursor[1] + 1.0,
+            1.0,
+            h - 2.0,
+            draw::SOLID,
+            [70, 70, 88, 255],
+        );
+        self.cursor[0] += 9.0;
+    }
+
+    /// 22×22 icon button for horizontal toolbars, drawn from the baked icon
+    /// region of the font atlas. `active` renders the selected-tool accent
+    /// (DCC-style mode highlight). On hover the tooltip is *deferred* into
+    /// `pending_tooltip` so the caller can draw it last (above all panels).
+    /// Returns true on click.
+    pub fn hicon(&mut self, icon: font::IconId, active: bool, tooltip: &str) -> bool {
+        let x = self.cursor[0];
+        let y = self.cursor[1];
+        let sz = 22.0_f32;
+        let hovered = self.hovered(x, y, sz, sz);
+        let clicked = hovered && self.input.left_just_pressed;
+        let bg = if active {
+            [36, 98, 176, 255] // selected-tool accent
+        } else if clicked {
+            [110, 140, 200, 255]
+        } else if hovered {
+            [72, 72, 96, 255]
+        } else {
+            [47, 47, 61, 255]
+        };
+        self.draw.push_rect(x, y, sz, sz, draw::SOLID, bg);
+        // Active tools get a bottom accent line, like DCC mode tabs.
+        if active {
+            self.draw
+                .push_rect(x, y + sz - 2.0, sz, 2.0, draw::SOLID, [120, 190, 255, 255]);
+        }
+        let tint = if active || hovered {
+            [255, 255, 255, 255]
+        } else {
+            [198, 202, 214, 255]
+        };
+        let pad = (sz - font::ICON_W as f32) * 0.5;
+        self.draw.push_rect(
+            x + pad,
+            y + pad,
+            font::ICON_W as f32,
+            font::ICON_H as f32,
+            font::icon_rect(icon),
+            tint,
+        );
+        if hovered && !tooltip.is_empty() {
+            self.pending_tooltip = Some((x, y + sz + 6.0, tooltip.to_string()));
+        }
+        self.cursor[0] += sz + 3.0;
+        clicked
+    }
+
+    /// Draw a tooltip bubble at (x, y) — call after all panels so it sits on top.
+    pub fn draw_tooltip(draw: &mut DrawList, x: f32, y: f32, text: &str) {
+        let w = text.chars().count() as f32 * font::GLYPH_W as f32 + 10.0;
+        let h = 20.0_f32;
+        draw.push_rect(x, y, w, h, draw::SOLID, [16, 16, 22, 246]);
+        let bc = [96, 96, 128, 255];
+        draw.push_rect(x, y, w, 1.0, draw::SOLID, bc);
+        draw.push_rect(x, y + h - 1.0, w, 1.0, draw::SOLID, bc);
+        draw.push_rect(x, y, 1.0, h, draw::SOLID, bc);
+        draw.push_rect(x + w - 1.0, y, 1.0, h, draw::SOLID, bc);
+        let mut tx = x + 5.0;
+        for c in text.chars() {
+            let uv = font::glyph_rect(c);
+            if c != ' ' && uv != [0.0_f32; 4] {
+                draw.push_rect(tx, y + 2.0, 8.0, 16.0, uv, [214, 218, 228, 255]);
+            }
+            tx += font::GLYPH_W as f32;
+        }
     }
 }
