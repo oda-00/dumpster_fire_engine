@@ -8,7 +8,63 @@ pub const GLYPH_H: u32 = 16;
 pub const COLS: u32 = 16;
 pub const ROWS: u32 = 6;
 pub const ATLAS_W: u32 = GLYPH_W * COLS;
-pub const ATLAS_H: u32 = GLYPH_H * ROWS;
+/// Height of the glyph block (icons are appended below it).
+pub const GLYPH_REGION_H: u32 = GLYPH_H * ROWS;
+
+// ── Icon region ─────────────────────────────────────────────────────────────
+// Baked offline from assets/icons/lucide/*.svg via rsvg-convert (tools/bake_icons.py)
+// into a packed R8 alpha sheet, embedded raw — no decoder, exactly like FONT_DATA.
+pub const ICON_W: u32 = 16;
+pub const ICON_H: u32 = 16;
+pub const ICON_COLS: u32 = ATLAS_W / ICON_W; // 8
+pub const ICON_COUNT: u32 = 20;
+pub const ICON_ROWS: u32 = ICON_COUNT.div_ceil(ICON_COLS); // 3
+/// Full atlas height = glyph block + icon rows.
+pub const ATLAS_H: u32 = GLYPH_REGION_H + ICON_ROWS * ICON_H;
+
+/// Packed R8 icon sheet (ICON_COLS × ICON_ROWS of ICON_W×ICON_H alpha masks).
+const ICON_SHEET: &[u8] = include_bytes!("../../../assets/icons/ui_icons.r8");
+
+/// Stable icon indices — must match the order in `tools/bake_icons.py`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum IconId {
+    Box = 0,
+    Move,
+    Rotate,
+    Scale,
+    Pointer,
+    Grid,
+    Eye,
+    EyeOff,
+    Trash,
+    Copy,
+    Undo,
+    Redo,
+    Plus,
+    Minus,
+    Layers,
+    Settings,
+    Ruler,
+    Axis,
+    Grip,
+    Pen,
+}
+
+/// UV rect for an icon (icons live in the region below the glyph block).
+pub fn icon_rect(id: IconId) -> [f32; 4] {
+    let i = id as u32;
+    let col = i % ICON_COLS;
+    let row = i / ICON_COLS;
+    let x0 = col * ICON_W;
+    let y0 = GLYPH_REGION_H + row * ICON_H;
+    [
+        x0 as f32 / ATLAS_W as f32,
+        y0 as f32 / ATLAS_H as f32,
+        (x0 + ICON_W) as f32 / ATLAS_W as f32,
+        (y0 + ICON_H) as f32 / ATLAS_H as f32,
+    ]
+}
 
 /// UV rect (u0,v0,u1,v1) for ASCII char `c`. Returns `[0,0,0,0]` for chars
 /// outside the printable range (treated as zero-width / skipped).
@@ -244,5 +300,45 @@ pub fn bake_atlas() -> thin_vec::ThinVec<u8> {
             }
         }
     }
+    // Icon region: copy the packed R8 sheet directly below the glyph block.
+    let icon_off = (GLYPH_REGION_H * ATLAS_W) as usize;
+    let n = ICON_SHEET.len().min(out.len() - icon_off);
+    out[icon_off..icon_off + n].copy_from_slice(&ICON_SHEET[..n]);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_dims_include_icon_region() {
+        assert_eq!(ATLAS_W, 128);
+        assert_eq!(ATLAS_H, GLYPH_REGION_H + ICON_ROWS * ICON_H);
+        // Embedded sheet is exactly the icon region size.
+        assert_eq!(ICON_SHEET.len() as u32, ICON_ROWS * ICON_H * ATLAS_W);
+    }
+
+    #[test]
+    fn bake_atlas_size_and_icon_ink() {
+        let a = bake_atlas();
+        assert_eq!(a.len() as u32, ATLAS_W * ATLAS_H);
+        let icon_off = (GLYPH_REGION_H * ATLAS_W) as usize;
+        assert!(
+            a[icon_off..].iter().any(|&b| b != 0),
+            "icon region should contain rasterized ink"
+        );
+    }
+
+    #[test]
+    fn icon_rects_in_range_below_glyphs_and_distinct() {
+        let mv = icon_rect(IconId::Move);
+        let tr = icon_rect(IconId::Trash);
+        for v in mv {
+            assert!((0.0..=1.0).contains(&v));
+        }
+        assert_ne!(mv, tr);
+        // Icons sit below the glyph block.
+        assert!(mv[1] >= GLYPH_REGION_H as f32 / ATLAS_H as f32);
+    }
 }
