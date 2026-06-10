@@ -37,6 +37,12 @@ void main() {
             }
         }
     }
-    float t = 0.5 * (dir.y + 1.0);
-    payload = vec4(mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t), 0.0);
+    float h = dir.y;
+    vec3 ground  = vec3(0.12, 0.12, 0.14);
+    vec3 horizon = vec3(0.85, 0.88, 0.95);
+    vec3 zenith  = vec3(0.35, 0.55, 0.95);
+    vec3 col = h < 0.0
+        ? mix(horizon, ground, clamp(-h * 3.0, 0.0, 1.0))
+        : mix(horizon, zenith, clamp(h * 1.5, 0.0, 1.0));
+    payload = vec4(col, 0.0);
 }

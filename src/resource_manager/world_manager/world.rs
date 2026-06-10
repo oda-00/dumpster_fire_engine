@@ -34,6 +34,10 @@ pub struct World {
     pub selection: Option<ActorHandle>,
     /// Active tonemap operator: 0=Linear 1=Reinhard 2=ACES.
     pub tonemap_op: u32,
+    /// Editor viewport: draw the procedural world grid (DebugLines forge).
+    pub grid_enabled: bool,
+    /// Editor viewport: draw the procedural sky background (Sky forge).
+    pub sky_enabled: bool,
     /// Reusable per-tick effect buffer — capacity is preserved across ticks via
     /// `mem::take` + `clear` so steady-state operation is allocation-free.
     tick_effects: crate::resource_manager::event_manager::EffectArena,
@@ -54,6 +58,8 @@ impl World {
             ui: crate::resource_manager::ui_manager::UiManager::new(),
             selection: None,
             tonemap_op: 2, // ACES default
+            grid_enabled: true,
+            sky_enabled: true,
             tick_effects: crate::resource_manager::event_manager::EffectArena::with_capacity(4096),
             tick_chain: ThinVec::with_capacity(16),
         }

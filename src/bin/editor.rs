@@ -205,6 +205,7 @@ const MENUS: [(&str, &[&str]); 4] = [
             "Layout: Quad",
             "Toggle Stats",
             "Maximize Pane",
+            "Toggle Sky",
         ],
     ),
     ("Help", &["About"]),
@@ -1099,6 +1100,7 @@ impl EditorApp {
         }
         if a.grid {
             self.grid_enabled = !self.grid_enabled;
+            self.world.grid_enabled = self.grid_enabled;
         }
         if a.dup {
             self.duplicate_selected();
@@ -1390,6 +1392,7 @@ impl EditorApp {
             }
             (2, 4) => self.stats_open = !self.stats_open,
             (2, 5) => self.toggle_maximize_pane(ctx, app),
+            (2, 6) => self.world.sky_enabled = !self.world.sky_enabled,
             (2, li) => {
                 let layout = match li {
                     0 => ViewportLayout::Single,

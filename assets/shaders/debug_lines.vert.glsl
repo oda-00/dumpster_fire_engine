@@ -69,8 +69,22 @@ void main() {
     float t = float(center_off) * pc.spacing.x;
     if (is_axis_x || is_axis_z) t = 0.0;
 
-    float u_endpoint = (end == 0u) ? -pc.extent.x : pc.extent.x;
-    float v_endpoint = (end == 0u) ? -pc.extent.y : pc.extent.y;
+    // ── Segmented endpoints ──────────────────────────────────────────────
+    // In single-plane mode (persp flag off) each grid line is split into
+    // SEGMENTS short pieces instead of one full-extent line: long lines
+    // passing through / behind a perspective eye hit degenerate clip paths
+    // (giant filled wedges on llvmpipe). The plane stride doubles as the
+    // segment id — the host draws per_plane * SEGMENTS lines and
+    // `plane_id_local` (unused for plane selection in single-plane mode)
+    // indexes the piece.
+    const uint SEGMENTS = 16u;
+    uint seg = persp ? 0u : plane_id_local;
+    float f0 = persp ? 0.0 : float(seg) / float(SEGMENTS);
+    float f1 = persp ? 1.0 : float(seg + 1u) / float(SEGMENTS);
+    float span0 = -pc.extent.x + (2.0 * pc.extent.x) * f0;
+    float span1 = -pc.extent.x + (2.0 * pc.extent.x) * f1;
+    float u_endpoint = (end == 0u) ? span0 : span1;
+    float v_endpoint = (end == 0u) ? span0 : span1;
 
     // ── Solve (u, v) in plane-local space ────────────────────────────────
     float u, v;

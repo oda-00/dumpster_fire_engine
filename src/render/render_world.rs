@@ -238,6 +238,32 @@ pub fn collect_and_submit(
         all_plans.extend(plans);
     }
 
+    // Step 6.4 — editor sky + grid: procedural draws appended after the
+    // meshes. Sky fills untouched far-plane pixels (LESS_OR_EQUAL); the grid
+    // alpha-blends over it. Per-pane push constants are built in draw_frame.
+    {
+        use crate::forge_master::frame::{FrameId, GraphicsFramePlan};
+        use crate::forge_master::ore::GraphicsOreKind;
+        if world.sky_enabled {
+            all_plans.push(GraphicsFramePlan::new(
+                FrameId::new(9000),
+                "editor_sky",
+                GraphicsOreKind::Sky,
+                3,
+            ));
+        }
+        if world.grid_enabled {
+            // Vertex count is recomputed per pane in draw_frame (ortho panes
+            // draw one plane, perspective draws three).
+            all_plans.push(GraphicsFramePlan::new(
+                FrameId::new(9001),
+                "editor_grid",
+                GraphicsOreKind::DebugLines,
+                0,
+            ));
+        }
+    }
+
     // Step 6.5 — RT upkeep: gather TLAS instances from the draw plans
     // (BLAS address + model→world transform), pack the lights UBO, and let
     // the window rebuild its TLAS / upload lights. No-op without RT support.

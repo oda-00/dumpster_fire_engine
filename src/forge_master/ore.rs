@@ -39,16 +39,22 @@ pub enum GraphicsOreKind {
     /// its own pass between the scene pass and the overlay pass; reads the
     /// HDR scene image at set 0 binding 0 and writes the swapchain image.
     Tonemap,
+    /// Procedural sky background — fullscreen triangle pinned to the far
+    /// plane (depth LESS_OR_EQUAL, write off) drawn after opaque geometry.
+    /// The fragment shader reconstructs the view ray from a 64-byte inv_vp
+    /// push constant and evaluates the same gradient as the RT miss shader.
+    Sky,
 }
 
 impl GraphicsOreKind {
-    pub const ALL: [GraphicsOreKind; 6] = [
+    pub const ALL: [GraphicsOreKind; 7] = [
         GraphicsOreKind::ForwardLit,
         GraphicsOreKind::SkinnedForwardLit,
         GraphicsOreKind::Ui,
         GraphicsOreKind::GaussianSplat,
         GraphicsOreKind::DebugLines,
         GraphicsOreKind::Tonemap,
+        GraphicsOreKind::Sky,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -136,7 +142,7 @@ impl OreKind {
     pub const COMPUTE_COUNT: usize = Self::COMPUTE_ALL.len();
 
     /// Every kind, compute + every graphics sub-kind, in `index()` order.
-    pub const ALL: [OreKind; 20] = [
+    pub const ALL: [OreKind; 21] = [
         OreKind::RayTrace,
         OreKind::Denoise,
         OreKind::SignedDistanceField,
@@ -157,6 +163,7 @@ impl OreKind {
         OreKind::Graphics(GraphicsOreKind::GaussianSplat),
         OreKind::Graphics(GraphicsOreKind::DebugLines),
         OreKind::Graphics(GraphicsOreKind::Tonemap),
+        OreKind::Graphics(GraphicsOreKind::Sky),
     ];
 
     pub const COUNT: usize = Self::ALL.len();

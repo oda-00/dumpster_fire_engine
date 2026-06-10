@@ -106,6 +106,12 @@ pub struct GraphicsState {
     /// Phase 9 — RT pipeline + SBT + TLAS. Same lazy-init pattern; `None`
     /// when `has_ray_tracing == false` or build failed.
     pub rt: Option<crate::render::rt_pipeline::RtPipeline>,
+    /// Editor wire-grid pipeline (`GraphicsOreKind::DebugLines`). Lazy-built
+    /// on the first frame that draws a grid call.
+    pub debug_mold: Option<GraphicsMold>,
+    /// Procedural sky pipeline (`GraphicsOreKind::Sky`). Lazy-built with the
+    /// grid mold.
+    pub sky_mold: Option<GraphicsMold>,
     /// Scene lighting path. `RayTraced` traces into the HDR target instead of
     /// blitting the raster swapchain into it; falls back to `Raster` whenever
     /// any RT resource is missing.
@@ -309,6 +315,8 @@ impl Window {
                 needs_resize: false,
                 overlay: None,
                 rt: None,
+                debug_mold: None,
+                sky_mold: None,
                 lighting_mode: LightingMode::Raster,
             }),
         })
@@ -425,6 +433,46 @@ impl Window {
         rt.init_frame_sets(&vulkan.device, &views)?;
         rt.set_lights(&vulkan.device, lights)?;
         rt.rebuild_tlas(&vulkan.device, instances)?;
+        Ok(())
+    }
+
+    /// Lazy-build the editor grid + sky pipelines. Idempotent; call before
+    /// recording a frame that may contain `DebugLines` / `Sky` draws.
+    pub fn init_editor_molds(&mut self, device: &ash::Device) -> ForgeResult<()> {
+        let Some(gfx) = self.graphics.as_mut() else {
+            return Ok(());
+        };
+        if gfx.debug_mold.is_some() && gfx.sky_mold.is_some() {
+            return Ok(());
+        }
+        if gfx.debug_mold.is_none() {
+            let forge = GraphicsForge::from_spirv_bytes(
+                crate::forge_master::GraphicsForgeId::new(90),
+                GraphicsOreKind::DebugLines,
+                include_bytes!("../../assets/shaders/debug_lines.vert.glsl.spv"),
+                include_bytes!("../../assets/shaders/debug_lines.frag.glsl.spv"),
+            )?;
+            gfx.debug_mold = Some(forge.compile(
+                device,
+                gfx.swapchain_format,
+                gfx.depth_format,
+                gfx.msaa_samples,
+            )?);
+        }
+        if gfx.sky_mold.is_none() {
+            let forge = GraphicsForge::from_spirv_bytes(
+                crate::forge_master::GraphicsForgeId::new(91),
+                GraphicsOreKind::Sky,
+                include_bytes!("../../assets/shaders/sky.vert.glsl.spv"),
+                include_bytes!("../../assets/shaders/sky.frag.glsl.spv"),
+            )?;
+            gfx.sky_mold = Some(forge.compile(
+                device,
+                gfx.swapchain_format,
+                gfx.depth_format,
+                gfx.msaa_samples,
+            )?);
+        }
         Ok(())
     }
 
@@ -570,6 +618,12 @@ impl Window {
                 gfx.framebuffers.clear();
                 gfx.mold.destroy(device);
                 if let Some(m) = gfx.skinned_mold.as_mut() {
+                    m.destroy(device);
+                }
+                if let Some(m) = gfx.debug_mold.take().as_mut() {
+                    m.destroy(device);
+                }
+                if let Some(m) = gfx.sky_mold.take().as_mut() {
                     m.destroy(device);
                 }
                 for img in gfx.depth_images.iter_mut() {
@@ -1091,6 +1145,9 @@ impl Window {
         if self.graphics.as_ref().is_some_and(|g| g.needs_resize) {
             self.recreate_swapchain(instance, device)?;
         }
+        if let Err(e) = self.init_editor_molds(device) {
+            eprintln!("init_editor_molds failed (grid/sky disabled): {e:?}");
+        }
         let gfx = self
             .graphics
             .as_mut()
@@ -1194,7 +1251,101 @@ impl Window {
                 device.cmd_set_viewport(command_buffer, 0, std::slice::from_ref(pane_viewport));
                 device.cmd_set_scissor(command_buffer, 0, std::slice::from_ref(pane_scissor));
 
+                // Pane classification for the procedural sky / grid draws:
+                // ortho ⇔ the VP's w-row is (0,0,0,1); the grid plane follows
+                // the dominant axis of the view direction.
+                let pane_is_persp =
+                    pane_vp[3].abs() > 1e-6 || pane_vp[7].abs() > 1e-6 || pane_vp[11].abs() > 1e-6;
+                let pane_inv = Mat4::from_cols_array(pane_vp).inverse();
+                let pane_plane = {
+                    let n = pane_inv * Vec4::new(0.0, 0.0, 0.0, 1.0);
+                    let f = pane_inv * Vec4::new(0.0, 0.0, 1.0, 1.0);
+                    let d = (f.xyz() / f.w - n.xyz() / n.w).abs();
+                    if !pane_is_persp && d.z >= d.x && d.z >= d.y {
+                        crate::render::debug_lines::ViewPlane::Xy
+                    } else if !pane_is_persp && d.x >= d.y && d.x >= d.z {
+                        crate::render::debug_lines::ViewPlane::Yz
+                    } else {
+                        crate::render::debug_lines::ViewPlane::Xz
+                    }
+                };
+
                 for call in &calls {
+                    match call.kind {
+                        GraphicsOreKind::Sky => {
+                            // Sky only makes sense with a converging eye ray.
+                            if pane_is_persp && let Some(sky) = gfx.sky_mold.as_ref() {
+                                device.cmd_bind_pipeline(
+                                    command_buffer,
+                                    vk::PipelineBindPoint::GRAPHICS,
+                                    sky.pipeline,
+                                );
+                                current_kind = Some(call.kind);
+                                let inv = pane_inv.to_cols_array();
+                                let bytes: &[u8] =
+                                    std::slice::from_raw_parts(inv.as_ptr().cast(), 64);
+                                device.cmd_push_constants(
+                                    command_buffer,
+                                    sky.pipeline_layout,
+                                    vk::ShaderStageFlags::FRAGMENT,
+                                    0,
+                                    bytes,
+                                );
+                                device.cmd_draw(command_buffer, 3, 1, 0, 0);
+                            }
+                            continue;
+                        }
+                        GraphicsOreKind::DebugLines => {
+                            if let Some(dm) = gfx.debug_mold.as_ref() {
+                                device.cmd_bind_pipeline(
+                                    command_buffer,
+                                    vk::PipelineBindPoint::GRAPHICS,
+                                    dm.pipeline,
+                                );
+                                current_kind = Some(call.kind);
+                                use crate::render::debug_lines as dbg;
+                                let extent = [24.0_f32, 24.0];
+                                // Always a single grid plane: ortho panes get
+                                // their view plane, perspective panes get the
+                                // XZ floor (the shader's 3-plane perspective
+                                // mode stacks vertical-plane line fans into a
+                                // solid wash — not an editor look).
+                                let plane = if pane_is_persp {
+                                    dbg::ViewPlane::Xz
+                                } else {
+                                    pane_plane
+                                };
+                                let push = dbg::build_push(
+                                    *pane_vp,
+                                    extent,
+                                    1.0,
+                                    10.0,
+                                    [0.55, 0.55, 0.58, 0.50],
+                                    [0.80, 0.80, 0.85, 0.70],
+                                    dbg::DEFAULT_AXIS_X,
+                                    dbg::DEFAULT_AXIS_Z,
+                                    false,
+                                    plane,
+                                );
+                                let bytes: &[u8] = std::slice::from_raw_parts(
+                                    (&push as *const dbg::DebugLinesPushPacked).cast(),
+                                    160,
+                                );
+                                device.cmd_push_constants(
+                                    command_buffer,
+                                    dm.pipeline_layout,
+                                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                    0,
+                                    bytes,
+                                );
+                                // 16 segments per grid line (see debug_lines.vert.glsl SEGMENTS).
+                                let n = dbg::line_count(extent, 1.0, 10.0, false) * 16 * 2;
+                                device.cmd_draw(command_buffer, n, 1, 0, 0);
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
                     let mold: &GraphicsMold = match (call.kind, gfx.skinned_mold.as_ref()) {
                         (GraphicsOreKind::SkinnedForwardLit, Some(sm)) => sm,
                         _ => &gfx.mold,

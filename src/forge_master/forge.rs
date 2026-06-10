@@ -579,6 +579,11 @@ impl GraphicsForge {
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
                 .size(8)],
+            // Sky: 64 B inv_vp, fragment reconstructs the view ray.
+            GraphicsOreKind::Sky => &[vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .offset(0)
+                .size(64)],
             GraphicsOreKind::Ui | GraphicsOreKind::GaussianSplat => &[],
         };
         // Build set_layouts slice. ForwardLit / SkinnedForwardLit both
@@ -705,6 +710,7 @@ impl GraphicsForge {
             // `gl_VertexIndex`. No vertex bindings.
             GraphicsOreKind::DebugLines => &[],
             GraphicsOreKind::Tonemap => &[],
+            GraphicsOreKind::Sky => &[],
         };
         // ForgeVertex layout: position[0..12], normal[12..24], tangent[24..40], uv[40..48]
         // SkinVertex   layout: joints_packed[0..8 = uvec2 = 4×u16], weights[8..24 = vec4]
@@ -789,6 +795,7 @@ impl GraphicsForge {
             GraphicsOreKind::GaussianSplat => &ad_splat,
             GraphicsOreKind::DebugLines => &[],
             GraphicsOreKind::Tonemap => &[],
+            GraphicsOreKind::Sky => &[],
         };
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(binding_descs)
@@ -876,6 +883,14 @@ impl GraphicsForge {
             GraphicsOreKind::Tonemap => vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(false)
                 .depth_write_enable(false)
+                .stencil_test_enable(false),
+            // Sky: far-plane triangle fills only pixels no geometry wrote
+            // (clear depth is 1.0, sky z is exactly 1.0 → LESS_OR_EQUAL).
+            GraphicsOreKind::Sky => vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(true)
+                .depth_write_enable(false)
+                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+                .depth_bounds_test_enable(false)
                 .stencil_test_enable(false),
         };
 
