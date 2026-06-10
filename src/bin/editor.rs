@@ -875,6 +875,7 @@ impl AppLogic for EditorApp {
 
         self.world.ui.draw_list.clear();
         self.draw_toolbar(ctx, app);
+        self.draw_viewport_chrome(ctx, app);
         self.draw_outliner(ctx, app);
         self.draw_inspector(ctx, app);
         self.draw_bottom_panel(ctx, app);
@@ -1193,6 +1194,73 @@ impl EditorApp {
 // ── Outliner ───────────────────────────────────────────────────────────────
 
 impl EditorApp {
+    /// Per-pane viewport chrome: a camera-kind tag at the pane's top-left and
+    /// an accent border around the focused pane. Drawn right after the toolbar
+    /// so the side panels naturally cover any under-panel overlap.
+    fn draw_viewport_chrome(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        use dumpster_fire_engine::render::app::ViewportKind;
+        use dumpster_fire_engine::resource_manager::ui_manager::{draw as uidraw, font};
+
+        let Some(grid) = ctx.viewport_grid(app) else {
+            return;
+        };
+        let (win_w, win_h) = (grid.win_w, grid.win_h);
+        let mut panes: ThinVec<(f32, f32, f32, f32, &'static str, bool)> = ThinVec::new();
+        for (h, vp) in grid.iter() {
+            let label = match vp.kind {
+                ViewportKind::Perspective => "Perspective",
+                ViewportKind::OrthoTop => "Top",
+                ViewportKind::OrthoFront => "Front",
+                ViewportKind::OrthoRight => "Right",
+            };
+            panes.push((
+                vp.rect.x * win_w,
+                vp.rect.y * win_h,
+                vp.rect.w * win_w,
+                vp.rect.h * win_h,
+                label,
+                h == grid.focused,
+            ));
+        }
+        let multi = panes.len() > 1;
+        let ow = self.outliner_w;
+        let dl = &mut self.world.ui.draw_list;
+        for (px, py, pw, ph, label, focused) in panes {
+            // Focused-pane accent border (subtle line for unfocused panes,
+            // only worth drawing when there is more than one pane).
+            if multi {
+                let bc: [u8; 4] = if focused {
+                    [95, 150, 225, 220]
+                } else {
+                    [58, 58, 74, 110]
+                };
+                let (x1, y1) = (px + pw - 1.0, py + ph - 1.0);
+                dl.push_line(px, py + 1.0, x1, py + 1.0, 1.0, bc);
+                dl.push_line(px, y1, x1, y1, 1.0, bc);
+                dl.push_line(px + 1.0, py, px + 1.0, y1, 1.0, bc);
+                dl.push_line(x1, py, x1, y1, 1.0, bc);
+            }
+            // Camera-kind tag, nudged inside the visible viewport area.
+            let lx = px.max(ow) + 8.0;
+            let ly = py.max(TOOLBAR_H) + 6.0;
+            let tw = label.chars().count() as f32 * 8.0 + 10.0;
+            dl.push_rect(lx, ly, tw, 20.0, uidraw::SOLID, [16, 16, 24, 200]);
+            let tc: [u8; 4] = if focused {
+                [170, 200, 245, 230]
+            } else {
+                [150, 155, 175, 200]
+            };
+            let mut tx = lx + 5.0;
+            for c in label.chars() {
+                let uv = font::glyph_rect(c);
+                if uv != [0.0_f32; 4] {
+                    dl.push_rect(tx, ly + 2.0, 8.0, 16.0, uv, tc);
+                }
+                tx += 8.0;
+            }
+        }
+    }
+
     fn push_log(&mut self, text: impl Into<String>, color: [u8; 4]) {
         self.log.push((text.into(), color));
         if self.log.len() > 200 {
