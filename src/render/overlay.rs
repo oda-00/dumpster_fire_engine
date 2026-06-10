@@ -107,7 +107,9 @@ impl OverlayPipeline {
                 extent.width,
                 extent.height,
                 HDR_FORMAT,
-                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::STORAGE,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 vk::SampleCountFlags::TYPE_1,
             )?;

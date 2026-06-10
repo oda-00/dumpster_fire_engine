@@ -411,6 +411,16 @@ fn build_blas_for_loaded(loaded: &mut LoadedGltf, vulkan: &VulkanContext) -> For
                     // Copy the raw Vulkan handles into the pair tuple.
                     let pair = (backing.handle, backing.memory);
                     loaded.blas_buffers.push(pair);
+                    // Record the BLAS device address on the GpuMesh so draw
+                    // plans carry it to the per-frame TLAS instance gather.
+                    let addr = crate::render::blas::blas_device_address(accel, handle);
+                    if let Some(gpu_mut) = loaded.meshes.get_mut(mesh_idx, prim_idx) {
+                        gpu_mut.blas_addr = addr;
+                    } else {
+                        eprintln!(
+                            "build_blas: mesh {mesh_idx} prim {prim_idx} Arc shared — blas_addr not set"
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!("build_blas failed (mesh {mesh_idx} prim {prim_idx}): {e:?}");

@@ -657,6 +657,15 @@ impl MeshTable {
         let off = *self.offsets.get(mesh_idx)? as usize;
         self.meshes.get(off + prim_idx)
     }
+
+    /// Mutable access for load-time patching (e.g. recording the BLAS device
+    /// address after acceleration-structure builds). Only works while the
+    /// `Arc` is unshared — i.e. before any draw plans clone it.
+    #[inline]
+    pub fn get_mut(&mut self, mesh_idx: usize, prim_idx: usize) -> Option<&mut GpuMesh> {
+        let off = *self.offsets.get(mesh_idx)? as usize;
+        self.meshes.get_mut(off + prim_idx).and_then(Arc::get_mut)
+    }
 }
 
 /// Bundle of per-frame resources for skinned-draw routing — output of

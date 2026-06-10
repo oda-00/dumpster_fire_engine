@@ -4,7 +4,7 @@ use crate::forge_master::{
 };
 use crate::resource_manager::manager::{Handle as ResourceHandle, Id};
 use ash::vk;
-use glam::Mat4;
+use glam::{Mat4, Vec4, Vec4Swizzles};
 use std::sync::Arc;
 use thin_vec::ThinVec;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -106,6 +106,19 @@ pub struct GraphicsState {
     /// Phase 9 — RT pipeline + SBT + TLAS. Same lazy-init pattern; `None`
     /// when `has_ray_tracing == false` or build failed.
     pub rt: Option<crate::render::rt_pipeline::RtPipeline>,
+    /// Scene lighting path. `RayTraced` traces into the HDR target instead of
+    /// blitting the raster swapchain into it; falls back to `Raster` whenever
+    /// any RT resource is missing.
+    pub lighting_mode: LightingMode,
+}
+
+/// How the scene HDR image is produced each frame.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LightingMode {
+    /// Forward raster pass (always available).
+    Raster,
+    /// Hardware ray tracing via the Phase 9 pipeline.
+    RayTraced,
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -296,6 +309,7 @@ impl Window {
                 needs_resize: false,
                 overlay: None,
                 rt: None,
+                lighting_mode: LightingMode::Raster,
             }),
         })
     }
@@ -374,7 +388,55 @@ impl Window {
         }
         let rt = crate::render::rt_pipeline::RtPipeline::new(vulkan)?;
         gfx.rt = Some(rt);
+        // Prefer RT by default only on real GPUs — software devices (llvmpipe)
+        // emulate RT at seconds-per-frame; the toggle still works there.
+        if !vulkan.is_software_device {
+            gfx.lighting_mode = LightingMode::RayTraced;
+        }
+        println!(
+            "vulkan: RT lighting path online (default {:?})",
+            gfx.lighting_mode
+        );
         Ok(())
+    }
+
+    /// Per-frame RT upkeep — idempotent. Brings up the RT pipeline, allocates
+    /// its descriptor sets once the overlay HDR targets exist, uploads the
+    /// lights UBO, and rebuilds the TLAS from `instances`. Safe to call when
+    /// RT is unsupported (no-op).
+    pub fn ensure_rt_frame(
+        &mut self,
+        vulkan: &crate::render::vulkan::VulkanContext,
+        lights: &crate::resource_manager::gltf_driver::LightsUBO,
+        instances: &[vk::AccelerationStructureInstanceKHR],
+    ) -> ForgeResult<()> {
+        if !vulkan.has_ray_tracing {
+            return Ok(());
+        }
+        self.init_rt_pipeline(vulkan)?;
+        let Some(gfx) = self.graphics.as_mut() else {
+            return Ok(());
+        };
+        let (Some(rt), Some(overlay)) = (gfx.rt.as_mut(), gfx.overlay.as_ref()) else {
+            return Ok(());
+        };
+        let views: ThinVec<vk::ImageView> =
+            overlay.hdr_images.iter().map(|i| i.view).collect();
+        rt.init_frame_sets(&vulkan.device, &views)?;
+        rt.set_lights(&vulkan.device, lights)?;
+        rt.rebuild_tlas(&vulkan.device, instances)?;
+        Ok(())
+    }
+
+    /// Flip the scene lighting path (no-op without a graphics window).
+    pub fn set_lighting_mode(&mut self, mode: LightingMode) {
+        if let Some(gfx) = self.graphics.as_mut() {
+            gfx.lighting_mode = mode;
+        }
+    }
+
+    pub fn lighting_mode(&self) -> Option<LightingMode> {
+        self.graphics.as_ref().map(|g| g.lighting_mode)
     }
 
     /// Phase 12 — upload UI draw data for the next frame. `verts` is the
@@ -1254,6 +1316,71 @@ impl Window {
                 let swap_img = gfx.swapchain_images[image_index as usize];
                 let hdr_img = overlay.hdr_images[image_index as usize].handle;
 
+                // RT lighting path: trace straight into the HDR target and
+                // skip the swapchain→HDR blit. Falls back to the blit path
+                // whenever any RT resource is missing.
+                let use_rt = gfx.lighting_mode == LightingMode::RayTraced
+                    && gfx.rt.as_ref().is_some_and(|rt| rt.ready());
+                if use_rt {
+                    let rt = gfx.rt.as_mut().unwrap();
+                    let range = vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    };
+                    // HDR: UNDEFINED → GENERAL for storage writes.
+                    // Swapchain: PRESENT_SRC → COLOR_ATTACHMENT for tonemap output.
+                    let pre_trace = [
+                        vk::ImageMemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                            .src_access_mask(vk::AccessFlags2::NONE)
+                            .dst_stage_mask(vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR)
+                            .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                            .old_layout(vk::ImageLayout::UNDEFINED)
+                            .new_layout(vk::ImageLayout::GENERAL)
+                            .image(hdr_img)
+                            .subresource_range(range),
+                        vk::ImageMemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                            .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                            .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                            .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                            .image(swap_img)
+                            .subresource_range(range),
+                    ];
+                    device.cmd_pipeline_barrier2(
+                        command_buffer,
+                        &vk::DependencyInfo::default().image_memory_barriers(&pre_trace),
+                    );
+
+                    rt.frame_counter = rt.frame_counter.wrapping_add(1);
+                    let fc = rt.frame_counter;
+                    for (_pane_viewport, pane_scissor, pane_vp) in viewports {
+                        let push = rt_camera_push(pane_vp, pane_scissor, fc);
+                        rt.record_trace(device, command_buffer, image_index as usize, &push);
+                    }
+
+                    // HDR: GENERAL → COLOR_ATTACHMENT_OPTIMAL so `overlay.record`
+                    // sees the same layout the blit path leaves behind.
+                    let post_trace = [vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR)
+                        .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                        .old_layout(vk::ImageLayout::GENERAL)
+                        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .image(hdr_img)
+                        .subresource_range(range)];
+                    device.cmd_pipeline_barrier2(
+                        command_buffer,
+                        &vk::DependencyInfo::default().image_memory_barriers(&post_trace),
+                    );
+                } else {
+
                 // Swapchain: PRESENT_SRC_KHR → TRANSFER_SRC.
                 // HDR:       UNDEFINED → TRANSFER_DST.
                 let pre_blit = [
@@ -1375,6 +1502,7 @@ impl Window {
                     command_buffer,
                     &vk::DependencyInfo::default().image_memory_barriers(&post_blit),
                 );
+                }
 
                 // Run the tonemap + overlay passes.
                 overlay.record(
@@ -1457,6 +1585,48 @@ impl Window {
 #[inline]
 fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     (Mat4::from_cols_array(a) * Mat4::from_cols_array(b)).to_cols_array()
+}
+
+/// Derive the raygen camera push constants for one pane from its combined
+/// view-projection matrix (column-major) and scissor rect. Camera position
+/// and forward are recovered from the inverse VP: for a perspective VP the
+/// homogeneous point `inv_vp * (0,0,1,0)` is the eye (all rays converge
+/// there); forward unprojects the NDC center near→far.
+fn rt_camera_push(
+    pane_vp: &[f32; 16],
+    scissor: &vk::Rect2D,
+    frame_count: u32,
+) -> crate::render::rt_pipeline::RayCameraPush {
+    let inv = Mat4::from_cols_array(pane_vp).inverse();
+    // Ortho ⇔ the projection's w-row is (0,0,0,1): clip w independent of xyz.
+    let is_ortho = pane_vp[3].abs() < 1e-6 && pane_vp[7].abs() < 1e-6 && pane_vp[11].abs() < 1e-6;
+
+    let n = inv * Vec4::new(0.0, 0.0, 0.0, 1.0);
+    let f = inv * Vec4::new(0.0, 0.0, 1.0, 1.0);
+    let near_pt = n.xyz() / n.w;
+    let far_pt = f.xyz() / f.w;
+    let forward = (far_pt - near_pt).normalize_or_zero();
+
+    let h = inv * Vec4::new(0.0, 0.0, 1.0, 0.0);
+    let cam_pos = if !is_ortho && h.w.abs() > 1e-8 {
+        h.xyz() / h.w
+    } else {
+        near_pt
+    };
+
+    crate::render::rt_pipeline::RayCameraPush {
+        inv_vp: inv.to_cols_array(),
+        cam_pos: cam_pos.to_array(),
+        is_ortho: is_ortho as u32,
+        cam_forward: forward.to_array(),
+        frame_count,
+        aperture_radius: 0.0,
+        focus_distance: 1.0,
+        samples_per_pix: 1,
+        aperture_blades: 0,
+        pane_offset_px: [scissor.offset.x.max(0) as u32, scissor.offset.y.max(0) as u32],
+        pane_size_px: [scissor.extent.width, scissor.extent.height],
+    }
 }
 
 /// Build a swapchain + all per-image resources (image views, depth images,

@@ -47,6 +47,10 @@ pub struct VulkanContext {
     /// True when all eight RT-required extensions were present on the
     /// chosen device AND the `DFE_RT` env var did not disable RT.
     pub has_ray_tracing: bool,
+    /// True when the chosen physical device is a CPU rasterizer (llvmpipe /
+    /// SwiftShader). RT still *works* there but is emulated and very slow,
+    /// so callers should not default to `LightingMode::RayTraced`.
+    pub is_software_device: bool,
     /// Acceleration-structure extension loader. `Some` when `has_ray_tracing`.
     pub rt_accel: Option<ash::khr::acceleration_structure::Device>,
     /// Ray-tracing pipeline extension loader. `Some` when `has_ray_tracing`.
@@ -385,6 +389,10 @@ impl VulkanContext {
             ash::ext::scalar_block_layout::NAME,
         ];
         let all_rt_ext_present = want_graphics && rt_ext_names.iter().all(|n| has_dev_ext(n));
+        let is_software_device = {
+            let props = unsafe { instance.get_physical_device_properties(physical_device) };
+            props.device_type == vk::PhysicalDeviceType::CPU
+        };
         let has_ray_tracing = all_rt_ext_present && env_allows_rt();
         if has_ray_tracing {
             println!("vulkan: ray-tracing path enabled (all 8 RT extensions present)");
@@ -579,6 +587,7 @@ impl VulkanContext {
             device_name,
             msaa_samples,
             has_ray_tracing,
+            is_software_device,
             rt_accel,
             rt_pipeline,
             rt_deferred,

@@ -20,10 +20,46 @@ use crate::forge_master::master::{ForgeError, ForgeResult};
 use crate::forge_master::ore::ForgeBuffer;
 use crate::render::vulkan::VulkanContext;
 
+/// 128-byte raygen push constant — must match the `Cam` block in
+/// `assets/shaders/raygen.rgen` exactly.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RayCameraPush {
+    pub inv_vp: [f32; 16],
+    pub cam_pos: [f32; 3],
+    pub is_ortho: u32,
+    pub cam_forward: [f32; 3],
+    pub frame_count: u32,
+    pub aperture_radius: f32,
+    pub focus_distance: f32,
+    pub samples_per_pix: u32,
+    pub aperture_blades: u32,
+    pub pane_offset_px: [u32; 2],
+    pub pane_size_px: [u32; 2],
+}
+
+const _: () = assert!(core::mem::size_of::<RayCameraPush>() == 128);
+
 pub struct RtPipeline {
     pub pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
     pub set_layout: vk::DescriptorSetLayout,
+
+    /// Extension loader clones — lets per-frame TLAS/trace recording run
+    /// without threading `VulkanContext` through the draw path.
+    accel: ash::khr::acceleration_structure::Device,
+    rtp: ash::khr::ray_tracing_pipeline::Device,
+    memory_properties: vk::PhysicalDeviceMemoryProperties,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+
+    /// Per-swapchain-image descriptor sets (TLAS / HDR storage image / lights).
+    pub pool: vk::DescriptorPool,
+    pub sets: ThinVec<vk::DescriptorSet>,
+    /// Host-visible lights UBO shared by all sets (binding 2).
+    pub lights_buf: Option<ForgeBuffer>,
+    /// Monotonic frame counter fed to the raygen Halton jitter.
+    pub frame_counter: u32,
 
     /// SBT backing buffer — single buffer holding raygen, miss, and hit
     /// regions back-to-back with `base_alignment`-aligned region starts.
@@ -249,6 +285,19 @@ impl RtPipeline {
             pipeline,
             pipeline_layout,
             set_layout,
+            accel: vulkan
+                .rt_accel
+                .as_ref()
+                .ok_or(ForgeError::NoPhysicalDevice)?
+                .clone(),
+            rtp: rt_loader.clone(),
+            memory_properties: vulkan.memory_properties,
+            command_pool: vulkan.command_pool,
+            queue: vulkan.queue,
+            pool: vk::DescriptorPool::null(),
+            sets: ThinVec::new(),
+            lights_buf: None,
+            frame_counter: 0,
             sbt_buffer,
             raygen_region,
             miss_region,
@@ -265,14 +314,11 @@ impl RtPipeline {
     /// editor budget is ≪ 1 ms for < 200 instances.
     pub fn rebuild_tlas(
         &mut self,
-        vulkan: &VulkanContext,
+        device: &ash::Device,
         instances: &[vk::AccelerationStructureInstanceKHR],
     ) -> ForgeResult<()> {
-        let device = &vulkan.device;
-        let accel = vulkan
-            .rt_accel
-            .as_ref()
-            .ok_or(ForgeError::NoPhysicalDevice)?;
+        let accel = self.accel.clone();
+        let accel = &accel;
 
         // Free previous instance / TLAS buffers.
         if let Some(mut b) = self.instance_buf.take() {
@@ -304,7 +350,7 @@ impl RtPipeline {
         let inst_bytes_len = std::mem::size_of_val(instances);
         let mut inst_buf = ForgeBuffer::create(
             device,
-            &vulkan.memory_properties,
+            &self.memory_properties,
             inst_bytes_len as u64,
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
@@ -350,7 +396,7 @@ impl RtPipeline {
 
         let tlas_buf = ForgeBuffer::create(
             device,
-            &vulkan.memory_properties,
+            &self.memory_properties,
             sizes.acceleration_structure_size,
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
@@ -358,7 +404,7 @@ impl RtPipeline {
         )?;
         let scratch_buf = ForgeBuffer::create(
             device,
-            &vulkan.memory_properties,
+            &self.memory_properties,
             sizes.build_scratch_size,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
@@ -387,7 +433,7 @@ impl RtPipeline {
                 });
 
         let alloc = vk::CommandBufferAllocateInfo::default()
-            .command_pool(vulkan.command_pool)
+            .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let cb = unsafe {
@@ -424,20 +470,197 @@ impl RtPipeline {
         };
         unsafe {
             device
-                .queue_submit(vulkan.queue, &[submit], fence)
+                .queue_submit(self.queue, &[submit], fence)
                 .map_err(ForgeError::Vk)?;
             device
                 .wait_for_fences(&[fence], true, u64::MAX)
                 .map_err(ForgeError::Vk)?;
             device.destroy_fence(fence, None);
-            device.free_command_buffers(vulkan.command_pool, &cbs);
+            device.free_command_buffers(self.command_pool, &cbs);
         }
 
         self.tlas = tlas;
         self.tlas_buf = Some(tlas_buf);
         self.tlas_scratch = Some(scratch_buf);
         self.instance_buf = Some(inst_buf);
+        self.write_tlas_sets(device);
         Ok(())
+    }
+
+    /// Allocate the per-swapchain-image descriptor sets (TLAS / HDR storage
+    /// image / lights UBO) once the overlay's HDR targets exist. Idempotent.
+    pub fn init_frame_sets(
+        &mut self,
+        device: &ash::Device,
+        hdr_views: &[vk::ImageView],
+    ) -> ForgeResult<()> {
+        if !self.sets.is_empty() {
+            return Ok(());
+        }
+        let n = hdr_views.len() as u32;
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .descriptor_count(n),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(n),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(n),
+        ];
+        self.pool = unsafe {
+            device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(n)
+                        .pool_sizes(&pool_sizes),
+                    None,
+                )
+                .map_err(ForgeError::Vk)?
+        };
+        let layouts: ThinVec<vk::DescriptorSetLayout> =
+            (0..n).map(|_| self.set_layout).collect();
+        let sets = unsafe {
+            device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(self.pool)
+                        .set_layouts(&layouts),
+                )
+                .map_err(ForgeError::Vk)?
+        };
+        self.sets = sets.into_iter().collect();
+
+        let lights_buf = ForgeBuffer::create(
+            device,
+            &self.memory_properties,
+            core::mem::size_of::<crate::resource_manager::gltf_driver::LightsUBO>() as u64,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        self.lights_buf = Some(lights_buf);
+
+        // Static writes: HDR storage image (binding 1, GENERAL layout for the
+        // trace) and the lights UBO (binding 2). TLAS (binding 0) is written
+        // by `write_tlas_sets` after each rebuild.
+        let buf_info = [vk::DescriptorBufferInfo::default()
+            .buffer(self.lights_buf.as_ref().unwrap().handle)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        for (i, set) in self.sets.iter().enumerate() {
+            let img_info = [vk::DescriptorImageInfo::default()
+                .image_view(hdr_views[i])
+                .image_layout(vk::ImageLayout::GENERAL)];
+            let writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&img_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(2)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&buf_info),
+            ];
+            unsafe { device.update_descriptor_sets(&writes, &[]) };
+        }
+        Ok(())
+    }
+
+    /// Upload the per-frame lights UBO (no-op until `init_frame_sets` ran).
+    pub fn set_lights(
+        &mut self,
+        device: &ash::Device,
+        ubo: &crate::resource_manager::gltf_driver::LightsUBO,
+    ) -> ForgeResult<()> {
+        if let Some(buf) = self.lights_buf.as_mut() {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (ubo as *const crate::resource_manager::gltf_driver::LightsUBO).cast::<u8>(),
+                    core::mem::size_of::<crate::resource_manager::gltf_driver::LightsUBO>(),
+                )
+            };
+            buf.write_bytes(device, bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Point binding 0 of every frame set at the current TLAS.
+    fn write_tlas_sets(&mut self, device: &ash::Device) {
+        if self.sets.is_empty() || self.tlas == vk::AccelerationStructureKHR::null() {
+            return;
+        }
+        let tlases = [self.tlas];
+        for set in &self.sets {
+            let mut as_write =
+                vk::WriteDescriptorSetAccelerationStructureKHR::default()
+                    .acceleration_structures(&tlases);
+            let mut write = vk::WriteDescriptorSet::default()
+                .dst_set(*set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .push_next(&mut as_write);
+            write.descriptor_count = 1;
+            unsafe { device.update_descriptor_sets(std::slice::from_ref(&write), &[]) };
+        }
+    }
+
+    /// True when every per-frame resource needed by `record_trace` exists.
+    pub fn ready(&self) -> bool {
+        !self.sets.is_empty() && self.tlas != vk::AccelerationStructureKHR::null()
+    }
+
+    /// Record one `cmd_trace_rays` for a pane into the HDR storage image
+    /// bound in `sets[image_index]`. Caller handles image layout barriers.
+    ///
+    /// # Safety
+    /// `cmd` must be a recording command buffer; `image_index` < `sets.len()`;
+    /// the HDR image must be in `GENERAL` layout.
+    pub unsafe fn record_trace(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        image_index: usize,
+        push: &RayCameraPush,
+    ) {
+        unsafe {
+            device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::RAY_TRACING_KHR,
+                self.pipeline,
+            );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::RAY_TRACING_KHR,
+                self.pipeline_layout,
+                0,
+                &[self.sets[image_index]],
+                &[],
+            );
+            let bytes = std::slice::from_raw_parts(
+                (push as *const RayCameraPush).cast::<u8>(),
+                core::mem::size_of::<RayCameraPush>(),
+            );
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::RAYGEN_KHR,
+                0,
+                bytes,
+            );
+            self.rtp.cmd_trace_rays(
+                cmd,
+                &self.raygen_region,
+                &self.miss_region,
+                &self.hit_region,
+                &self.callable_region,
+                push.pane_size_px[0].max(1),
+                push.pane_size_px[1].max(1),
+                1,
+            );
+        }
     }
 
     /// # Safety
@@ -456,6 +679,12 @@ impl RtPipeline {
                 device.destroy_descriptor_set_layout(self.set_layout, None);
             }
             self.sbt_buffer.destroy(device);
+            if self.pool != vk::DescriptorPool::null() {
+                device.destroy_descriptor_pool(self.pool, None);
+            }
+            if let Some(mut b) = self.lights_buf.take() {
+                b.destroy(device);
+            }
             if let Some(mut b) = self.instance_buf.take() {
                 b.destroy(device);
             }

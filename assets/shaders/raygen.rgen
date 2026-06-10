@@ -20,8 +20,6 @@ layout(push_constant) uniform Cam {
     uint  aperture_blades;
     uvec2 pane_offset_px;
     uvec2 pane_size_px;
-    float exposure_scale;
-    float _pad0; float _pad1; float _pad2;
 } cam;
 
 layout(location = 0) rayPayloadEXT vec4 payload;
@@ -82,5 +80,5 @@ void main() {
         accum += payload.rgb;
     }
     accum /= float(spp);
-    imageStore(outputImage, pix, vec4(accum * cam.exposure_scale, 1.0));
+    imageStore(outputImage, pix, vec4(accum, 1.0));
 }

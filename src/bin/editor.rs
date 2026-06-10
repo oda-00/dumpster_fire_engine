@@ -195,6 +195,7 @@ struct ToolbarActions {
     layout: bool,
     tonemap: bool,
     stats: bool,
+    rt: bool,
 }
 
 /// Active edit-mode element translate-drag — a gizmo arrow grabbed at the
@@ -609,6 +610,12 @@ impl AppLogic for EditorApp {
                         self.snap_enabled = !self.snap_enabled;
                         return true;
                     }
+                    PhysicalKey::Code(KeyCode::KeyL) => {
+                        if let Some(mode) = ctx.toggle_lighting_mode(app) {
+                            println!("editor: lighting mode → {mode:?}");
+                        }
+                        return true;
+                    }
                     PhysicalKey::Code(KeyCode::F2) => {
                         self.stats_open = !self.stats_open;
                         return true;
@@ -888,6 +895,10 @@ impl EditorApp {
         let snap = self.snap_enabled;
         let stats = self.stats_open;
         let grid_on = self.grid_enabled;
+        let rt_on = matches!(
+            ctx.lighting_mode(app),
+            Some(dumpster_fire_engine::render::window::LightingMode::RayTraced)
+        );
 
         let (a, tip) = {
             let dl = &mut self.world.ui.draw_list;
@@ -931,6 +942,7 @@ impl EditorApp {
             a.frame = ui.hicon(IconId::Axis, false, "Frame (F)");
             a.layout = ui.hicon(IconId::Layers, false, "Viewport layout");
             a.tonemap = ui.hicon(IconId::Settings, false, "Tonemap");
+            a.rt = ui.hicon(IconId::Pen, rt_on, "Ray-traced lighting (L)");
             a.stats = ui.hicon(
                 if stats { IconId::Eye } else { IconId::EyeOff },
                 stats,
@@ -948,7 +960,8 @@ impl EditorApp {
             };
             let bx = ui.cursor[0];
             ui.text_at(bx, by + 3.0, badge, bc);
-            let status = format!("{layout_label} | {tm_label} | {fps_str}");
+            let lt = if rt_on { "RT" } else { "RASTER" };
+            let status = format!("{layout_label} | {tm_label} | {lt} | {fps_str}");
             let st_w = status.chars().count() as f32 * 8.0;
             ui.text_at(win_w - st_w - 10.0, by + 3.0, &status, [130, 180, 130, 255]);
 
@@ -1008,6 +1021,9 @@ impl EditorApp {
         }
         if a.stats {
             self.stats_open = !self.stats_open;
+        }
+        if a.rt && let Some(mode) = ctx.toggle_lighting_mode(app) {
+            println!("editor: lighting mode → {mode:?}");
         }
 
         // Spawn dropdown menu

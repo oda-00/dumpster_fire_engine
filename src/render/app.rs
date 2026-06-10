@@ -998,6 +998,34 @@ impl<'a> AppCtx<'a> {
         self.windows.get_mut(app)?.viewport_grid.as_mut()
     }
 
+    /// Current scene lighting mode for `app`'s window (None = headless).
+    pub fn lighting_mode(
+        &self,
+        app: AppHandle,
+    ) -> Option<crate::render::window::LightingMode> {
+        let wh = self.windows.get(app)?.window_handle;
+        self.renderer.as_ref()?.window(wh)?.lighting_mode()
+    }
+
+    /// Flip raster ↔ ray-traced lighting for `app`'s window. Returns the new
+    /// mode, or None when there is no graphics window. Switching to
+    /// `RayTraced` on a device without RT support is harmless — the frame
+    /// falls back to the raster path until RT resources exist.
+    pub fn toggle_lighting_mode(
+        &mut self,
+        app: AppHandle,
+    ) -> Option<crate::render::window::LightingMode> {
+        use crate::render::window::LightingMode;
+        let wh = self.windows.get(app)?.window_handle;
+        let window = self.renderer.as_mut()?.window_mut(wh)?;
+        let next = match window.lighting_mode()? {
+            LightingMode::Raster => LightingMode::RayTraced,
+            LightingMode::RayTraced => LightingMode::Raster,
+        };
+        window.set_lighting_mode(next);
+        Some(next)
+    }
+
     /// &mut Camera for the focused viewport pane. Falls back to the window's
     /// main camera when no grid is set.
     pub fn focused_viewport_camera_mut(&mut self, app: AppHandle) -> Option<&mut Camera> {

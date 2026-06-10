@@ -842,6 +842,9 @@ pub struct GpuMesh {
     pub vertex_buffer: ForgeBuffer,
     pub index_buffer: ForgeBuffer,
     pub index_count: u32,
+    /// BLAS device address for ray tracing (0 = no BLAS — raster only).
+    /// Set after upload by the asset loader when `has_ray_tracing`.
+    pub blas_addr: u64,
 }
 
 impl GpuMesh {
@@ -1092,6 +1095,7 @@ impl GpuMesh {
             vertex_buffer,
             index_buffer,
             index_count: ore.indices.len() as u32,
+            blas_addr: 0,
         })
     }
 

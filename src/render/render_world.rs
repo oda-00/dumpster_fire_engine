@@ -57,7 +57,7 @@ pub fn collect_and_submit(
     asset_cache: &GltfAssetCache,
     renderer: &mut Renderer,
     window_h: WindowHandle,
-    _vulkan: &VulkanContext,
+    vulkan: &VulkanContext,
     camera_views: &[CameraView],
     elapsed: f32,
 ) -> ForgeResult<Option<vk::Semaphore>> {
@@ -236,6 +236,48 @@ pub fn collect_and_submit(
             loaded.cache.dummy_instance_set(),
         );
         all_plans.extend(plans);
+    }
+
+    // Step 6.5 — RT upkeep: gather TLAS instances from the draw plans
+    // (BLAS address + model→world transform), pack the lights UBO, and let
+    // the window rebuild its TLAS / upload lights. No-op without RT support.
+    if vulkan.has_ray_tracing {
+        let mut rt_instances: ThinVec<vk::AccelerationStructureInstanceKHR> = ThinVec::new();
+        for plan in &all_plans {
+            let Some(mesh) = &plan.mesh else { continue };
+            if mesh.blas_addr == 0 {
+                continue;
+            }
+            // Column-major model→world → VkTransformMatrixKHR (row-major 3×4).
+            let m = &plan.mvp;
+            let transform = vk::TransformMatrixKHR {
+                matrix: [
+                    m[0], m[4], m[8], m[12], //
+                    m[1], m[5], m[9], m[13], //
+                    m[2], m[6], m[10], m[14],
+                ],
+            };
+            rt_instances.push(vk::AccelerationStructureInstanceKHR {
+                transform,
+                instance_custom_index_and_mask: vk::Packed24_8::new(
+                    rt_instances.len() as u32,
+                    0xFF,
+                ),
+                instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
+                    0,
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
+                ),
+                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                    device_handle: mesh.blas_addr,
+                },
+            });
+        }
+        let lights_ubo = pack_lights_ubo(&lights);
+        if let Some(window) = renderer.window_mut(window_h)
+            && let Err(e) = window.ensure_rt_frame(vulkan, &lights_ubo, &rt_instances)
+        {
+            eprintln!("render_world: ensure_rt_frame: {e:?}");
+        }
     }
 
     // Step 7 — submit combined graphics proto.
