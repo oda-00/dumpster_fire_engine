@@ -16,6 +16,13 @@ pub struct Ui<'a> {
     /// Tooltip requested by a hovered widget this frame: `(x, y, text)`.
     /// Deferred so the caller can draw it after all panels (always on top).
     pub pending_tooltip: Option<(f32, f32, String)>,
+    /// Active drag-field state fed in by the caller each frame:
+    /// `(field_key, value_at_press, cursor_x_at_press)`. The caller owns this
+    /// across frames (immediate-mode widgets are stateless).
+    pub drag_state: Option<(u64, f32, f32)>,
+    /// Set when a drag-field is pressed this frame — the caller stores it
+    /// into its drag-state slot.
+    pub begin_drag: Option<(u64, f32, f32)>,
 }
 
 impl<'a> Ui<'a> {
@@ -26,6 +33,8 @@ impl<'a> Ui<'a> {
             cursor: [rect.x, rect.y],
             width: rect.w,
             pending_tooltip: None,
+            drag_state: None,
+            begin_drag: None,
         }
     }
 
@@ -36,6 +45,8 @@ impl<'a> Ui<'a> {
             cursor: [rect.x, rect.y],
             width: rect.w,
             pending_tooltip: None,
+            drag_state: None,
+            begin_drag: None,
         }
     }
 
@@ -362,6 +373,66 @@ impl<'a> Ui<'a> {
         }
         self.cursor[0] += sz + 3.0;
         clicked
+    }
+
+    /// UE-style numeric drag field: label on the left, value box on the right.
+    /// Press the value box and drag horizontally to change the value by
+    /// `step` per pixel. `key` is the field's stable identity (e.g. a
+    /// `path_key` hash); drag state lives in the caller (see `drag_state` /
+    /// `begin_drag`). Returns true when the value changed this frame.
+    pub fn drag_field(&mut self, key: u64, label: &str, v: &mut f32, step: f32) -> bool {
+        let x = self.cursor[0];
+        let y = self.cursor[1];
+        let w = self.width;
+        let h = 18.0_f32;
+        let box_w = (w * 0.55).min(110.0);
+        let bx = x + w - box_w;
+
+        let dragging = self.drag_state.map(|(k, _, _)| k) == Some(key);
+        let hovered = self.hovered(bx, y, box_w, h);
+        if hovered && self.input.left_just_pressed {
+            self.begin_drag = Some((key, *v, self.input.cursor[0]));
+        }
+        let mut changed = false;
+        if dragging && self.input.left_down {
+            let (_, v0, x0) = self.drag_state.unwrap();
+            let nv = v0 + (self.input.cursor[0] - x0) * step;
+            if nv != *v {
+                *v = nv;
+                changed = true;
+            }
+        }
+
+        // Label (dim, left)
+        self.text_at(x, y + 1.0, label, [150, 155, 175, 255]);
+        // Value box
+        let bg = if dragging {
+            [38, 72, 130, 255]
+        } else if hovered {
+            [52, 52, 70, 255]
+        } else {
+            [40, 40, 54, 255]
+        };
+        self.draw.push_rect(bx, y, box_w, h, draw::SOLID, bg);
+        let edge: [u8; 4] = if dragging {
+            [110, 170, 240, 255]
+        } else {
+            [62, 62, 80, 255]
+        };
+        self.draw.push_rect(bx, y + h - 1.0, box_w, 1.0, draw::SOLID, edge);
+        // Right-aligned value text
+        let txt = format!("{v:.2}");
+        let tw = txt.chars().count() as f32 * font::GLYPH_W as f32;
+        let tx = (bx + box_w - tw - 6.0).max(bx + 2.0);
+        let vc: [u8; 4] = if dragging {
+            [240, 246, 255, 255]
+        } else {
+            [205, 210, 224, 255]
+        };
+        self.text_at(tx, y + 1.0, &txt, vc);
+
+        self.cursor[1] += h + 3.0;
+        changed
     }
 
     /// Draw a tooltip bubble at (x, y) — call after all panels so it sits on top.

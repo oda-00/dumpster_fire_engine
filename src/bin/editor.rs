@@ -183,6 +183,12 @@ struct EditorApp {
     quit_requested: bool,
     /// Output log lines: (text, color). Newest appended at the end.
     log: ThinVec<(String, [u8; 4])>,
+    /// Active inspector drag-field: (key, value at press, cursor x at press).
+    insp_drag: Option<(u64, f32, f32)>,
+    /// Bottom panel tab: 0 = Output Log, 1 = Content Browser.
+    bottom_tab: usize,
+    /// Layout saved by pane-maximize (F11); restored on the next toggle.
+    saved_layout: Option<ViewportLayout>,
 }
 
 /// Menu-bar definition: label + entries. Entry actions are routed in
@@ -192,7 +198,14 @@ const MENUS: [(&str, &[&str]); 4] = [
     ("Edit", &["Undo", "Redo", "Duplicate", "Delete"]),
     (
         "Window",
-        &["Layout: Single", "Layout: 2 Cols", "Layout: 2 Rows", "Layout: Quad", "Toggle Stats"],
+        &[
+            "Layout: Single",
+            "Layout: 2 Cols",
+            "Layout: 2 Rows",
+            "Layout: Quad",
+            "Toggle Stats",
+            "Maximize Pane",
+        ],
     ),
     ("Help", &["About"]),
 ];
@@ -647,6 +660,10 @@ impl AppLogic for EditorApp {
                     }
                     PhysicalKey::Code(KeyCode::F2) => {
                         self.stats_open = !self.stats_open;
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::F11) => {
+                        self.toggle_maximize_pane(ctx, app);
                         return true;
                     }
                     PhysicalKey::Code(KeyCode::KeyD) if self.ctrl_held => {
@@ -1261,6 +1278,27 @@ impl EditorApp {
         }
     }
 
+    /// F11 — collapse to a single pane keeping the focused camera; toggle
+    /// back to restore the saved multi-pane layout.
+    fn toggle_maximize_pane(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
+        if let Some(saved) = self.saved_layout.take() {
+            if let Some(grid) = ctx.viewport_grid_mut(app) {
+                grid.set_layout(saved, &[]);
+            }
+        } else if let Some(grid) = ctx.viewport_grid_mut(app)
+            && grid.layout != ViewportLayout::Single
+        {
+            let focused_cam = grid.focused_camera();
+            self.saved_layout = Some(grid.layout);
+            grid.set_layout(ViewportLayout::Single, &[]);
+            if let (Some(cam), Some(h)) = (focused_cam, grid.slot(0))
+                && let Some(pane) = grid.get_mut(h)
+            {
+                pane.camera_handle = cam;
+            }
+        }
+    }
+
     fn push_log(&mut self, text: impl Into<String>, color: [u8; 4]) {
         self.log.push((text.into(), color));
         if self.log.len() > 200 {
@@ -1351,6 +1389,7 @@ impl EditorApp {
                 }
             }
             (2, 4) => self.stats_open = !self.stats_open,
+            (2, 5) => self.toggle_maximize_pane(ctx, app),
             (2, li) => {
                 let layout = match li {
                     0 => ViewportLayout::Single,
@@ -1669,16 +1708,58 @@ impl EditorApp {
         };
         let (pos, has_light, has_camera, is_env, light_kind_tag) = actor_data;
 
-        // Mutable slider values — drawn this frame, written back after dl borrow.
+        // Decompose the current world transform so the fields show live values
+        // (and so an untouched inspector never overwrites gizmo edits).
+        let (rot0, scl0) = {
+            let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else {
+                draw_empty!()
+            };
+            let m = stage
+                .worlds
+                .get(ah.idx as usize)
+                .copied()
+                .unwrap_or(Affine3A::IDENTITY)
+                .matrix3;
+            let sx = m.x_axis.length().max(1e-6);
+            let sy = m.y_axis.length().max(1e-6);
+            let sz = m.z_axis.length().max(1e-6);
+            let rot = glam::Mat3A::from_cols(m.x_axis / sx, m.y_axis / sy, m.z_axis / sz);
+            let q = glam::Quat::from_mat3a(&rot);
+            let (ex, ey, ez) = q.to_euler(glam::EulerRot::XYZ);
+            (
+                [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()],
+                [sx, sy, sz],
+            )
+        };
         let mut px = pos.x;
         let mut py = pos.y;
         let mut pz = pos.z;
-        let mut rx = 0.0_f32;
-        let mut ry = 0.0_f32;
-        let mut rz = 0.0_f32;
-        let mut sx = 1.0_f32;
-        let mut sy = 1.0_f32;
-        let mut sz = 1.0_f32;
+        let mut rx = rot0[0];
+        let mut ry = rot0[1];
+        let mut rz = rot0[2];
+        let mut sx = scl0[0];
+        let mut sy = scl0[1];
+        let mut sz = scl0[2];
+        let (mut light_intensity, mut light_range) = {
+            let mut iv = None;
+            let mut rv = None;
+            if let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh))
+                && let Some(actor) = stage.actors.get(ah)
+            {
+                for se in actor.sub_entities.iter().flatten() {
+                    if let Some(Component::Utility(uc)) =
+                        &se.components[ComponentType::Utility.index()]
+                        && let Some(light) = &uc.light
+                    {
+                        iv = Some(light.intensity);
+                        rv = Some(light.range);
+                    }
+                }
+            }
+            (iv, rv)
+        };
+        let mut transform_changed = false;
+        let mut light_changed = false;
 
         {
             let content_y = iy + TITLEBAR_H + 4.0;
@@ -1698,21 +1779,28 @@ impl EditorApp {
                 input,
             );
 
+            use dumpster_fire_engine::render::ui_core::id::path_key;
+            ui.drag_state = self.insp_drag;
+
             ui.section_header("TRANSFORM");
             if ui.collapsible_header("Position", &mut self.insp_pos_collapsed) {
-                ui.slider("X", &mut px, -500.0, 500.0);
-                ui.slider("Y", &mut py, -500.0, 500.0);
-                ui.slider("Z", &mut pz, -500.0, 500.0);
+                transform_changed |= ui.drag_field(path_key(&["insp"], "px"), "X", &mut px, 0.02);
+                transform_changed |= ui.drag_field(path_key(&["insp"], "py"), "Y", &mut py, 0.02);
+                transform_changed |= ui.drag_field(path_key(&["insp"], "pz"), "Z", &mut pz, 0.02);
             }
             if ui.collapsible_header("Rotation", &mut self.insp_rot_collapsed) {
-                ui.slider("RX", &mut rx, -180.0, 180.0);
-                ui.slider("RY", &mut ry, -180.0, 180.0);
-                ui.slider("RZ", &mut rz, -180.0, 180.0);
+                transform_changed |= ui.drag_field(path_key(&["insp"], "rx"), "Roll", &mut rx, 0.5);
+                transform_changed |=
+                    ui.drag_field(path_key(&["insp"], "ry"), "Pitch", &mut ry, 0.5);
+                transform_changed |= ui.drag_field(path_key(&["insp"], "rz"), "Yaw", &mut rz, 0.5);
             }
             if ui.collapsible_header("Scale", &mut self.insp_scl_collapsed) {
-                ui.slider("SX", &mut sx, 0.01, 10.0);
-                ui.slider("SY", &mut sy, 0.01, 10.0);
-                ui.slider("SZ", &mut sz, 0.01, 10.0);
+                transform_changed |=
+                    ui.drag_field(path_key(&["insp"], "sx"), "X", &mut sx, 0.01);
+                transform_changed |=
+                    ui.drag_field(path_key(&["insp"], "sy"), "Y", &mut sy, 0.01);
+                transform_changed |=
+                    ui.drag_field(path_key(&["insp"], "sz"), "Z", &mut sz, 0.01);
             }
             ui.separator();
 
@@ -1724,10 +1812,13 @@ impl EditorApp {
             if has_light {
                 ui.section_header("LIGHT");
                 ui.label(light_kind_name(light_kind_tag.unwrap_or(0) as u8));
-                let mut intensity = 100.0_f32;
-                let mut range = 0.0_f32;
-                ui.slider("Intensity", &mut intensity, 0.0, 2000.0);
-                ui.slider("Range", &mut range, 0.0, 100.0);
+                if let (Some(iv), Some(rv)) = (light_intensity.as_mut(), light_range.as_mut()) {
+                    light_changed |=
+                        ui.drag_field(path_key(&["insp"], "li"), "Intensity", iv, 2.0);
+                    light_changed |= ui.drag_field(path_key(&["insp"], "lr"), "Range", rv, 0.1);
+                    *iv = iv.max(0.0);
+                    *rv = rv.max(0.0);
+                }
                 ui.separator();
             }
             if has_camera {
@@ -1745,14 +1836,22 @@ impl EditorApp {
             if ui.collapsible_header("Components", &mut self.insp_cmp_collapsed) {
                 ui.button("+ Add Component");
             }
+            if let Some(bd) = ui.begin_drag.take() {
+                self.insp_drag = Some(bd);
+            }
         } // dl borrow released here
+        if !self.ui_left_down {
+            self.insp_drag = None;
+        }
 
-        // Write slider values back to the actor's world transform.
-        if let Some(stage) = self
-            .world
-            .levels
-            .get_mut(lh)
-            .and_then(|l| l.stages.get_mut(sh))
+        // Write values back only when a field actually changed this frame, so
+        // an idle inspector never stomps gizmo edits.
+        if transform_changed
+            && let Some(stage) = self
+                .world
+                .levels
+                .get_mut(lh)
+                .and_then(|l| l.stages.get_mut(sh))
             && let Some(t) = stage.worlds.get_mut(ah.idx as usize)
         {
             t.translation = glam::Vec3A::new(px, py, pz);
@@ -1763,7 +1862,30 @@ impl EditorApp {
                 rz.to_radians(),
             );
             t.matrix3 = glam::Mat3A::from_quat(quat)
-                * glam::Mat3A::from_diagonal(glam::Vec3::new(sx, sy, sz));
+                * glam::Mat3A::from_diagonal(glam::Vec3::new(
+                    sx.max(0.01),
+                    sy.max(0.01),
+                    sz.max(0.01),
+                ));
+        }
+        if light_changed
+            && let (Some(iv), Some(rv)) = (light_intensity, light_range)
+            && let Some(stage) = self
+                .world
+                .levels
+                .get_mut(lh)
+                .and_then(|l| l.stages.get_mut(sh))
+            && let Some(actor) = stage.actors.get_mut(ah)
+        {
+            for se in actor.sub_entities.iter_mut().flatten() {
+                if let Some(Component::Utility(uc)) =
+                    &mut se.components[ComponentType::Utility.index()]
+                    && let Some(light) = uc.light.as_mut()
+                {
+                    light.intensity = iv;
+                    light.range = rv;
+                }
+            }
         }
     }
 }
@@ -1797,7 +1919,7 @@ fn light_kind_name(tag: u8) -> &'static str {
 // ── Bottom output log panel ────────────────────────────────────────────────
 
 impl EditorApp {
-    fn draw_bottom_panel(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+    fn draw_bottom_panel(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
         use dumpster_fire_engine::resource_manager::ui_manager::{draw as uidraw, font};
 
         let (win_w, win_h) = ctx
@@ -1816,78 +1938,201 @@ impl EditorApp {
         dl.push_hsep(0.0, by, win_w, div_col);
         dl.push_title_bar(0.0, by, win_w, TITLEBAR_H, TITLEBAR_BG, SEP);
 
-        // Title "OUTPUT LOG"
+        // Tab strip: OUTPUT LOG | CONTENT
+        let mut clicked_tab: Option<usize> = None;
         {
-            let mut tx = 6.0_f32;
-            for c in "OUTPUT LOG".chars() {
-                if c == ' ' {
+            use dumpster_fire_engine::resource_manager::ui_manager::draw as uidraw;
+            let tabs = ["OUTPUT LOG", "CONTENT"];
+            let mut tx0 = 0.0_f32;
+            for (ti, name) in tabs.iter().enumerate() {
+                let tw = name.chars().count() as f32 * 8.0 + 18.0;
+                let active = self.bottom_tab == ti;
+                let hov = self.ui_cursor[0] >= tx0
+                    && self.ui_cursor[0] < tx0 + tw
+                    && self.ui_cursor[1] >= by
+                    && self.ui_cursor[1] < by + TITLEBAR_H;
+                if active {
+                    dl.push_rect(tx0, by, tw, TITLEBAR_H, uidraw::SOLID, [46, 46, 64, 255]);
+                    dl.push_rect(tx0, by + TITLEBAR_H - 2.0, tw, 2.0, uidraw::SOLID, [120, 190, 255, 255]);
+                } else if hov {
+                    dl.push_rect(tx0, by, tw, TITLEBAR_H, uidraw::SOLID, [38, 38, 52, 255]);
+                }
+                if hov && self.ui_left_just_pressed {
+                    clicked_tab = Some(ti);
+                }
+                let mut tx = tx0 + 9.0;
+                let tc: [u8; 4] = if active {
+                    [210, 220, 240, 255]
+                } else {
+                    [150, 155, 175, 220]
+                };
+                for c in name.chars() {
+                    if c != ' ' {
+                        let uv = font::glyph_rect(c);
+                        if uv != [0f32; 4] {
+                            dl.push_rect(tx, by + 3.0, 8.0, 16.0, uv, tc);
+                        }
+                    }
                     tx += 8.0;
-                    continue;
                 }
-                let uv = font::glyph_rect(c);
-                if uv != [0f32; 4] {
-                    dl.push_rect(tx, by + 3.0, 8.0, 16.0, uv, [200, 210, 230, 255]);
-                }
-                tx += 8.0;
+                tx0 += tw + 2.0;
             }
         }
 
-        // FPS stats line
-        let fps_str = format!(
-            "{:.1} ms   {:.0} fps",
-            if self.fps_display > 0.0 {
-                1000.0 / self.fps_display
-            } else {
-                0.0
-            },
-            self.fps_display
-        );
-        let stats_y = by + TITLEBAR_H + 4.0;
-        {
-            let mut tx = 8.0_f32;
-            for c in fps_str.chars() {
-                if c == ' ' {
+        let mut spawn_asset: Option<Arc<str>> = None;
+        if self.bottom_tab == 0 {
+            // FPS stats line
+            let fps_str = format!(
+                "{:.1} ms   {:.0} fps",
+                if self.fps_display > 0.0 {
+                    1000.0 / self.fps_display
+                } else {
+                    0.0
+                },
+                self.fps_display
+            );
+            let stats_y = by + TITLEBAR_H + 4.0;
+            {
+                let mut tx = 8.0_f32;
+                for c in fps_str.chars() {
+                    if c == ' ' {
+                        tx += 8.0;
+                        continue;
+                    }
+                    let uv = font::glyph_rect(c);
+                    if uv != [0f32; 4] {
+                        dl.push_rect(tx, stats_y, 8.0, 16.0, uv, [130, 190, 130, 255]);
+                    }
                     tx += 8.0;
-                    continue;
                 }
-                let uv = font::glyph_rect(c);
-                if uv != [0f32; 4] {
-                    dl.push_rect(tx, stats_y, 8.0, 16.0, uv, [130, 190, 130, 255]);
-                }
-                tx += 8.0;
             }
-        }
 
-        // Divider between stats and content
-        dl.push_hsep(0.0, stats_y + 18.0, win_w, [42, 42, 56, 255]);
+            // Divider between stats and content
+            dl.push_hsep(0.0, stats_y + 18.0, win_w, [42, 42, 56, 255]);
 
-        // Log content — newest lines that fit, tail-anchored.
-        let line_y_start = stats_y + 22.0;
-        let avail = ((win_h - 6.0 - line_y_start) / 18.0).max(0.0) as usize;
-        let skip = self.log.len().saturating_sub(avail);
-        for (i, (text, color)) in self.log.iter().skip(skip).enumerate() {
-            let ly = line_y_start + i as f32 * 18.0;
-            if ly + 16.0 > win_h - 4.0 {
-                break;
-            }
-            let mut tx = 8.0_f32;
-            // Render each char of the log line
-            for c in text.chars() {
-                if tx + 8.0 > win_w - 8.0 {
+            // Log content — newest lines that fit, tail-anchored.
+            let line_y_start = stats_y + 22.0;
+            let avail = ((win_h - 6.0 - line_y_start) / 18.0).max(0.0) as usize;
+            let skip = self.log.len().saturating_sub(avail);
+            for (i, (text, color)) in self.log.iter().skip(skip).enumerate() {
+                let ly = line_y_start + i as f32 * 18.0;
+                if ly + 16.0 > win_h - 4.0 {
                     break;
                 }
-                if c == ' ' {
+                let mut tx = 8.0_f32;
+                for c in text.chars() {
+                    if tx + 8.0 > win_w - 8.0 {
+                        break;
+                    }
+                    if c == ' ' {
+                        tx += 8.0;
+                        continue;
+                    }
+                    let uv = font::glyph_rect(c);
+                    if uv != [0f32; 4] {
+                        dl.push_rect(tx, ly, 8.0, 14.0, uv, *color);
+                    }
                     tx += 8.0;
-                    continue;
                 }
-                let uv = font::glyph_rect(c);
-                if uv != [0f32; 4] {
-                    dl.push_rect(tx, ly, 8.0, 14.0, uv, *color);
+            }
+        } else {
+            // Content browser — asset tiles from the scanned model paths.
+            // Click a tile to spawn it into the scene.
+            use dumpster_fire_engine::resource_manager::ui_manager::font::IconId;
+            let cb_y = by + TITLEBAR_H + 8.0;
+            let tile_w = 116.0_f32;
+            let tile_h = 64.0_f32;
+            let per_row = (((win_w - 16.0) / (tile_w + 8.0)) as usize).max(1);
+            if self.picker_paths.is_empty() {
+                let mut tx = 8.0_f32;
+                for c in "No assets found under assets/models".chars() {
+                    if c != ' ' {
+                        let uv = font::glyph_rect(c);
+                        if uv != [0f32; 4] {
+                            dl.push_rect(tx, cb_y, 8.0, 16.0, uv, [150, 150, 170, 255]);
+                        }
+                    }
+                    tx += 8.0;
                 }
-                tx += 8.0;
+            }
+            for (i, path) in self.picker_paths.iter().enumerate() {
+                let col = i % per_row;
+                let row = i / per_row;
+                let tx0 = 8.0 + col as f32 * (tile_w + 8.0);
+                let ty0 = cb_y + row as f32 * (tile_h + 8.0);
+                if ty0 + tile_h > win_h - 4.0 {
+                    break;
+                }
+                let hov = self.ui_cursor[0] >= tx0
+                    && self.ui_cursor[0] < tx0 + tile_w
+                    && self.ui_cursor[1] >= ty0
+                    && self.ui_cursor[1] < ty0 + tile_h;
+                let bg: [u8; 4] = if hov {
+                    [48, 60, 92, 255]
+                } else {
+                    [32, 32, 44, 255]
+                };
+                dl.push_rect(tx0, ty0, tile_w, tile_h, uidraw::SOLID, bg);
+                dl.push_rect(
+                    tx0,
+                    ty0 + tile_h - 1.0,
+                    tile_w,
+                    1.0,
+                    uidraw::SOLID,
+                    [58, 58, 76, 255],
+                );
+                // 32px mesh icon, centered in the upper tile half
+                dl.push_rect(
+                    tx0 + (tile_w - 32.0) * 0.5,
+                    ty0 + 4.0,
+                    32.0,
+                    32.0,
+                    font::icon_rect(IconId::Box),
+                    if hov {
+                        [170, 210, 255, 255]
+                    } else {
+                        [120, 170, 120, 255]
+                    },
+                );
+                // file name (no dir, no extension), truncated to the tile
+                let name = path.rsplit('/').next().unwrap_or(path.as_ref());
+                let name = name.strip_suffix(".glb").unwrap_or(name);
+                let max_chars = ((tile_w - 8.0) / 8.0) as usize;
+                let mut nx = tx0 + 4.0;
+                for c in name.chars().take(max_chars) {
+                    if c != ' ' {
+                        let uv = font::glyph_rect(c);
+                        if uv != [0f32; 4] {
+                            dl.push_rect(nx, ty0 + 42.0, 8.0, 16.0, uv, [195, 200, 214, 255]);
+                        }
+                    }
+                    nx += 8.0;
+                }
+                if hov && self.ui_left_just_pressed {
+                    spawn_asset = Some(Arc::clone(path));
+                }
             }
         }
-        let _ = uidraw::SOLID;
+
+        if let Some(t) = clicked_tab {
+            self.bottom_tab = t;
+        }
+        if let Some(path) = spawn_asset {
+            if let Some(win) = self.win
+                && let Ok(asset) = ctx.load_gltf(win, PathBuf::from(path.as_ref()))
+            {
+                self.do_spawn_mesh(asset, Arc::clone(&path));
+                self.push_log(
+                    format!("LogContent: spawned {}", path),
+                    [140, 200, 140, 255],
+                );
+            } else {
+                self.push_log(
+                    format!("LogContent: failed to load {}", path),
+                    [220, 140, 120, 255],
+                );
+            }
+        }
     }
 }
 
@@ -2777,6 +3022,9 @@ fn main() -> ForgeResult<()> {
         menu_rect: (0.0, 0.0, 0.0, 0.0),
         bottom_h: 140.0,
         quit_requested: false,
+        insp_drag: None,
+        bottom_tab: 0,
+        saved_layout: None,
         log: {
             let mut l = ThinVec::new();
             l.push(("LogInit: Engine initialized.".to_string(), [140, 200, 140, 255u8]));
