@@ -656,6 +656,19 @@ mod region_op_tests {
     }
 
     #[test]
+    fn bevel_cube_vertex_stays_manifold() {
+        // Bevel one cube corner: the corner vertex is replaced by a cap face,
+        // so vertex count grows and the result is still a valid manifold.
+        let (pos, idx) = cube();
+        let (np, ni, sel) = bevel_vertices_indexed(&pos, &idx, &[6], 0.3);
+        assert!(np.len() > pos.len(), "bevel adds chamfer vertices");
+        assert!(!sel.is_empty(), "cap vertices selected");
+        let m = HalfEdgeMesh::build_from_indexed(&np, &ni)
+            .expect("beveled cube is a valid manifold");
+        m.validate().expect("half-edge invariants hold after bevel");
+    }
+
+    #[test]
     fn smooth_rounds_subdivided_cube() {
         // Subdivide the cube twice, then Laplacian-smooth heavily: the closed
         // surface should shrink toward its centroid (umbrella smoothing has no
@@ -902,6 +915,116 @@ impl HalfEdgeMesh {
     ) -> Result<(HalfEdgeMesh, Vec<u32>), MeshError> {
         let (p, i) = self.to_indexed();
         let (np, ni, sel) = poke_faces_indexed(&p, &i, faces);
+        Ok((HalfEdgeMesh::build_from_indexed(&np, &ni)?, sel))
+    }
+}
+
+/// Vertex bevel (chamfer): each selected vertex is replaced by a face that
+/// cuts across its incident edges at fraction `t` (0..1). Each incident face
+/// corner at a selected vertex is split into the two edge points; a cap face
+/// closes the corner. Operates on the indexed mesh (Blender *Bevel Vertices*).
+/// Returns the rebuilt geometry and the new cap vertex ids (selected after).
+pub fn bevel_vertices_indexed(
+    pos: &[[f32; 3]],
+    idx: &[u32],
+    verts: &[u32],
+    t: f32,
+) -> (Vec<[f32; 3]>, Vec<u32>, Vec<u32>) {
+    use std::collections::HashMap;
+    let t = t.clamp(0.05, 0.49);
+    let mut selected = vec![false; pos.len()];
+    for &v in verts {
+        if (v as usize) < selected.len() {
+            selected[v as usize] = true;
+        }
+    }
+    let mut new_pos = pos.to_vec();
+    let mut bp: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut get_bp = |v: u32, n: u32, np: &mut Vec<[f32; 3]>| -> u32 {
+        *bp.entry((v, n)).or_insert_with(|| {
+            let a = pos[v as usize];
+            let b = pos[n as usize];
+            np.push([
+                a[0] + t * (b[0] - a[0]),
+                a[1] + t * (b[1] - a[1]),
+                a[2] + t * (b[2] - a[2]),
+            ]);
+            (np.len() - 1) as u32
+        })
+    };
+
+    let mut new_idx: Vec<u32> = Vec::with_capacity(idx.len() * 2);
+    // Per selected vertex, the directed cap edges (one per incident face).
+    let mut cap_edges: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+
+    for tri in idx.chunks_exact(3) {
+        let (a, b, c) = (tri[0], tri[1], tri[2]);
+        // (corner, prev, next) in CCW order: c->a->b, a->b->c, b->c->a.
+        let corners = [(a, c, b), (b, a, c), (c, b, a)];
+        let mut poly: Vec<u32> = Vec::with_capacity(6);
+        for &(x, prev, next) in &corners {
+            if selected[x as usize] {
+                let p_prev = get_bp(x, prev, &mut new_pos);
+                let p_next = get_bp(x, next, &mut new_pos);
+                poly.push(p_prev);
+                poly.push(p_next);
+                cap_edges.entry(x).or_default().push((p_prev, p_next));
+            } else {
+                poly.push(x);
+            }
+        }
+        // Fan-triangulate the (3..6)-gon, preserving winding.
+        for i in 1..poly.len() - 1 {
+            new_idx.extend_from_slice(&[poly[0], poly[i], poly[i + 1]]);
+        }
+    }
+
+    // Cap faces: chain each selected vertex's directed edges into a cycle and
+    // fan-triangulate. The edges (p_prev -> p_next) already wind consistently
+    // with the corner (incoming from prev, outgoing to next), so the chained
+    // ring is the cap boundary; fanning it caps the corner outward.
+    let mut sel = Vec::new();
+    for (_v, edges) in cap_edges {
+        if edges.len() < 3 {
+            continue;
+        }
+        // Build successor map: p_prev -> p_next, then walk the cycle.
+        let mut succ: HashMap<u32, u32> = HashMap::new();
+        for &(p0, p1) in &edges {
+            succ.insert(p0, p1);
+        }
+        let start = edges[0].0;
+        let mut ring: Vec<u32> = vec![start];
+        let mut cur = succ[&start];
+        let mut guard = 0;
+        while cur != start && guard < edges.len() + 2 {
+            ring.push(cur);
+            cur = match succ.get(&cur) {
+                Some(&n) => n,
+                None => break,
+            };
+            guard += 1;
+        }
+        if ring.len() >= 3 {
+            for i in 1..ring.len() - 1 {
+                // Reverse winding so the cap faces away from the removed vertex.
+                new_idx.extend_from_slice(&[ring[0], ring[i + 1], ring[i]]);
+            }
+            sel.extend_from_slice(&ring);
+        }
+    }
+    (new_pos, new_idx, sel)
+}
+
+impl HalfEdgeMesh {
+    /// Bevel (chamfer) the given vertices by fraction `t`.
+    pub fn with_vertices_beveled(
+        &self,
+        verts: &[u32],
+        t: f32,
+    ) -> Result<(HalfEdgeMesh, Vec<u32>), MeshError> {
+        let (p, i) = self.to_indexed();
+        let (np, ni, sel) = bevel_vertices_indexed(&p, &i, verts, t);
         Ok((HalfEdgeMesh::build_from_indexed(&np, &ni)?, sel))
     }
 }

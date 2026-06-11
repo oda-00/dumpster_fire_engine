@@ -880,6 +880,15 @@ impl AppLogic for EditorApp {
                             return true;
                         }
                     }
+                    PhysicalKey::Code(KeyCode::KeyB) if self.ctrl_held => {
+                        if let Some(e) = self.edit.as_mut() {
+                            if e.bevel_selected(0.3) {
+                                self.push_log("LogMesh: beveled vertices.", [140, 200, 140, 255]);
+                            }
+                            self.edit_dirty = true;
+                            return true;
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::KeyA) => {
                         if let Some(e) = self.edit.as_mut() {
                             if e.selected_vertex_count() > 0 {
@@ -1914,6 +1923,15 @@ impl EditorApp {
                     self.edit_dirty = true;
                 }
             }
+            "bevel" => {
+                let t = tok.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.3);
+                if let Some(e) = self.edit.as_mut() {
+                    e.select_all();
+                    e.bevel_selected(t);
+                    self.edit_dirty = true;
+                    self.push_log("LogMesh: beveled.", [140, 200, 140, 255]);
+                }
+            }
             "save" => self.save_scene(tok.get(1).copied().unwrap_or("scene.dfescene")),
             "load" => {
                 let path = tok.get(1).copied().unwrap_or("scene.dfescene").to_string();
@@ -2394,6 +2412,7 @@ impl EditorApp {
             poke: bool,
             recalc: bool,
             apply: bool,
+            bevel: bool,
             undo: bool,
             redo: bool,
         }
@@ -2479,6 +2498,7 @@ impl EditorApp {
             a.recalc = ui.button("Recalc Normals (N)");
             a.smooth = ui.button("Smooth Verts");
             a.poke = ui.button("Poke Faces");
+            a.bevel = ui.button("Bevel Verts (Ctrl+B)");
 
             ui.section_header("COMMIT");
             a.apply = ui.button("Apply to Object");
@@ -2573,6 +2593,13 @@ impl EditorApp {
             e.poke_selected();
             log = Some(("LogMesh: poked faces.".into(), [140, 200, 140, 255]));
         }
+        if a.bevel {
+            if e.bevel_selected(0.3) {
+                log = Some(("LogMesh: beveled vertices.".into(), [140, 200, 140, 255]));
+            } else {
+                log = Some(("LogMesh: bevel needs selected verts.".into(), [200, 160, 110, 255]));
+            }
+        }
         let do_apply = a.apply;
         if a.undo {
             e.undo();
@@ -2593,6 +2620,7 @@ impl EditorApp {
             || a.recalc
             || a.smooth
             || a.poke
+            || a.bevel
             || a.undo
             || a.redo
         {

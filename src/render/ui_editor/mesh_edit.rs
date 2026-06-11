@@ -325,6 +325,15 @@ impl EditSession {
         true
     }
 
+    /// Bevel (chamfer) the selected vertices by fraction `t` (Blender Ctrl+B).
+    pub fn bevel_selected(&mut self, t: f32) -> bool {
+        let verts: Vec<u32> = self.mesh.selected_vertices().into_iter().collect();
+        if verts.is_empty() {
+            return false;
+        }
+        self.apply_topology(self.mesh.with_vertices_beveled(&verts, t))
+    }
+
     /// Recalculate consistent, outward-facing normals (Blender Shift+N).
     pub fn recalc_normals(&mut self) -> bool {
         self.apply_topology(self.mesh.with_normals_recalculated().map(|m| (m, Vec::new())))
