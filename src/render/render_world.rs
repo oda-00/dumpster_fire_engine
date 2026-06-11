@@ -127,9 +127,10 @@ pub fn collect_and_submit(
             && (lights.is_empty() || lit_by_any_light(&r.aabb_world, &lights))
     });
 
-    if renderables.is_empty() {
-        return Ok(None);
-    }
+    // NOTE: an empty renderable list must still fall through — the graphics
+    // factory has to be rebuilt (with just the sky/grid plans) or every pane
+    // keeps drawing the previous frame's stale call list after the last mesh
+    // actor is deleted.
 
     // Step 3 — reset skin pools before any per-frame allocations.
     asset_cache.reset_all_skin_pools();

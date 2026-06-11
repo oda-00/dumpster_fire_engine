@@ -194,7 +194,7 @@ struct EditorApp {
 /// Menu-bar definition: label + entries. Entry actions are routed in
 /// `draw_menus` by (menu_idx, entry_idx).
 const MENUS: [(&str, &[&str]); 4] = [
-    ("File", &["Open glTF...", "Quit"]),
+    ("File", &["Open glTF...", "Save Scene", "Load Scene", "Quit"]),
     ("Edit", &["Undo", "Redo", "Duplicate", "Delete"]),
     (
         "Window",
@@ -411,6 +411,102 @@ impl EditorApp {
             }
         }
         best_h
+    }
+
+    /// World-space AABB of an actor: the transformed mesh rest AABB when a
+    /// glTF asset is attached, else a unit box around the actor's position
+    /// (matches the pick_actor fallback).
+    fn actor_world_aabb(
+        &self,
+        ctx: &AppCtx<'_>,
+        ah: ActorHandle,
+    ) -> Option<([f32; 3], [f32; 3])> {
+        use dumpster_fire_engine::render::gltf_assets::transform_aabb;
+        let (lh, sh) = self.main_stage?;
+        let stage = self.world.levels.get(lh)?.stages.get(sh)?;
+        let actor = stage.actors.get(ah)?;
+        let wa = *stage.worlds.get(ah.idx as usize)?;
+        for se in actor.sub_entities.iter().flatten() {
+            let (_, mesh_opt) = se.actor_type.visibility_and_mesh();
+            if let Some(mr) = mesh_opt
+                && let Some(loaded) = ctx.gltf_assets.get(mr.asset)
+            {
+                return Some(transform_aabb(&loaded.rest_aabb, &wa));
+            }
+        }
+        let c = wa.translation;
+        Some((
+            [c.x - 0.5, c.y - 0.5, c.z - 0.5],
+            [c.x + 0.5, c.y + 0.5, c.z + 0.5],
+        ))
+    }
+
+    /// Unreal-style selection brackets: project the selected actor's AABB
+    /// into the focused pane and draw orange corner brackets around its
+    /// screen-space bounds.
+    fn draw_selection_brackets(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        let Some(ah) = self.world.selection else {
+            return;
+        };
+        let Some((mn, mx)) = self.actor_world_aabb(ctx, ah) else {
+            return;
+        };
+        let Some(grid) = ctx.viewport_grid(app) else {
+            return;
+        };
+        let Some(vp) = grid.get(grid.focused) else {
+            return;
+        };
+        let (win_w, win_h) = (grid.win_w, grid.win_h);
+        let aspect = vp.rect.pixel_aspect(win_w, win_h);
+        let Some(cam) = ctx.cameras.get(vp.camera_handle) else {
+            return;
+        };
+        let vpm = Mat4::from_cols_array(&cam.view_projection_matrix(aspect));
+        let (px, py) = (vp.rect.x * win_w, vp.rect.y * win_h);
+        let (pw, ph) = (vp.rect.w * win_w, vp.rect.h * win_h);
+
+        let mut smin = [f32::MAX; 2];
+        let mut smax = [f32::MIN; 2];
+        for i in 0..8u32 {
+            let c = Vec4::new(
+                if i & 1 == 0 { mn[0] } else { mx[0] },
+                if i & 2 == 0 { mn[1] } else { mx[1] },
+                if i & 4 == 0 { mn[2] } else { mx[2] },
+                1.0,
+            );
+            let h = vpm * c;
+            if h.w <= 1e-6 {
+                return; // corner behind the eye — skip brackets this frame
+            }
+            let ndc = [h.x / h.w, h.y / h.w];
+            let sx = px + (ndc[0] * 0.5 + 0.5) * pw;
+            let sy = py + (ndc[1] * 0.5 + 0.5) * ph;
+            smin[0] = smin[0].min(sx);
+            smin[1] = smin[1].min(sy);
+            smax[0] = smax[0].max(sx);
+            smax[1] = smax[1].max(sy);
+        }
+        // Clamp to the pane and skip degenerate rects.
+        smin[0] = smin[0].max(px);
+        smin[1] = smin[1].max(py.max(TOOLBAR_H));
+        smax[0] = smax[0].min(px + pw);
+        smax[1] = smax[1].min(py + ph);
+        if smax[0] - smin[0] < 4.0 || smax[1] - smin[1] < 4.0 {
+            return;
+        }
+        let arm = ((smax[0] - smin[0]).min(smax[1] - smin[1]) * 0.25).clamp(6.0, 22.0);
+        let col = [255, 160, 60, 230u8];
+        let dl = &mut self.world.ui.draw_list;
+        for (cx, cy, dx, dy) in [
+            (smin[0], smin[1], 1.0_f32, 1.0_f32),
+            (smax[0], smin[1], -1.0, 1.0),
+            (smin[0], smax[1], 1.0, -1.0),
+            (smax[0], smax[1], -1.0, -1.0),
+        ] {
+            dl.push_line(cx, cy, cx + dx * arm, cy, 1.5, col);
+            dl.push_line(cx, cy, cx, cy + dy * arm, 1.5, col);
+        }
     }
 
     fn ui_input(&self) -> UiInputState {
@@ -795,6 +891,13 @@ impl AppLogic for EditorApp {
                     let in_inspector = self.ui_cursor[0] >= win_w - self.inspector_w
                         && self.ui_cursor[1] >= TOOLBAR_H;
                     let in_picker = self.picker_open;
+                    let in_bottom = {
+                        let win_h = ctx
+                            .viewport_grid(app)
+                            .map(|g| g.win_h)
+                            .unwrap_or(720.0);
+                        self.ui_cursor[1] >= win_h - self.bottom_h
+                    };
                     let in_menu = self.menu_open.is_some() && {
                         let (mx, my, mw, mh) = self.menu_rect;
                         self.ui_cursor[0] >= mx
@@ -807,9 +910,20 @@ impl AppLogic for EditorApp {
                         && self.ui_cursor[0] < 370.0
                         && self.ui_cursor[1] >= TOOLBAR_H
                         && self.ui_cursor[1] < TOOLBAR_H + 220.0;
-                    self.ui_consumed_click =
-                        in_toolbar || in_outliner || in_inspector || in_picker || in_spawn || in_menu;
-                    if !self.ui_consumed_click {
+                    self.ui_consumed_click = in_toolbar
+                        || in_outliner
+                        || in_inspector
+                        || in_picker
+                        || in_spawn
+                        || in_menu
+                        || in_bottom;
+                    if self.ui_consumed_click {
+                        // UI chrome owns this click — it must never fall
+                        // through to the app's camera grab toggle, which
+                        // would silently arm FPS-look on a menu click.
+                        return true;
+                    }
+                    {
                         // Edit mode owns clicks in the viewport: grab a gizmo arrow
                         // to translate the element selection, else pick an element.
                         if self.edit.is_some() {
@@ -894,6 +1008,7 @@ impl AppLogic for EditorApp {
         self.world.ui.draw_list.clear();
         self.draw_toolbar(ctx, app);
         self.draw_viewport_chrome(ctx, app);
+        self.draw_selection_brackets(ctx, app);
         self.draw_outliner(ctx, app);
         self.draw_inspector(ctx, app);
         self.draw_bottom_panel(ctx, app);
@@ -1301,6 +1416,245 @@ impl EditorApp {
         }
     }
 
+    /// Serialize the stage to a line-based native scene file. One line per
+    /// actor: kind, kind-specific fields, then the world Affine3A as
+    /// 12 floats (matrix3 columns + translation).
+    fn save_scene(&mut self, path: &str) {
+        let Some((lh, sh)) = self.main_stage else {
+            return;
+        };
+        let Some(stage) = self.world.levels.get(lh).and_then(|l| l.stages.get(sh)) else {
+            return;
+        };
+        let mut out = String::from("dfe-scene v1\n");
+        for (ah, actor) in stage.actors.entries() {
+            let Some(wa) = stage.worlds.get(ah.idx as usize) else {
+                continue;
+            };
+            let m = wa.matrix3.to_cols_array();
+            let t = wa.translation;
+            let affine = format!(
+                "{} {} {} {} {} {} {} {} {} {} {} {}",
+                m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], t.x, t.y, t.z
+            );
+            let mut written = false;
+            for se in actor.sub_entities.iter().flatten() {
+                match &se.actor_type {
+                    ActorType::Environment(e) if e.mesh.is_some() => {
+                        out.push_str(&format!("mesh {} {affine}\n", e.name));
+                        written = true;
+                    }
+                    ActorType::Utility(u) => {
+                        if let Some(Component::Utility(uc)) =
+                            &se.components[ComponentType::Utility.index()]
+                            && let Some(l) = &uc.light
+                        {
+                            let head = match &l.kind {
+                                LightKind::Point => "light point".to_string(),
+                                LightKind::Spot {
+                                    cone_inner,
+                                    cone_outer,
+                                    direction,
+                                } => format!(
+                                    "light spot {cone_inner} {cone_outer} {} {} {}",
+                                    direction[0], direction[1], direction[2]
+                                ),
+                                LightKind::Directional { direction } => format!(
+                                    "light dir {} {} {}",
+                                    direction[0], direction[1], direction[2]
+                                ),
+                                _ => continue, // editor doesn't spawn other kinds
+                            };
+                            out.push_str(&format!(
+                                "{head} {} {} {} {} {} {affine}\n",
+                                l.color[0], l.color[1], l.color[2], l.intensity, l.range
+                            ));
+                            written = true;
+                        } else if !written {
+                            out.push_str(&format!("empty {} {affine}\n", u.name));
+                            written = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if written {
+                    break;
+                }
+            }
+        }
+        match std::fs::write(path, &out) {
+            Ok(()) => {
+                let n = out.lines().count() - 1;
+                self.push_log(
+                    format!("LogEditor: saved {n} actors to {path}"),
+                    [140, 200, 140, 255],
+                );
+            }
+            Err(e) => self.push_log(
+                format!("LogEditor: save failed: {e}"),
+                [230, 120, 120, 255],
+            ),
+        }
+    }
+
+    /// Load a scene file saved by `save_scene`: despawns every current actor,
+    /// then respawns from the file (meshes re-loaded through the asset cache).
+    fn load_scene(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle, path: &str) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.push_log(
+                    format!("LogEditor: load failed: {e}"),
+                    [230, 120, 120, 255],
+                );
+                return;
+            }
+        };
+        let Some((lh, sh)) = self.main_stage else {
+            return;
+        };
+        // Clear the current stage.
+        for ah in std::mem::take(&mut self.actors) {
+            self.world.despawn_actor(lh, sh, ah);
+        }
+        self.world.selection = None;
+
+        let parse_affine = |tok: &[&str]| -> Option<Affine3A> {
+            if tok.len() < 12 {
+                return None;
+            }
+            let mut f = [0.0_f32; 12];
+            for (i, v) in tok[..12].iter().enumerate() {
+                f[i] = v.parse().ok()?;
+            }
+            let mut m = [0.0_f32; 9];
+            m.copy_from_slice(&f[..9]);
+            Some(Affine3A {
+                matrix3: glam::Mat3A::from_cols_array(&m),
+                translation: glam::Vec3A::new(f[9], f[10], f[11]),
+            })
+        };
+        let mut loaded = 0usize;
+        for line in text.lines().skip(1) {
+            let tok: ThinVec<&str> = line.split_whitespace().collect();
+            if tok.is_empty() {
+                continue;
+            }
+            let spawned: Option<(Option<Affine3A>, ActorHandle)> = match tok[0] {
+                "mesh" if tok.len() >= 14 => {
+                    let mesh_path: Arc<str> = Arc::from(tok[1]);
+                    match ctx.load_gltf(app, PathBuf::from(tok[1])) {
+                        Ok(asset) => {
+                            self.do_spawn_mesh(asset, mesh_path);
+                            self.world
+                                .selection
+                                .map(|ah| (parse_affine(&tok[2..]), ah))
+                        }
+                        Err(e) => {
+                            self.push_log(
+                                format!("LogEditor: asset {} failed: {e:?}", tok[1]),
+                                [230, 120, 120, 255],
+                            );
+                            None
+                        }
+                    }
+                }
+                "light" if tok.len() >= 2 => {
+                    let (kind, rest) = match tok[1] {
+                        "spot" if tok.len() >= 7 => (
+                            tok[2].parse().ok().and_then(|ci| {
+                                Some(LightKind::Spot {
+                                    cone_inner: ci,
+                                    cone_outer: tok[3].parse().ok()?,
+                                    direction: [
+                                        tok[4].parse().ok()?,
+                                        tok[5].parse().ok()?,
+                                        tok[6].parse().ok()?,
+                                    ],
+                                })
+                            }),
+                            &tok[7..],
+                        ),
+                        "dir" if tok.len() >= 5 => (
+                            (|| {
+                                Some(LightKind::Directional {
+                                    direction: [
+                                        tok[2].parse().ok()?,
+                                        tok[3].parse().ok()?,
+                                        tok[4].parse().ok()?,
+                                    ],
+                                })
+                            })(),
+                            &tok[5..],
+                        ),
+                        _ => (Some(LightKind::Point), &tok[2..]),
+                    };
+                    match (kind, rest.len() >= 17) {
+                        (Some(k), true) => {
+                            self.spawn_light(k);
+                            // Patch color / intensity / range over the defaults.
+                            if let (Some(ah), Ok(r), Ok(g), Ok(b), Ok(iv), Ok(rv)) = (
+                                self.world.selection,
+                                rest[0].parse::<f32>(),
+                                rest[1].parse::<f32>(),
+                                rest[2].parse::<f32>(),
+                                rest[3].parse::<f32>(),
+                                rest[4].parse::<f32>(),
+                            ) {
+                                if let Some(stage) = self
+                                    .world
+                                    .levels
+                                    .get_mut(lh)
+                                    .and_then(|l| l.stages.get_mut(sh))
+                                    && let Some(actor) = stage.actors.get_mut(ah)
+                                {
+                                    for se in actor.sub_entities.iter_mut().flatten() {
+                                        if let Some(Component::Utility(uc)) =
+                                            &mut se.components[ComponentType::Utility.index()]
+                                            && let Some(l) = uc.light.as_mut()
+                                        {
+                                            l.color = [r, g, b];
+                                            l.intensity = iv;
+                                            l.range = rv;
+                                        }
+                                    }
+                                }
+                                Some((parse_affine(&rest[5..]), ah))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                "empty" if tok.len() >= 14 => {
+                    let name = tok[1].to_string();
+                    self.spawn_empty(&name);
+                    self.world
+                        .selection
+                        .map(|ah| (parse_affine(&tok[2..]), ah))
+                }
+                _ => None,
+            };
+            if let Some((Some(wa), ah)) = spawned
+                && let Some(stage) = self
+                    .world
+                    .levels
+                    .get_mut(lh)
+                    .and_then(|l| l.stages.get_mut(sh))
+                && let Some(t) = stage.worlds.get_mut(ah.idx as usize)
+            {
+                *t = wa;
+                loaded += 1;
+            }
+        }
+        self.world.selection = None;
+        self.push_log(
+            format!("LogEditor: loaded {loaded} actors from {path}"),
+            [140, 200, 140, 255],
+        );
+    }
+
     fn push_log(&mut self, text: impl Into<String>, color: [u8; 4]) {
         self.log.push((text.into(), color));
         if self.log.len() > 200 {
@@ -1369,7 +1723,9 @@ impl EditorApp {
         self.menu_open = None;
         match (mi, ei) {
             (0, 0) => self.picker_open = true,
-            (0, 1) => self.quit_requested = true,
+            (0, 1) => self.save_scene("scene.dfescene"),
+            (0, 2) => self.load_scene(ctx, app, "scene.dfescene"),
+            (0, 3) => self.quit_requested = true,
             (1, 0) => {
                 if let Some(e) = self.edit.as_mut() {
                     e.undo();
