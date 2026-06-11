@@ -435,6 +435,13 @@ struct AppData {
     next_camera_id: i64,
     /// Compute semaphores to wait on before the next draw, keyed by AppHandle.
     compute_waits: ThinVec<(AppHandle, ThinVec<vk::Semaphore>)>,
+    /// Deferred pop-out window requests from the logic (which has no
+    /// `ActiveEventLoop`). Drained by the App after each `logic.update`,
+    /// which runs inside a winit callback with the event loop in hand.
+    pending_popouts: ThinVec<PopoutRequest>,
+    /// Resolved pop-out windows: `(request_id, new AppHandle)`. The logic
+    /// polls this to learn the handle of the window it asked for.
+    popout_results: ThinVec<(u64, AppHandle)>,
     /// Wall-clock start time — exposed via AppCtx::elapsed().
     start: Instant,
     /// wgpu fallback surface — set when Vulkan is unavailable.
@@ -456,6 +463,8 @@ impl AppData {
             next_app_id: 1,
             next_camera_id: 1,
             compute_waits: ThinVec::new(),
+            pending_popouts: ThinVec::new(),
+            popout_results: ThinVec::new(),
             start: Instant::now(),
             #[cfg(feature = "wgpu-backend")]
             wgpu_surface: None,
@@ -489,6 +498,8 @@ pub struct AppCtx<'a> {
     pub next_app_id: &'a mut i64,
     pub next_camera_id: &'a mut i64,
     compute_waits: &'a mut ThinVec<(AppHandle, ThinVec<vk::Semaphore>)>,
+    pending_popouts: &'a mut ThinVec<PopoutRequest>,
+    popout_results: &'a mut ThinVec<(u64, AppHandle)>,
     start: Instant,
     #[cfg(feature = "wgpu-backend")]
     wgpu_surface: &'a mut Option<WgpuSurface>,
@@ -496,7 +507,66 @@ pub struct AppCtx<'a> {
     wgpu_winit: &'a mut Option<Arc<WinitWindow>>,
 }
 
+/// A queued request to detach a panel into its own OS window.
+#[derive(Clone)]
+pub struct PopoutRequest {
+    pub id: u64,
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+}
+
 impl<'a> AppCtx<'a> {
+    /// Queue a pop-out (separate OS window) request. The window is created by
+    /// the App right after this `update`/`handle_event` returns (it owns the
+    /// event loop); call `take_popout_result(id)` on a later frame to get the
+    /// new window's `AppHandle`.
+    pub fn request_popout(&mut self, id: u64, title: &str, width: u32, height: u32) {
+        self.pending_popouts.push(PopoutRequest {
+            id,
+            title: title.to_string(),
+            width,
+            height,
+        });
+    }
+
+    /// Claim the resolved handle for a previously requested pop-out, if ready.
+    pub fn take_popout_result(&mut self, id: u64) -> Option<AppHandle> {
+        if let Some(i) = self.popout_results.iter().position(|(rid, _)| *rid == id) {
+            Some(self.popout_results.swap_remove(i).1)
+        } else {
+            None
+        }
+    }
+
+    /// Pixel size of `app`'s window (from its swapchain extent). Used to lay
+    /// out a pop-out panel that fills its own window.
+    pub fn window_pixel_size(&self, app: AppHandle) -> Option<(f32, f32)> {
+        let wh = self.windows.get(app)?.window_handle;
+        let gfx = self.renderer.as_ref()?.window(wh)?.graphics.as_ref()?;
+        Some((
+            gfx.swapchain_extent.width as f32,
+            gfx.swapchain_extent.height as f32,
+        ))
+    }
+
+    /// Close a pop-out window (tears down its swapchain/surface and drops it).
+    pub fn close_window(&mut self, app: AppHandle) {
+        if let Some(res) = self.windows.get(app) {
+            let wh = res.window_handle;
+            if let (Some(renderer), Some(ctx)) = (self.renderer.as_deref_mut(), self.vulkan.as_ref())
+            {
+                unsafe {
+                    let _ = ctx.device.device_wait_idle();
+                    if let Some(mut window) = renderer.remove_window(wh) {
+                        window.destroy(&ctx.device);
+                    }
+                }
+            }
+            self.windows.remove(app);
+        }
+    }
+
     /// Spawn a new window with its own camera. Returns the app handle the
     /// logic can store + look up via `windows.get(handle)`.
     pub fn spawn_window(
@@ -1223,6 +1293,8 @@ impl<T: AppLogic> AppRunner<T> {
             next_app_id: &mut data.next_app_id,
             next_camera_id: &mut data.next_camera_id,
             compute_waits: &mut data.compute_waits,
+            pending_popouts: &mut data.pending_popouts,
+            popout_results: &mut data.popout_results,
             start: data.start,
             #[cfg(feature = "wgpu-backend")]
             wgpu_surface: &mut data.wgpu_surface,
@@ -1536,6 +1608,18 @@ impl<T: AppLogic> AppRunner<T> {
             if !keep_running {
                 event_loop.exit();
                 return;
+            }
+        }
+        // Service deferred pop-out window requests now that we hold the event
+        // loop (the logic can't create OS windows itself).
+        if !self.data.pending_popouts.is_empty() {
+            let reqs: ThinVec<PopoutRequest> = self.data.pending_popouts.drain(..).collect();
+            for req in reqs {
+                let mut ctx = Self::ctx_for_logic(&mut self.data);
+                match ctx.spawn_window(event_loop, &req.title, req.width, req.height) {
+                    Ok(new_app) => self.data.popout_results.push((req.id, new_app)),
+                    Err(e) => eprintln!("popout window spawn failed: {e:?}"),
+                }
             }
         }
         // On the wgpu path, render_world (called inside logic.update above) already

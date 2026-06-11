@@ -199,6 +199,15 @@ struct EditorApp {
     /// exceeded the click threshold this gesture.
     box_sel_start: Option<[f32; 2]>,
     box_sel_active: bool,
+    /// Outliner detached into a floating, draggable in-window panel (its
+    /// top-left position when `Some`). A second-OS-window pop-out path exists
+    /// in the engine (AppCtx::request_popout) but software-Vulkan can't host a
+    /// second swapchain, so the editor uses a reliable floating panel.
+    outliner_float: Option<[f32; 2]>,
+    /// True while the floating outliner is being dragged by its title bar.
+    float_drag: Option<[f32; 2]>,
+    /// Set by the outliner header's detach button; consumed in update().
+    want_popout: bool,
     /// Active inspector drag-field: (key, value at press, cursor x at press).
     insp_drag: Option<(u64, f32, f32)>,
     /// Bottom panel tab: 0 = Output Log, 1 = Content Browser.
@@ -1107,6 +1116,14 @@ impl AppLogic for EditorApp {
             return true;
         }
 
+        // Service the outliner's detach button: float it near the cursor.
+        if self.want_popout {
+            self.want_popout = false;
+            if self.outliner_float.is_none() {
+                self.outliner_float = Some([180.0, 90.0]);
+            }
+        }
+
         let (win_w, win_h) = ctx
             .viewport_grid(app)
             .map(|g| (g.win_w, g.win_h))
@@ -1142,13 +1159,58 @@ impl AppLogic for EditorApp {
         // panels so panel chrome covers any out-of-pane spill.
         self.draw_trs_gizmo(ctx, app);
         self.draw_edit_overlay(ctx, app);
-        self.draw_outliner(ctx, app);
+        if self.outliner_float.is_none() {
+            self.draw_outliner(ctx, app, None);
+        }
         self.draw_inspector(ctx, app);
         self.draw_bottom_panel(ctx, app);
         self.draw_stats(win_w);
         if self.picker_open {
             self.draw_file_picker(ctx, app);
         }
+        // Floating (detached) OUTLINER — drawn above the docked panels.
+        if let Some(pos) = self.outliner_float {
+            let (fw, fh) = (300.0_f32, 420.0_f32);
+            // Title-bar drag + close-button hit tests (before the panel draw).
+            let close_btn = (pos[0] + fw - 20.0, pos[1] + 4.0, 16.0, 16.0);
+            let over_close = self.ui_cursor[0] >= close_btn.0
+                && self.ui_cursor[0] < close_btn.0 + close_btn.2
+                && self.ui_cursor[1] >= close_btn.1
+                && self.ui_cursor[1] < close_btn.1 + close_btn.3;
+            let over_titlebar = self.ui_cursor[0] >= pos[0]
+                && self.ui_cursor[0] < pos[0] + fw
+                && self.ui_cursor[1] >= pos[1]
+                && self.ui_cursor[1] < pos[1] + th::TITLEBAR_H
+                && !over_close;
+            if self.ui_left_just_pressed {
+                if over_close {
+                    self.outliner_float = None;
+                } else if over_titlebar {
+                    self.float_drag = Some([self.ui_cursor[0] - pos[0], self.ui_cursor[1] - pos[1]]);
+                }
+            }
+            if let (Some(grab), true) = (self.float_drag, self.ui_left_down) {
+                self.outliner_float = Some([self.ui_cursor[0] - grab[0], self.ui_cursor[1] - grab[1]]);
+            }
+            if !self.ui_left_down {
+                self.float_drag = None;
+            }
+            if let Some(pos) = self.outliner_float {
+                // Drop shadow + body.
+                {
+                    let dl = &mut self.world.ui.draw_list;
+                    dl.push_rect(pos[0] + 4.0, pos[1] + 4.0, fw, fh, dumpster_fire_engine::resource_manager::ui_manager::draw::SOLID, [0, 0, 0, 90]);
+                }
+                self.draw_outliner(ctx, app, Some((pos[0], pos[1], fw, fh)));
+                // Close button on top of the header.
+                let dl = &mut self.world.ui.draw_list;
+                dl.push_rect(close_btn.0, close_btn.1, 16.0, 16.0, dumpster_fire_engine::resource_manager::ui_manager::draw::SOLID, th::COL_RAISED_BG);
+                th::push_bevel(dl, close_btn.0, close_btn.1, 16.0, 16.0);
+                dl.push_line(close_btn.0 + 4.0, close_btn.1 + 4.0, close_btn.0 + 12.0, close_btn.1 + 12.0, 1.5, th::COL_TEXT);
+                dl.push_line(close_btn.0 + 12.0, close_btn.1 + 4.0, close_btn.0 + 4.0, close_btn.1 + 12.0, 1.5, th::COL_TEXT);
+            }
+        }
+
         self.draw_menus(ctx, app);
         // Deferred toolbar tooltip — drawn after every panel so it sits on top.
         if let Some((tx, ty, text)) = self.pending_tooltip.take() {
@@ -2000,15 +2062,15 @@ impl EditorApp {
         }
     }
 
-    fn draw_outliner(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
-        let (_, win_h) = ctx
-            .viewport_grid(app)
-            .map(|g| (g.win_w, g.win_h))
-            .unwrap_or((1280.0, 720.0));
-        let panel_h = win_h - TOOLBAR_H - self.bottom_h;
-        let ow = self.outliner_w;
-        let x = 0.0_f32;
-        let y = TOOLBAR_H;
+    fn draw_outliner(&mut self, ctx: &AppCtx<'_>, app: AppHandle, layout: Option<(f32, f32, f32, f32)>) {
+        let popped = layout.is_some();
+        let (x, y, ow, panel_h) = layout.unwrap_or_else(|| {
+            let (_, win_h) = ctx
+                .viewport_grid(app)
+                .map(|g| (g.win_w, g.win_h))
+                .unwrap_or((1280.0, 720.0));
+            (0.0, TOOLBAR_H, self.outliner_w, win_h - TOOLBAR_H - self.bottom_h)
+        });
         let content_y = y + TITLEBAR_H + 2.0;
         let content_h = panel_h - TITLEBAR_H - 2.0;
         let row_h = 22.0_f32;
@@ -2066,18 +2128,41 @@ impl EditorApp {
             self.last_row_click = Some((ah, now));
         }
 
+        // Pop-out button hit-test (docked header, right edge).
+        let pop_btn = (x + ow - 22.0, y + 4.0, 16.0, 16.0);
+        if !popped
+            && self.ui_left_just_pressed
+            && self.ui_cursor[0] >= pop_btn.0
+            && self.ui_cursor[0] < pop_btn.0 + pop_btn.2
+            && self.ui_cursor[1] >= pop_btn.1
+            && self.ui_cursor[1] < pop_btn.1 + pop_btn.3
+        {
+            self.want_popout = true;
+        }
+
         // Now borrow draw_list and render.
         let dl = &mut self.world.ui.draw_list;
         dl.push_panel_bg(x, y, ow, panel_h, PANEL_BG);
-        th::push_panel_header(dl, x, y, ow, "OUTLINER", true);
+        th::push_panel_header(dl, x, y, ow, if popped { "OUTLINER (detached)" } else { "OUTLINER" }, true);
         th::push_bevel(dl, x, y, ow, panel_h);
+        if !popped {
+            // Pop-out affordance: a small bordered "detach" glyph button.
+            dl.push_rect(pop_btn.0, pop_btn.1, pop_btn.2, pop_btn.3, uidraw::SOLID, th::COL_RAISED_BG);
+            th::push_bevel(dl, pop_btn.0, pop_btn.1, pop_btn.2, pop_btn.3);
+            let uv = dumpster_fire_engine::resource_manager::ui_manager::font::icon_rect(
+                dumpster_fire_engine::resource_manager::ui_manager::font::IconId::Layers,
+            );
+            dl.push_rect(pop_btn.0, pop_btn.1, 16.0, 16.0, uv, th::COL_TEXT);
+        }
         // Left divider — highlight when hovering or dragging
         let div_col = if self.div_hover == Some(0) || self.div_drag == Some(0) {
             th::COL_DIVIDER_HOVER
         } else {
             th::COL_SEP_STRONG
         };
-        dl.push_vsep(x + ow, y, panel_h + self.bottom_h, div_col);
+        if !popped {
+            dl.push_vsep(x + ow, y, panel_h + self.bottom_h, div_col);
+        }
 
         let mut row_y = content_y;
         if let Some((lh, sh)) = self.main_stage
@@ -4014,6 +4099,9 @@ fn main() -> ForgeResult<()> {
         inset_amount: 0.2,
         box_sel_start: None,
         box_sel_active: false,
+        outliner_float: None,
+        float_drag: None,
+        want_popout: false,
         log: {
             let mut l = ThinVec::new();
             l.push(("LogInit: Engine initialized.".to_string(), [140, 200, 140, 255u8]));
