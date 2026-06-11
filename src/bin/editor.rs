@@ -194,6 +194,10 @@ struct EditorApp {
     /// Mesh-edit operator parameters (drag-field editable in the panel).
     extrude_offset: f32,
     inset_amount: f32,
+    /// Edit-mode box (rubber-band) select: press point + whether the drag has
+    /// exceeded the click threshold this gesture.
+    box_sel_start: Option<[f32; 2]>,
+    box_sel_active: bool,
     /// Active inspector drag-field: (key, value at press, cursor x at press).
     insp_drag: Option<(u64, f32, f32)>,
     /// Bottom panel tab: 0 = Output Log, 1 = Content Browser.
@@ -974,6 +978,13 @@ impl AppLogic for EditorApp {
                 if self.edit_drag.is_some() {
                     self.apply_edit_drag();
                 }
+                if let Some(start) = self.box_sel_start {
+                    let dx = self.ui_cursor[0] - start[0];
+                    let dy = self.ui_cursor[1] - start[1];
+                    if dx * dx + dy * dy > 25.0 {
+                        self.box_sel_active = true;
+                    }
+                }
             }
 
             WindowEvent::MouseInput {
@@ -1038,7 +1049,10 @@ impl AppLogic for EditorApp {
                                 self.edit_drag = Some(d);
                                 return true;
                             }
-                            self.edit_pick(ctx, app);
+                            // Begin a click-or-box gesture; resolved on release
+                            // (a small movement is a pick, a drag is box-select).
+                            self.box_sel_start = Some(self.ui_cursor);
+                            self.box_sel_active = false;
                             return true;
                         }
                         if let Some(drag) = self.start_gizmo_drag(ctx, app) {
@@ -1060,6 +1074,13 @@ impl AppLogic for EditorApp {
                         if let Some(e) = self.edit.as_mut() {
                             e.commit_transform();
                         }
+                    } else if let Some(start) = self.box_sel_start.take() {
+                        if self.box_sel_active {
+                            self.box_select(ctx, app, start, self.ui_cursor);
+                        } else {
+                            self.edit_pick(ctx, app);
+                        }
+                        self.box_sel_active = false;
                     }
                     self.gizmo_drag = None;
                     self.div_drag = None;
@@ -3493,6 +3514,30 @@ impl EditorApp {
         })
     }
 
+    /// Box-select vertices inside the screen rectangle `a..b` (Shift adds to
+    /// the current selection). Uses the focused pane's projection.
+    fn box_select(&mut self, ctx: &AppCtx<'_>, app: AppHandle, a: [f32; 2], b: [f32; 2]) {
+        let Some(ev) = self.edit_view(ctx, app) else { return };
+        let lo = [a[0].min(b[0]), a[1].min(b[1])];
+        let hi = [a[0].max(b[0]), a[1].max(b[1])];
+        let additive = self.shift_held;
+        let n = if let Some(e) = self.edit.as_mut() {
+            e.box_select_screen(lo, hi, additive, |p| {
+                let clip = ev.vp * Vec4::new(p[0], p[1], p[2], 1.0);
+                if clip.w <= 1e-5 {
+                    return None;
+                }
+                Some([
+                    ev.px + (clip.x / clip.w * 0.5 + 0.5) * ev.pw,
+                    ev.py + (clip.y / clip.w * 0.5 + 0.5) * ev.ph,
+                ])
+            })
+        } else {
+            0
+        };
+        self.push_log(format!("LogMesh: box-selected {n} verts."), [150, 180, 210, 255]);
+    }
+
     fn edit_pick(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
         let Some(ev) = self.edit_view(ctx, app) else { return };
         let cursor = self.ui_cursor;
@@ -3667,6 +3712,21 @@ impl EditorApp {
                     }
                 }
             }
+        }
+
+        // Rubber-band rectangle for an in-progress box select.
+        if self.box_sel_active
+            && let Some(start) = self.box_sel_start
+        {
+            let c = self.ui_cursor;
+            let (x0, y0) = (start[0].min(c[0]), start[1].min(c[1]));
+            let (x1, y1) = (start[0].max(c[0]), start[1].max(c[1]));
+            let col = [120, 180, 240, 200u8];
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_line(x0, y0, x1, y0, 1.0, col);
+            dl.push_line(x0, y1, x1, y1, 1.0, col);
+            dl.push_line(x0, y0, x0, y1, 1.0, col);
+            dl.push_line(x1, y0, x1, y1, 1.0, col);
         }
     }
 }
@@ -3920,6 +3980,8 @@ fn main() -> ForgeResult<()> {
         last_row_click: None,
         extrude_offset: 0.5,
         inset_amount: 0.2,
+        box_sel_start: None,
+        box_sel_active: false,
         log: {
             let mut l = ThinVec::new();
             l.push(("LogInit: Engine initialized.".to_string(), [140, 200, 140, 255u8]));

@@ -375,6 +375,32 @@ impl EditSession {
         self.edges.len()
     }
 
+    /// Box-select vertices whose projected screen position falls inside the
+    /// rectangle `[lo, hi]` (screen px). `additive` keeps the current
+    /// selection (Shift+drag); otherwise it replaces it. `project` maps a
+    /// world-space vertex to screen px, or `None` if behind the camera.
+    pub fn box_select_screen<P: Fn([f32; 3]) -> Option<[f32; 2]>>(
+        &mut self,
+        lo: [f32; 2],
+        hi: [f32; 2],
+        additive: bool,
+        project: P,
+    ) -> usize {
+        if !additive {
+            self.mesh.deselect_all_vertices();
+        }
+        let mut hit = 0;
+        for v in 0..self.mesh.vertex_count() {
+            if let Some(s) = project(self.mesh.pos[v]) {
+                if s[0] >= lo[0] && s[0] <= hi[0] && s[1] >= lo[1] && s[1] <= hi[1] {
+                    self.mesh.set_vertex_selected(v as u32, true);
+                    hit += 1;
+                }
+            }
+        }
+        hit
+    }
+
     pub fn undo(&mut self) -> bool {
         let ok = self.history.undo(&mut self.mesh);
         if ok {
