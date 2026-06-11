@@ -3855,6 +3855,9 @@ impl EditorApp {
     }
 
     fn draw_edit_overlay(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        fn draw_solid() -> [f32; 4] {
+            dumpster_fire_engine::resource_manager::ui_manager::draw::SOLID
+        }
         if self.edit.is_none() {
             return;
         }
@@ -3870,26 +3873,59 @@ impl EditorApp {
             ])
         };
         let sess = self.edit.as_ref().unwrap();
+        let mode = sess.mode;
         let dl = &mut self.world.ui.draw_list;
-        // Wireframe edges (selected edges highlighted).
-        for &(a, b) in sess.edges() {
-            let pa = sess.positions()[a as usize];
-            let pb = sess.positions()[b as usize];
-            if let (Some(sa), Some(sb)) =
-                (project(Vec3::from_array(pa)), project(Vec3::from_array(pb)))
+        let pos = sess.positions();
+        let proj_v = |v: u32| project(Vec3::from_array(pos[v as usize]));
+
+        // Face fills: a face is selected when all three verts are selected.
+        // Translucent accent fill makes Face-mode selection legible (and gives
+        // Vertex/Edge mode useful context for fully-enclosed faces).
+        for f in 0..sess.face_count() as u32 {
+            let [a, b, c] = sess.face_verts(f);
+            if sess.is_vertex_selected(a)
+                && sess.is_vertex_selected(b)
+                && sess.is_vertex_selected(c)
+                && let (Some(sa), Some(sb), Some(sc)) = (proj_v(a), proj_v(b), proj_v(c))
             {
-                let sel = sess.is_vertex_selected(a) && sess.is_vertex_selected(b);
-                let col = if sel { [255, 180, 60, 255] } else { [120, 120, 150, 200] };
-                dl.push_line(sa[0], sa[1], sb[0], sb[1], if sel { 2.0 } else { 1.0 }, col);
+                let fill = if mode == ElementMode::Face {
+                    [96, 150, 230, 90]
+                } else {
+                    [96, 150, 230, 48]
+                };
+                dl.push_tri(sa, sb, sc, fill);
             }
         }
-        // Vertex handles.
+
+        // Wireframe edges. In Edge mode selected edges are emphasized brightest.
+        for &(a, b) in sess.edges() {
+            if let (Some(sa), Some(sb)) = (proj_v(a), proj_v(b)) {
+                let sel = sess.is_vertex_selected(a) && sess.is_vertex_selected(b);
+                let (col, w) = if sel && mode == ElementMode::Edge {
+                    ([255, 190, 70, 255], 2.5)
+                } else if sel {
+                    ([255, 180, 60, 230], 2.0)
+                } else {
+                    ([120, 120, 150, 200], 1.0)
+                };
+                dl.push_line(sa[0], sa[1], sb[0], sb[1], w, col);
+            }
+        }
+
+        // Vertex handles — larger/brighter in Vertex mode.
+        let vtx_emph = mode == ElementMode::Vertex;
         for v in 0..sess.vertex_count() as u32 {
-            if let Some(s) = project(Vec3::from_array(sess.positions()[v as usize])) {
+            if let Some(s) = proj_v(v) {
                 let selv = sess.is_vertex_selected(v);
-                let sz = if selv { 7.0 } else { 4.0 };
-                let col = if selv { [255, 210, 80, 255] } else { [180, 180, 200, 220] };
-                dl.push_rect(s[0] - sz * 0.5, s[1] - sz * 0.5, sz, sz, [0.0, 0.0, 1.0, 1.0], col);
+                let sz = if selv { 7.0 } else if vtx_emph { 5.0 } else { 3.0 };
+                let col = if selv {
+                    [255, 210, 80, 255]
+                } else if vtx_emph {
+                    [190, 195, 215, 230]
+                } else {
+                    [150, 150, 170, 180]
+                };
+                dl.push_rect(s[0] - sz * 0.5, s[1] - sz * 0.5, sz, sz, draw_solid(), col);
             }
         }
         // Translate gizmo at the selection centroid.

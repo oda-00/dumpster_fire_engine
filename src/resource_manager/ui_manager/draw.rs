@@ -57,6 +57,19 @@ impl DrawList {
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
+    /// Fill a solid-colored triangle (mesh-editor face highlights). Uses the
+    /// SOLID uv so it samples the atlas's opaque texel, not a glyph.
+    pub fn push_tri(&mut self, p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], color: [u8; 4]) {
+        let base = self.vertices.len() as u32;
+        let uv = [SOLID[0], SOLID[1]];
+        self.vertices.extend_from_slice(&[
+            UiVertex { pos: p0, uv, color },
+            UiVertex { pos: p1, uv, color },
+            UiVertex { pos: p2, uv, color },
+        ]);
+        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
     pub fn push_panel_bg(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
         self.push_rect(x, y, w, h, SOLID, color);
     }
