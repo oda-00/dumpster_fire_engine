@@ -186,6 +186,11 @@ struct EditorApp {
     /// Console line buffer + keyboard focus (UE-style ` console in the log).
     console_input: String,
     console_focus: bool,
+    /// In-place outliner rename: target actor + edit buffer + double-click
+    /// detection (row handle + when it was last clicked).
+    rename_target: Option<ActorHandle>,
+    rename_buf: String,
+    last_row_click: Option<(ActorHandle, std::time::Instant)>,
     /// Active inspector drag-field: (key, value at press, cursor x at press).
     insp_drag: Option<(u64, f32, f32)>,
     /// Bottom panel tab: 0 = Output Log, 1 = Content Browser.
@@ -724,28 +729,47 @@ impl AppLogic for EditorApp {
     fn handle_event(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::KeyboardInput { event: ke, .. } if ke.state == ElementState::Pressed => {
-                // Console owns the keyboard while focused — editor hotkeys
-                // and the camera must not fire while typing.
-                if self.console_focus {
+                // Console / rename own the keyboard while focused — editor
+                // hotkeys and the camera must not fire while typing.
+                if self.console_focus || self.rename_target.is_some() {
+                    let renaming = self.rename_target.is_some();
                     match ke.physical_key {
                         PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
-                            let cmd = std::mem::take(&mut self.console_input);
-                            if !cmd.trim().is_empty() {
-                                self.execute_console(ctx, app, cmd.trim());
+                            if renaming {
+                                self.commit_rename();
+                            } else {
+                                let cmd = std::mem::take(&mut self.console_input);
+                                if !cmd.trim().is_empty() {
+                                    self.execute_console(ctx, app, cmd.trim());
+                                }
                             }
                         }
                         PhysicalKey::Code(KeyCode::Escape) => {
-                            self.console_focus = false;
-                            self.console_input.clear();
+                            if renaming {
+                                self.rename_target = None;
+                                self.rename_buf.clear();
+                            } else {
+                                self.console_focus = false;
+                                self.console_input.clear();
+                            }
                         }
                         PhysicalKey::Code(KeyCode::Backspace) => {
-                            self.console_input.pop();
+                            if renaming {
+                                self.rename_buf.pop();
+                            } else {
+                                self.console_input.pop();
+                            }
                         }
                         _ => {
                             if let Some(t) = ke.text.as_ref() {
+                                let buf = if renaming {
+                                    &mut self.rename_buf
+                                } else {
+                                    &mut self.console_input
+                                };
                                 for c in t.chars() {
-                                    if !c.is_control() && self.console_input.len() < 120 {
-                                        self.console_input.push(c);
+                                    if !c.is_control() && buf.len() < 120 {
+                                        buf.push(c);
                                     }
                                 }
                             }
@@ -1743,6 +1767,49 @@ impl EditorApp {
         }
     }
 
+    /// Apply the in-place outliner rename. Mesh actors are named by their
+    /// asset path (load-bearing for edit mode + scene save), so only
+    /// Utility-typed sub-entities (lights, empties, cameras) are renamed.
+    fn commit_rename(&mut self) {
+        let (Some(ah), Some((lh, sh))) = (self.rename_target.take(), self.main_stage) else {
+            self.rename_buf.clear();
+            return;
+        };
+        let name = std::mem::take(&mut self.rename_buf);
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let mut renamed = false;
+        let mut is_mesh = false;
+        if let Some(stage) = self
+            .world
+            .levels
+            .get_mut(lh)
+            .and_then(|l| l.stages.get_mut(sh))
+            && let Some(actor) = stage.actors.get_mut(ah)
+        {
+            for se in actor.sub_entities.iter_mut().flatten() {
+                match &mut se.actor_type {
+                    ActorType::Utility(u) => {
+                        u.name = Arc::from(name);
+                        renamed = true;
+                    }
+                    ActorType::Environment(e) if e.mesh.is_some() => is_mesh = true,
+                    _ => {}
+                }
+            }
+        }
+        if renamed {
+            self.push_log(format!("LogEditor: renamed to '{name}'"), [140, 200, 140, 255]);
+        } else if is_mesh {
+            self.push_log(
+                "LogEditor: mesh actors are named by asset path — rename skipped.",
+                [200, 160, 110, 255],
+            );
+        }
+    }
+
     fn push_log(&mut self, text: impl Into<String>, color: [u8; 4]) {
         self.log.push((text.into(), color));
         if self.log.len() > 200 {
@@ -1911,6 +1978,17 @@ impl EditorApp {
         }
         if let Some(ah) = clicked_ah {
             self.world.selection = Some(ah);
+            // Double-click on an already-selected row starts an in-place rename.
+            let now = std::time::Instant::now();
+            if let Some((prev, at)) = self.last_row_click
+                && prev == ah
+                && now.duration_since(at).as_millis() < 600
+            {
+                self.rename_target = Some(ah);
+                self.rename_buf.clear();
+                self.console_focus = false;
+            }
+            self.last_row_click = Some((ah, now));
         }
 
         // Now borrow draw_list and render.
@@ -1978,11 +2056,25 @@ impl EditorApp {
                             .find(|s: &&str| !s.is_empty())
                     })
                     .unwrap_or("Entity");
-                let tc: [u8; 4] = if *is_sel {
+                let renaming = self.rename_target == Some(*ah);
+                let label: &str = if renaming { &self.rename_buf } else { label };
+                let tc: [u8; 4] = if renaming {
+                    [255, 235, 180, 255]
+                } else if *is_sel {
                     [200, 220, 255, 220]
                 } else {
                     [155, 155, 175, 200]
                 };
+                if renaming {
+                    dl.push_rect(
+                        x + 24.0,
+                        row_y + 1.0,
+                        ow - 28.0,
+                        row_h - 3.0,
+                        uidraw::SOLID,
+                        [20, 24, 36, 255],
+                    );
+                }
                 let mut lx = x + 26.0;
                 for c in label.chars() {
                     if lx + 8.0 > x + ow - 4.0 {
@@ -1993,6 +2085,9 @@ impl EditorApp {
                         dl.push_rect(lx, row_y + 3.0, 8.0, 16.0, uv, tc);
                     }
                     lx += 8.0;
+                }
+                if renaming {
+                    dl.push_rect(lx + 1.0, row_y + 3.0, 2.0, 16.0, uidraw::SOLID, [255, 235, 180, 255]);
                 }
                 row_y += row_h;
             }
@@ -3522,6 +3617,9 @@ fn main() -> ForgeResult<()> {
         saved_layout: None,
         console_input: String::new(),
         console_focus: false,
+        rename_target: None,
+        rename_buf: String::new(),
+        last_row_click: None,
         log: {
             let mut l = ThinVec::new();
             l.push(("LogInit: Engine initialized.".to_string(), [140, 200, 140, 255u8]));
