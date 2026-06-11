@@ -219,9 +219,126 @@ impl EditSession {
         self.refresh_bvh();
     }
 
+    // ── Topology operators (Blender-core, undoable via Snapshot) ──────────
+
+    /// Faces whose three vertices are all selected — the operand region for
+    /// face-driven operators, matching Blender's vertex→face selection flush.
+    pub fn selected_faces(&self) -> Vec<u32> {
+        self.mesh.faces_with_all_selected().into_iter().collect()
+    }
+
+    /// Run a topology-changing operator: snapshot for undo, swap the mesh in,
+    /// select the operator's result geometry, refresh edges + BVH.
+    fn apply_topology(
+        &mut self,
+        result: Result<(forge_mesh::HalfEdgeMesh, Vec<u32>), forge_mesh::MeshError>,
+    ) -> bool {
+        let Ok((mut new_mesh, sel)) = result else {
+            return false;
+        };
+        new_mesh.deselect_all_vertices();
+        for &v in &sel {
+            new_mesh.set_vertex_selected(v, true);
+        }
+        let before = Box::new(std::mem::replace(&mut self.mesh, new_mesh));
+        self.history.push(forge_mesh::history::Edit::Snapshot {
+            before,
+            after: Box::new(self.mesh.clone()),
+        });
+        self.rebuild_edges();
+        self.refresh_bvh();
+        true
+    }
+
+    /// Extrude the selected face region along its normal (Blender E).
+    pub fn extrude_selected(&mut self, offset: f32) -> bool {
+        let faces = self.selected_faces();
+        if faces.is_empty() {
+            return false;
+        }
+        self.apply_topology(self.mesh.with_faces_extruded(&faces, offset))
+    }
+
+    /// Inset each selected face individually (Blender I).
+    pub fn inset_selected(&mut self, amount: f32) -> bool {
+        let faces = self.selected_faces();
+        if faces.is_empty() {
+            return false;
+        }
+        self.apply_topology(self.mesh.with_faces_inset(&faces, amount))
+    }
+
+    /// Crack-free subdivision of the selected faces (whole mesh when nothing
+    /// is selected — Blender's subdivide-with-everything-selected default).
+    pub fn subdivide_selected(&mut self) -> bool {
+        let mut faces = self.selected_faces();
+        if faces.is_empty() {
+            faces = (0..self.mesh.face_count() as u32).collect();
+        }
+        self.apply_topology(self.mesh.with_faces_subdivided(&faces))
+    }
+
+    /// Delete the selected faces (Blender X → Faces).
+    pub fn delete_selected(&mut self) -> bool {
+        let faces = self.selected_faces();
+        if faces.is_empty() {
+            return false;
+        }
+        self.apply_topology(
+            self.mesh
+                .with_faces_deleted(&faces)
+                .map(|m| (m, Vec::new())),
+        )
+    }
+
+    /// Merge the selected vertices at their centroid (Blender M → Center).
+    pub fn merge_selected(&mut self) -> bool {
+        if self.mesh.count_selected_vertices() < 2 {
+            return false;
+        }
+        self.apply_topology(self.mesh.with_selected_merged())
+    }
+
+    /// Weld coincident vertices across the whole mesh.
+    pub fn weld(&mut self, eps: f32) -> bool {
+        self.apply_topology(self.mesh.welded(eps).map(|m| (m, Vec::new())))
+    }
+
+    /// Flip the winding of the selected faces (all faces when none selected).
+    pub fn flip_selected(&mut self) -> bool {
+        let mut faces = self.selected_faces();
+        if faces.is_empty() {
+            faces = (0..self.mesh.face_count() as u32).collect();
+        }
+        self.apply_topology(self.mesh.with_faces_flipped(&faces).map(|m| (m, Vec::new())))
+    }
+
+    // ── Selection commands (Blender A / Ctrl+I / Ctrl+± / L) ─────────────
+
+    pub fn select_all(&mut self) {
+        self.mesh.select_all_vertices();
+    }
+    pub fn select_none(&mut self) {
+        self.mesh.deselect_all_vertices();
+    }
+    pub fn invert_selection(&mut self) {
+        self.mesh.invert_vertex_selection();
+    }
+    pub fn grow_selection(&mut self) {
+        self.mesh.grow_vertex_selection();
+    }
+    pub fn shrink_selection(&mut self) {
+        self.mesh.shrink_vertex_selection();
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
     pub fn undo(&mut self) -> bool {
         let ok = self.history.undo(&mut self.mesh);
         if ok {
+            self.rebuild_edges();
             self.refresh_bvh();
         }
         ok
@@ -229,6 +346,7 @@ impl EditSession {
     pub fn redo(&mut self) -> bool {
         let ok = self.history.redo(&mut self.mesh);
         if ok {
+            self.rebuild_edges();
             self.refresh_bvh();
         }
         ok

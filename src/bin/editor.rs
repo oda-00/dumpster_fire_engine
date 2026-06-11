@@ -191,6 +191,9 @@ struct EditorApp {
     rename_target: Option<ActorHandle>,
     rename_buf: String,
     last_row_click: Option<(ActorHandle, std::time::Instant)>,
+    /// Mesh-edit operator parameters (drag-field editable in the panel).
+    extrude_offset: f32,
+    inset_amount: f32,
     /// Active inspector drag-field: (key, value at press, cursor x at press).
     insp_drag: Option<(u64, f32, f32)>,
     /// Bottom panel tab: 0 = Output Log, 1 = Content Browser.
@@ -801,7 +804,7 @@ impl AppLogic for EditorApp {
                         self.frame_selected(ctx, app);
                         return true;
                     }
-                    PhysicalKey::Code(KeyCode::KeyX) => {
+                    PhysicalKey::Code(KeyCode::KeyX) if self.edit.is_none() => {
                         self.snap_enabled = !self.snap_enabled;
                         return true;
                     }
@@ -824,7 +827,43 @@ impl AppLogic for EditorApp {
                         return true;
                     }
                     PhysicalKey::Code(KeyCode::KeyE) => {
-                        self.toggle_edit_mode();
+                        // Blender semantics: in edit mode E extrudes the
+                        // selected region; in object mode E enters edit mode.
+                        if let Some(e) = self.edit.as_mut() {
+                            let off = self.extrude_offset;
+                            if e.extrude_selected(off) {
+                                self.push_log("LogMesh: extruded region.", [140, 200, 140, 255]);
+                            }
+                        } else {
+                            self.toggle_edit_mode();
+                        }
+                        return true;
+                    }
+                    PhysicalKey::Code(KeyCode::KeyI) => {
+                        if let Some(e) = self.edit.as_mut() {
+                            let am = self.inset_amount;
+                            if e.inset_selected(am) {
+                                self.push_log("LogMesh: inset faces.", [140, 200, 140, 255]);
+                            }
+                            return true;
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::KeyA) => {
+                        if let Some(e) = self.edit.as_mut() {
+                            if e.selected_vertex_count() > 0 {
+                                e.select_none();
+                            } else {
+                                e.select_all();
+                            }
+                            return true;
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::KeyX)
+                        if self.edit.is_some() =>
+                    {
+                        if let Some(e) = self.edit.as_mut() {
+                            e.delete_selected();
+                        }
                         return true;
                     }
                     PhysicalKey::Code(KeyCode::Digit1) => {
@@ -865,6 +904,11 @@ impl AppLogic for EditorApp {
                         return true;
                     }
                     PhysicalKey::Code(KeyCode::Escape) => {
+                        if self.edit.is_some() {
+                            self.edit = None;
+                            self.edit_drag = None;
+                            return true;
+                        }
                         self.world.selection = None;
                         self.spawn_menu_open = false;
                         self.light_submenu_open = false;
@@ -1065,11 +1109,13 @@ impl AppLogic for EditorApp {
         self.draw_toolbar(ctx, app);
         self.draw_viewport_chrome(ctx, app);
         self.draw_selection_brackets(ctx, app);
+        // 3D-projected overlays (gizmo, edit wireframe) draw before the side
+        // panels so panel chrome covers any out-of-pane spill.
+        self.draw_trs_gizmo(ctx, app);
+        self.draw_edit_overlay(ctx, app);
         self.draw_outliner(ctx, app);
         self.draw_inspector(ctx, app);
         self.draw_bottom_panel(ctx, app);
-        self.draw_trs_gizmo(ctx, app);
-        self.draw_edit_overlay(ctx, app);
         self.draw_stats(win_w);
         if self.picker_open {
             self.draw_file_picker(ctx, app);
@@ -2152,8 +2198,237 @@ fn actor_icon_color(actor: &dumpster_fire_engine::resource_manager::manager::Act
 // ── Inspector ──────────────────────────────────────────────────────────────
 
 impl EditorApp {
+    /// Edit-mode replacement for the details panel: a Blender-style mesh
+    /// tools window — element modes, selection commands, topology operators
+    /// with parameter drag-fields, undo/redo, and live mesh statistics.
+    fn draw_mesh_edit_panel(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+        use dumpster_fire_engine::render::ui_core::id::path_key;
+        use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
+
+        let (win_w, win_h) = ctx
+            .viewport_grid(app)
+            .map(|g| (g.win_w, g.win_h))
+            .unwrap_or((1280.0, 720.0));
+        let panel_h = win_h - TOOLBAR_H - self.bottom_h;
+        let iw = self.inspector_w;
+        let ix = win_w - iw;
+        let iy = TOOLBAR_H;
+        let input = self.ui_input();
+
+        let mut extrude_offset = self.extrude_offset;
+        let mut inset_amount = self.inset_amount;
+        #[derive(Default)]
+        struct Acts {
+            mode_v: bool,
+            mode_e: bool,
+            mode_f: bool,
+            sel_all: bool,
+            sel_none: bool,
+            sel_inv: bool,
+            sel_grow: bool,
+            sel_shrink: bool,
+            extrude: bool,
+            inset: bool,
+            subdivide: bool,
+            delete: bool,
+            merge: bool,
+            weld: bool,
+            flip: bool,
+            undo: bool,
+            redo: bool,
+        }
+        let mut a = Acts::default();
+        let (mode, nv, ne, nf, nsel) = {
+            let e = self.edit.as_ref().expect("edit panel needs a session");
+            (
+                e.mode,
+                e.vertex_count(),
+                e.edge_count(),
+                e.face_count(),
+                e.selected_vertex_count(),
+            )
+        };
+        let mut new_drag = None;
+        {
+            let dl = &mut self.world.ui.draw_list;
+            dl.push_panel_bg(ix, iy, iw, panel_h, PANEL_BG);
+            dl.push_title_bar(ix, iy, iw, TITLEBAR_H, TITLEBAR_BG, SEP);
+            {
+                use dumpster_fire_engine::resource_manager::ui_manager::font;
+                let mut tx = ix + 6.0;
+                for c in "MESH EDIT".chars() {
+                    if c == ' ' {
+                        tx += 8.0;
+                        continue;
+                    }
+                    let uv = font::glyph_rect(c);
+                    if uv != [0f32; 4] {
+                        dl.push_rect(tx, iy + 3.0, 8.0, 16.0, uv, [255, 200, 120, 255]);
+                    }
+                    tx += 8.0;
+                }
+            }
+            let div_col = if self.div_hover == Some(1) || self.div_drag == Some(1) {
+                [120, 160, 220, 255u8]
+            } else {
+                SEP
+            };
+            dl.push_vsep(ix, iy, panel_h + self.bottom_h, div_col);
+
+            let mut ui = Ui::with_input(
+                dl,
+                Rect {
+                    x: ix + 8.0,
+                    y: iy + TITLEBAR_H + 6.0,
+                    w: iw - 16.0,
+                    h: panel_h - TITLEBAR_H - 10.0,
+                },
+                input.clone(),
+            );
+            ui.drag_state = self.insp_drag;
+
+            ui.section_header("MODE");
+            {
+                let y = ui.cursor[1];
+                ui.cursor = [ix + 8.0, y];
+                a.mode_v = ui.hbutton(
+                    if mode == ElementMode::Vertex { "[Vert]" } else { "Vert" },
+                    56.0,
+                );
+                a.mode_e = ui.hbutton(
+                    if mode == ElementMode::Edge { "[Edge]" } else { "Edge" },
+                    56.0,
+                );
+                a.mode_f = ui.hbutton(
+                    if mode == ElementMode::Face { "[Face]" } else { "Face" },
+                    56.0,
+                );
+                ui.cursor = [ix + 8.0, y + 26.0];
+            }
+
+            ui.section_header("SELECT");
+            {
+                let y = ui.cursor[1];
+                ui.cursor = [ix + 8.0, y];
+                a.sel_all = ui.hbutton("All", 44.0);
+                a.sel_none = ui.hbutton("None", 48.0);
+                a.sel_inv = ui.hbutton("Inv", 40.0);
+                ui.cursor = [ix + 8.0, y + 24.0];
+                let y = ui.cursor[1];
+                a.sel_grow = ui.hbutton("Grow", 52.0);
+                a.sel_shrink = ui.hbutton("Shrink", 60.0);
+                ui.cursor = [ix + 8.0, y + 28.0];
+            }
+
+            ui.section_header("TOOLS");
+            a.extrude = ui.button("Extrude (E)");
+            ui.drag_field(path_key(&["medit"], "exoff"), "Offset", &mut extrude_offset, 0.01);
+            a.inset = ui.button("Inset (I)");
+            ui.drag_field(path_key(&["medit"], "insam"), "Amount", &mut inset_amount, 0.005);
+            a.subdivide = ui.button("Subdivide");
+            a.delete = ui.button("Delete Faces (X)");
+            a.merge = ui.button("Merge at Center");
+            a.weld = ui.button("Weld 1mm");
+            a.flip = ui.button("Flip Normals");
+
+            ui.section_header("HISTORY");
+            {
+                let y = ui.cursor[1];
+                ui.cursor = [ix + 8.0, y];
+                a.undo = ui.hbutton("Undo", 52.0);
+                a.redo = ui.hbutton("Redo", 52.0);
+                ui.cursor = [ix + 8.0, y + 28.0];
+            }
+
+            ui.section_header("MESH");
+            ui.label(&format!("verts {nv}  edges {ne}"));
+            ui.label(&format!("faces {nf}  sel {nsel}"));
+            new_drag = ui.begin_drag.take();
+        }
+        if let Some(bd) = new_drag {
+            self.insp_drag = Some(bd);
+        }
+        if !self.ui_left_down {
+            self.insp_drag = None;
+        }
+        self.extrude_offset = extrude_offset;
+        self.inset_amount = inset_amount;
+
+        let Some(e) = self.edit.as_mut() else { return };
+        if a.mode_v {
+            e.mode = ElementMode::Vertex;
+        }
+        if a.mode_e {
+            e.mode = ElementMode::Edge;
+        }
+        if a.mode_f {
+            e.mode = ElementMode::Face;
+        }
+        if a.sel_all {
+            e.select_all();
+        }
+        if a.sel_none {
+            e.select_none();
+        }
+        if a.sel_inv {
+            e.invert_selection();
+        }
+        if a.sel_grow {
+            e.grow_selection();
+        }
+        if a.sel_shrink {
+            e.shrink_selection();
+        }
+        let mut log: Option<(String, [u8; 4])> = None;
+        if a.extrude {
+            let off = self.extrude_offset;
+            if e.extrude_selected(off) {
+                log = Some(("LogMesh: extruded region.".into(), [140, 200, 140, 255]));
+            } else {
+                log = Some(("LogMesh: extrude needs selected faces.".into(), [200, 160, 110, 255]));
+            }
+        }
+        if a.inset {
+            let am = self.inset_amount;
+            if e.inset_selected(am) {
+                log = Some(("LogMesh: inset faces.".into(), [140, 200, 140, 255]));
+            } else {
+                log = Some(("LogMesh: inset needs selected faces.".into(), [200, 160, 110, 255]));
+            }
+        }
+        if a.subdivide && e.subdivide_selected() {
+            log = Some(("LogMesh: subdivided.".into(), [140, 200, 140, 255]));
+        }
+        if a.delete && !e.delete_selected() {
+            log = Some(("LogMesh: delete needs selected faces.".into(), [200, 160, 110, 255]));
+        }
+        if a.merge && !e.merge_selected() {
+            log = Some(("LogMesh: merge needs 2+ selected verts.".into(), [200, 160, 110, 255]));
+        }
+        if a.weld {
+            e.weld(0.001);
+        }
+        if a.flip {
+            e.flip_selected();
+        }
+        if a.undo {
+            e.undo();
+        }
+        if a.redo {
+            e.redo();
+        }
+        if let Some((t, c)) = log {
+            self.push_log(t, c);
+        }
+    }
+
     fn draw_inspector(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
         use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
+
+        if self.edit.is_some() {
+            self.draw_mesh_edit_panel(ctx, app);
+            return;
+        }
 
         let (win_w, win_h) = ctx
             .viewport_grid(app)
@@ -3620,6 +3895,8 @@ fn main() -> ForgeResult<()> {
         rename_target: None,
         rename_buf: String::new(),
         last_row_click: None,
+        extrude_offset: 0.5,
+        inset_amount: 0.2,
         log: {
             let mut l = ThinVec::new();
             l.push(("LogInit: Engine initialized.".to_string(), [140, 200, 140, 255u8]));
