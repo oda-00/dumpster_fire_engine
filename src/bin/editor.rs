@@ -848,6 +848,13 @@ impl AppLogic for EditorApp {
                             return true;
                         }
                     }
+                    PhysicalKey::Code(KeyCode::KeyN) => {
+                        if let Some(e) = self.edit.as_mut() {
+                            e.recalc_normals();
+                            self.push_log("LogMesh: recalculated normals.", [140, 200, 140, 255]);
+                            return true;
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::KeyA) => {
                         if let Some(e) = self.edit.as_mut() {
                             if e.selected_vertex_count() > 0 {
@@ -2234,6 +2241,9 @@ impl EditorApp {
             merge: bool,
             weld: bool,
             flip: bool,
+            smooth: bool,
+            poke: bool,
+            recalc: bool,
             undo: bool,
             redo: bool,
         }
@@ -2330,6 +2340,9 @@ impl EditorApp {
             a.merge = ui.button("Merge at Center");
             a.weld = ui.button("Weld 1mm");
             a.flip = ui.button("Flip Normals");
+            a.recalc = ui.button("Recalc Normals (N)");
+            a.smooth = ui.button("Smooth Verts");
+            a.poke = ui.button("Poke Faces");
 
             ui.section_header("HISTORY");
             {
@@ -2341,8 +2354,7 @@ impl EditorApp {
             }
 
             ui.section_header("MESH");
-            ui.label(&format!("verts {nv}  edges {ne}"));
-            ui.label(&format!("faces {nf}  sel {nsel}"));
+            ui.label(&format!("v{nv} e{ne} f{nf} sel{nsel}"));
             new_drag = ui.begin_drag.take();
         }
         if let Some(bd) = new_drag {
@@ -2410,6 +2422,17 @@ impl EditorApp {
         }
         if a.flip {
             e.flip_selected();
+        }
+        if a.recalc {
+            e.recalc_normals();
+            log = Some(("LogMesh: recalculated normals.".into(), [140, 200, 140, 255]));
+        }
+        if a.smooth && e.smooth_selected(2, 0.5) {
+            log = Some(("LogMesh: smoothed vertices.".into(), [140, 200, 140, 255]));
+        }
+        if a.poke {
+            e.poke_selected();
+            log = Some(("LogMesh: poked faces.".into(), [140, 200, 140, 255]));
         }
         if a.undo {
             e.undo();

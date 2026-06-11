@@ -299,6 +299,46 @@ impl EditSession {
         self.apply_topology(self.mesh.with_selected_merged())
     }
 
+    /// Laplacian-smooth the selected vertices (whole mesh when none are
+    /// selected). Positional only, so it records a cheap O(touched) delta
+    /// rather than a topology snapshot.
+    pub fn smooth_selected(&mut self, iterations: u32, factor: f32) -> bool {
+        let smoothed = self.mesh.smoothed_positions(iterations, factor);
+        let ids: thin_vec::ThinVec<u32> = if self.mesh.count_selected_vertices() > 0 {
+            self.mesh.selected_vertices()
+        } else {
+            (0..self.mesh.vertex_count() as u32).collect()
+        };
+        if ids.is_empty() {
+            return false;
+        }
+        let before: thin_vec::ThinVec<[f32; 3]> =
+            ids.iter().map(|&v| self.mesh.pos[v as usize]).collect();
+        for &v in &ids {
+            self.mesh.pos[v as usize] = smoothed[v as usize];
+        }
+        let after: thin_vec::ThinVec<[f32; 3]> =
+            ids.iter().map(|&v| self.mesh.pos[v as usize]).collect();
+        self.history
+            .push(forge_mesh::history::Edit::Positions { ids, before, after });
+        self.refresh_bvh();
+        true
+    }
+
+    /// Recalculate consistent, outward-facing normals (Blender Shift+N).
+    pub fn recalc_normals(&mut self) -> bool {
+        self.apply_topology(self.mesh.with_normals_recalculated().map(|m| (m, Vec::new())))
+    }
+
+    /// Poke the selected faces into centroid fans (whole mesh when none).
+    pub fn poke_selected(&mut self) -> bool {
+        let mut faces = self.selected_faces();
+        if faces.is_empty() {
+            faces = (0..self.mesh.face_count() as u32).collect();
+        }
+        self.apply_topology(self.mesh.with_faces_poked(&faces))
+    }
+
     /// Weld coincident vertices across the whole mesh.
     pub fn weld(&mut self, eps: f32) -> bool {
         self.apply_topology(self.mesh.welded(eps).map(|m| (m, Vec::new())))

@@ -620,6 +620,60 @@ mod region_op_tests {
     }
 
     #[test]
+    fn recalc_fixes_one_flipped_face() {
+        let (pos, mut idx) = cube();
+        // Flip face 0 so the raw indexed data is inconsistent (and would be
+        // non-manifold if built directly).
+        idx.swap(1, 2);
+        let fixed = make_normals_consistent_indexed(&pos, &idx);
+        let m = HalfEdgeMesh::build_from_indexed(&pos, &fixed)
+            .expect("consistent winding builds a manifold");
+        m.validate().expect("invariants hold");
+        // Net signed volume must be positive (outward) for a closed cube.
+        let mut vol = 0.0f64;
+        for tri in fixed.chunks_exact(3) {
+            let a = pos[tri[0] as usize];
+            let b = pos[tri[1] as usize];
+            let c = pos[tri[2] as usize];
+            let cr = [
+                b[1] as f64 * c[2] as f64 - b[2] as f64 * c[1] as f64,
+                b[2] as f64 * c[0] as f64 - b[0] as f64 * c[2] as f64,
+                b[0] as f64 * c[1] as f64 - b[1] as f64 * c[0] as f64,
+            ];
+            vol += a[0] as f64 * cr[0] + a[1] as f64 * cr[1] + a[2] as f64 * cr[2];
+        }
+        assert!(vol > 0.0, "recalculated normals face outward");
+    }
+
+    #[test]
+    fn poke_face_adds_centroid_fan() {
+        let (pos, idx) = cube();
+        let (np, ni, sel) = poke_faces_indexed(&pos, &idx, &[0]);
+        assert_eq!(np.len(), 8 + 1);
+        assert_eq!(ni.len() / 3, 12 - 1 + 3);
+        assert_eq!(sel.len(), 1);
+        HalfEdgeMesh::build_from_indexed(&np, &ni).expect("manifold");
+    }
+
+    #[test]
+    fn smooth_pulls_spike_toward_neighbors() {
+        let (mut pos, idx) = cube();
+        let m0 = HalfEdgeMesh::build_from_indexed(&pos, &idx).unwrap();
+        let before = pos[6]; // +X+Y+Z corner
+        // Spike vertex 6 far out; one smoothing step must pull it back inward.
+        pos[6] = [5.0, 5.0, 5.0];
+        let m = HalfEdgeMesh::build_from_indexed(&pos, &idx).unwrap();
+        let sm = m.smoothed_positions(1, 0.5);
+        let d_before = ((5.0 - before[0]).powi(2) * 3.0).sqrt();
+        let d_after = ((sm[6][0] - before[0]).powi(2)
+            + (sm[6][1] - before[1]).powi(2)
+            + (sm[6][2] - before[2]).powi(2))
+        .sqrt();
+        assert!(d_after < d_before, "smoothing moves the spike back toward its neighbors");
+        let _ = m0;
+    }
+
+    #[test]
     fn selective_subdivide_is_crack_free() {
         let (pos, idx) = cube();
         // Subdivide one face; every neighbor sharing a split edge must conform.
@@ -629,5 +683,199 @@ mod region_op_tests {
         m.validate().expect("half-edge invariants hold");
         // Face 0 → 4 tris; its 3 split edges touch 3 neighbors → each 1→2.
         assert_eq!(ni.len() / 3, 12 - 1 + 4 - 3 + 6);
+    }
+}
+
+// ── Positional + repair operators ───────────────────────────────────────────
+
+/// Make the winding of every face consistent (Blender *Recalculate Normals*,
+/// Shift+N). Operates on raw indexed data — a half-edge mesh can't even hold
+/// an inconsistent winding (it would be non-manifold), so this is the pass you
+/// run *before* `build_from_indexed`. BFS-floods face adjacency from face 0,
+/// flipping any neighbor that traverses a shared edge in the same direction as
+/// the already-oriented face. Finally flips the whole mesh if its net signed
+/// volume is negative, so a closed surface ends up facing **outward**.
+pub fn make_normals_consistent_indexed(pos: &[[f32; 3]], idx: &[u32]) -> Vec<u32> {
+    use std::collections::HashMap;
+    let nf = idx.len() / 3;
+    let mut out = idx.to_vec();
+
+    // Map each undirected edge → the (face, directed a→b) uses of it.
+    // After orientation, a shared edge must be used in opposite directions.
+    let edge_key = |a: u32, b: u32| (a.min(b), a.max(b));
+    // adjacency: edge → list of (face_index)
+    let mut edge_faces: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (f, tri) in out.chunks_exact(3).enumerate() {
+        for k in 0..3 {
+            edge_faces
+                .entry(edge_key(tri[k], tri[(k + 1) % 3]))
+                .or_default()
+                .push(f);
+        }
+    }
+
+    // Does face f traverse the directed edge (a→b)?
+    let traverses = |out: &[u32], f: usize, a: u32, b: u32| -> bool {
+        let t = &out[f * 3..f * 3 + 3];
+        for k in 0..3 {
+            if t[k] == a && t[(k + 1) % 3] == b {
+                return true;
+            }
+        }
+        false
+    };
+    let flip = |out: &mut [u32], f: usize| out.swap(f * 3 + 1, f * 3 + 2);
+
+    let mut visited = vec![false; nf];
+    for seed in 0..nf {
+        if visited[seed] {
+            continue;
+        }
+        visited[seed] = true;
+        let mut stack = vec![seed];
+        while let Some(f) = stack.pop() {
+            let tri = [out[f * 3], out[f * 3 + 1], out[f * 3 + 2]];
+            for k in 0..3 {
+                let (a, b) = (tri[k], tri[(k + 1) % 3]);
+                let Some(neigh) = edge_faces.get(&edge_key(a, b)) else {
+                    continue;
+                };
+                for &g in neigh {
+                    if g == f || visited[g] {
+                        continue;
+                    }
+                    // Consistent ⇔ g traverses the shared edge as (b→a).
+                    if traverses(&out, g, a, b) {
+                        flip(&mut out, g); // same direction → flip
+                    }
+                    visited[g] = true;
+                    stack.push(g);
+                }
+            }
+        }
+    }
+
+    // Outward check via net signed volume of the tetrahedra (origin, tri).
+    let mut vol = 0.0f64;
+    for tri in out.chunks_exact(3) {
+        let a = pos[tri[0] as usize];
+        let b = pos[tri[1] as usize];
+        let c = pos[tri[2] as usize];
+        let cross = [
+            b[1] as f64 * c[2] as f64 - b[2] as f64 * c[1] as f64,
+            b[2] as f64 * c[0] as f64 - b[0] as f64 * c[2] as f64,
+            b[0] as f64 * c[1] as f64 - b[1] as f64 * c[0] as f64,
+        ];
+        vol += a[0] as f64 * cross[0] + a[1] as f64 * cross[1] + a[2] as f64 * cross[2];
+    }
+    if vol < 0.0 {
+        for f in 0..nf {
+            flip(&mut out, f);
+        }
+    }
+    out
+}
+
+/// Poke every face in `faces`: replace each triangle with a 3-triangle fan
+/// around a new centroid vertex (Blender *Poke Faces*). Returns the rebuilt
+/// indexed data and the new centroid vertex ids (selected afterward).
+pub fn poke_faces_indexed(
+    pos: &[[f32; 3]],
+    idx: &[u32],
+    faces: &[u32],
+) -> (Vec<[f32; 3]>, Vec<u32>, Vec<u32>) {
+    let mut in_region = vec![false; idx.len() / 3];
+    for &fi in faces {
+        if (fi as usize) < in_region.len() {
+            in_region[fi as usize] = true;
+        }
+    }
+    let mut new_pos = pos.to_vec();
+    let mut new_idx: Vec<u32> = Vec::with_capacity(idx.len() + faces.len() * 6);
+    let mut sel = Vec::new();
+    for (fi, tri) in idx.chunks_exact(3).enumerate() {
+        if !in_region[fi] {
+            new_idx.extend_from_slice(tri);
+            continue;
+        }
+        let [a, b, c] = [pos[tri[0] as usize], pos[tri[1] as usize], pos[tri[2] as usize]];
+        new_pos.push([
+            (a[0] + b[0] + c[0]) / 3.0,
+            (a[1] + b[1] + c[1]) / 3.0,
+            (a[2] + b[2] + c[2]) / 3.0,
+        ]);
+        let m = (new_pos.len() - 1) as u32;
+        sel.push(m);
+        new_idx.extend_from_slice(&[tri[0], tri[1], m, tri[1], tri[2], m, tri[2], tri[0], m]);
+    }
+    (new_pos, new_idx, sel)
+}
+
+impl HalfEdgeMesh {
+    /// Laplacian (umbrella) smoothed positions: each vertex moves `factor`
+    /// of the way toward the average of its one-ring neighbors, `iterations`
+    /// times. Boundary vertices are pinned (Blender keeps the border stable).
+    /// Returns a full position vector; the caller decides which vertices to
+    /// actually write (so a selection-only smooth records a small delta).
+    pub fn smoothed_positions(&self, iterations: u32, factor: f32) -> Vec<[f32; 3]> {
+        let n = self.vertex_count();
+        let mut cur: Vec<[f32; 3]> = self.pos.iter().copied().collect();
+        // Pin boundary verts: any vertex with a boundary outgoing half-edge.
+        let mut boundary = vec![false; n];
+        for h in 0..self.half_edge_count() as u32 {
+            if self.twin(h) == crate::INVALID {
+                boundary[self.he_vert[h as usize] as usize] = true;
+                let nx = self.he_next[h as usize];
+                boundary[self.he_vert[nx as usize] as usize] = true;
+            }
+        }
+        let mut next = cur.clone();
+        for _ in 0..iterations {
+            for v in 0..n {
+                if boundary[v] {
+                    next[v] = cur[v];
+                    continue;
+                }
+                let ring = self.one_ring_vertices(v as u32);
+                if ring.is_empty() {
+                    next[v] = cur[v];
+                    continue;
+                }
+                let mut avg = [0.0f32; 3];
+                for &nb in &ring {
+                    let p = cur[nb as usize];
+                    avg[0] += p[0];
+                    avg[1] += p[1];
+                    avg[2] += p[2];
+                }
+                let inv = 1.0 / ring.len() as f32;
+                let p = cur[v];
+                next[v] = [
+                    p[0] + factor * (avg[0] * inv - p[0]),
+                    p[1] + factor * (avg[1] * inv - p[1]),
+                    p[2] + factor * (avg[2] * inv - p[2]),
+                ];
+            }
+            std::mem::swap(&mut cur, &mut next);
+        }
+        cur
+    }
+
+    /// Rebuild with consistent, outward-facing winding.
+    pub fn with_normals_recalculated(&self) -> Result<HalfEdgeMesh, MeshError> {
+        let (p, i) = self.to_indexed();
+        let ni = make_normals_consistent_indexed(&p, &i);
+        let pv: Vec<[f32; 3]> = p.into_iter().collect();
+        HalfEdgeMesh::build_from_indexed(&pv, &ni)
+    }
+
+    /// Poke `faces` into centroid fans.
+    pub fn with_faces_poked(
+        &self,
+        faces: &[u32],
+    ) -> Result<(HalfEdgeMesh, Vec<u32>), MeshError> {
+        let (p, i) = self.to_indexed();
+        let (np, ni, sel) = poke_faces_indexed(&p, &i, faces);
+        Ok((HalfEdgeMesh::build_from_indexed(&np, &ni)?, sel))
     }
 }
