@@ -299,6 +299,22 @@ impl GltfAssetCache {
         Ok(())
     }
 
+    /// Free a loaded asset's GPU resources and forget its handle. Used when
+    /// the editor live-replaces an edited mesh (the previous synthetic asset
+    /// is freed so repeated edits don't leak). Idempotent.
+    pub fn remove(&mut self, h: GltfHandle, vulkan: &VulkanContext) {
+        unsafe {
+            let _ = vulkan.device.device_wait_idle();
+        }
+        if let Some(slot) = self.slots.get_mut(h)
+            && let Some(mut loaded) = slot.take()
+        {
+            loaded.release_blas(vulkan); // BLAS needs the AS loader; Drop frees the rest
+        }
+        self.slots.remove(h);
+        self.by_path.retain(|(_, hh)| *hh != h);
+    }
+
     pub fn get(&self, h: GltfHandle) -> Option<&LoadedGltf> {
         self.slots.get(h)?.as_ref()
     }

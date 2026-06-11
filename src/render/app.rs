@@ -784,6 +784,13 @@ impl<'a> AppCtx<'a> {
             .insert_synthetic(key, positions, normals, indices, material_layout, ctx)
     }
 
+    /// Free an asset (editor live-edit replaces the previous synthetic mesh).
+    pub fn remove_gltf(&mut self, handle: GltfHandle) {
+        if let Some(ctx) = self.vulkan {
+            self.gltf_assets.remove(handle, ctx);
+        }
+    }
+
     /// Drive background loaders; GPU-upload any that have completed.
     pub fn poll_gltf_loaders(&mut self, _app: AppHandle) -> ForgeResult<()> {
         let Some(ctx) = self.vulkan else {

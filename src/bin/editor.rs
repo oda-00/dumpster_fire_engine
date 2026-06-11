@@ -208,6 +208,14 @@ struct EditorApp {
     float_drag: Option<[f32; 2]>,
     /// Set by the outliner header's detach button; consumed in update().
     want_popout: bool,
+    /// Live mesh-edit commit: set after any edit op, drives an auto-apply at
+    /// the end of update() so the shaded viewport mesh tracks edits live.
+    edit_dirty: bool,
+    /// The synthetic asset handle for the actor currently being edited, so a
+    /// live re-commit can free the previous one (no GPU leak).
+    edited_asset: Option<GltfHandle>,
+    /// The actor whose mesh `edited_asset` belongs to.
+    edited_actor: Option<ActorHandle>,
     /// Active inspector drag-field: (key, value at press, cursor x at press).
     insp_drag: Option<(u64, f32, f32)>,
     /// Bottom panel tab: 0 = Output Log, 1 = Content Browser.
@@ -848,6 +856,7 @@ impl AppLogic for EditorApp {
                             if e.extrude_selected(off) {
                                 self.push_log("LogMesh: extruded region.", [140, 200, 140, 255]);
                             }
+                            self.edit_dirty = true;
                         } else {
                             self.toggle_edit_mode();
                         }
@@ -859,6 +868,7 @@ impl AppLogic for EditorApp {
                             if e.inset_selected(am) {
                                 self.push_log("LogMesh: inset faces.", [140, 200, 140, 255]);
                             }
+                            self.edit_dirty = true;
                             return true;
                         }
                     }
@@ -866,6 +876,7 @@ impl AppLogic for EditorApp {
                         if let Some(e) = self.edit.as_mut() {
                             e.recalc_normals();
                             self.push_log("LogMesh: recalculated normals.", [140, 200, 140, 255]);
+                            self.edit_dirty = true;
                             return true;
                         }
                     }
@@ -885,6 +896,7 @@ impl AppLogic for EditorApp {
                         if let Some(e) = self.edit.as_mut() {
                             e.delete_selected();
                         }
+                        self.edit_dirty = true;
                         return true;
                     }
                     PhysicalKey::Code(KeyCode::Digit1) => {
@@ -912,6 +924,7 @@ impl AppLogic for EditorApp {
                             } else {
                                 e.undo();
                             }
+                            self.edit_dirty = true;
                             return true;
                         }
                     }
@@ -1084,6 +1097,7 @@ impl AppLogic for EditorApp {
                         if let Some(e) = self.edit.as_mut() {
                             e.commit_transform();
                         }
+                        self.edit_dirty = true;
                     } else if let Some(start) = self.box_sel_start.take() {
                         if self.box_sel_active {
                             self.box_select(ctx, app, start, self.ui_cursor);
@@ -1224,6 +1238,13 @@ impl AppLogic for EditorApp {
 
         self.ui_left_just_pressed = false;
         self.ui_consumed_click = false;
+
+        // Live mesh-edit commit: push edits to the rendered GPU mesh so the
+        // shaded viewport tracks the edit session every frame it changes.
+        if self.edit_dirty && self.edit.is_some() {
+            self.edit_dirty = false;
+            self.apply_edit_to_object(ctx, app);
+        }
 
         let elapsed = self.start.elapsed().as_secs_f32();
         match ctx.render_world(&self.world, app, elapsed) {
@@ -1856,11 +1877,43 @@ impl EditorApp {
         match tok[0] {
             "help" => {
                 self.push_log(
-                    "  save/load [path] | spawn point|spot|dir|empty | grid on|off | sky on|off | rt | stats | tonemap 0..2 | clear | quit",
+                    "  save/load | spawn ... | edit | subdiv | smooth N | poke | recalc | grid/sky on|off | rt | stats | tonemap 0..2 | clear | quit",
                     [150, 160, 180, 255],
                 );
             }
             "clear" => self.log.clear(),
+            "edit" => self.toggle_edit_mode(),
+            "subdiv" | "subdivide" => {
+                if let Some(e) = self.edit.as_mut() {
+                    e.select_all();
+                    e.subdivide_selected();
+                    self.edit_dirty = true;
+                }
+            }
+            "smooth" => {
+                let n = tok.get(1).and_then(|t| t.parse::<u32>().ok()).unwrap_or(1);
+                if let Some(e) = self.edit.as_mut() {
+                    e.select_all();
+                    for _ in 0..n {
+                        e.smooth_selected(2, 0.5);
+                    }
+                    self.edit_dirty = true;
+                    self.push_log(format!("LogMesh: smoothed x{n}."), [140, 200, 140, 255]);
+                }
+            }
+            "poke" => {
+                if let Some(e) = self.edit.as_mut() {
+                    e.select_all();
+                    e.poke_selected();
+                    self.edit_dirty = true;
+                }
+            }
+            "recalc" => {
+                if let Some(e) = self.edit.as_mut() {
+                    e.recalc_normals();
+                    self.edit_dirty = true;
+                }
+            }
             "save" => self.save_scene(tok.get(1).copied().unwrap_or("scene.dfescene")),
             "load" => {
                 let path = tok.get(1).copied().unwrap_or("scene.dfescene").to_string();
@@ -2530,6 +2583,21 @@ impl EditorApp {
         if let Some((t, c)) = log {
             self.push_log(t, c);
         }
+        if a.extrude
+            || a.inset
+            || a.subdivide
+            || a.delete
+            || a.merge
+            || a.weld
+            || a.flip
+            || a.recalc
+            || a.smooth
+            || a.poke
+            || a.undo
+            || a.redo
+        {
+            self.edit_dirty = true;
+        }
         if do_apply {
             self.apply_edit_to_object(ctx, app);
         }
@@ -2551,6 +2619,14 @@ impl EditorApp {
                 return;
             }
         };
+        // Free the previous edited mesh for this actor (live re-commit).
+        if let (Some(old), Some(oa)) = (self.edited_asset.take(), self.edited_actor)
+            && oa == ah
+        {
+            ctx.remove_gltf(old);
+        }
+        self.edited_asset = Some(handle);
+        self.edited_actor = Some(ah);
         // Repoint the actor's environment sub-entity at the new asset. If the
         // actor has no Environment sub-entity (it was an empty / light), add
         // one — applying an edit turns any actor into a real mesh object,
@@ -2586,10 +2662,7 @@ impl EditorApp {
                 Affine3A::IDENTITY,
             );
         }
-        self.push_log(
-            format!("LogMesh: applied to object — {} verts, {} tris.", pos.len(), idx.len() / 3),
-            [140, 200, 140, 255],
-        );
+        // (Live commits are silent; the manual Apply button logs via the panel.)
     }
 
     fn draw_inspector(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
@@ -3573,6 +3646,12 @@ impl EditorApp {
             self.edit_drag = None;
             return;
         }
+        // New edit session: forget the previous actor's committed asset so a
+        // live re-commit never frees a different object's mesh.
+        if self.edited_actor != self.world.selection {
+            self.edited_asset = None;
+            self.edited_actor = None;
+        }
         let sess = self
             .selected_mesh_path()
             .and_then(|p| Self::load_edit_session(&p))
@@ -4102,6 +4181,9 @@ fn main() -> ForgeResult<()> {
         outliner_float: None,
         float_drag: None,
         want_popout: false,
+        edit_dirty: false,
+        edited_asset: None,
+        edited_actor: None,
         log: {
             let mut l = ThinVec::new();
             l.push(("LogInit: Engine initialized.".to_string(), [140, 200, 140, 255u8]));
