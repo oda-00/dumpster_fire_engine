@@ -4,4 +4,5 @@ tools/setup/target/
 .env.toolchain
 .env.toolchain.ps1
 /.llvm/
-/vendor/llvm-sys/.llvm_build/*.dfescene
+/vendor/llvm-sys/.llvm_build/
+*.dfescene
