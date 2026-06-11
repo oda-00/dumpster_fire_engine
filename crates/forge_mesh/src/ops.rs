@@ -656,6 +656,32 @@ mod region_op_tests {
     }
 
     #[test]
+    fn smooth_rounds_subdivided_cube() {
+        // Subdivide the cube twice, then Laplacian-smooth heavily: the closed
+        // surface should shrink toward its centroid (umbrella smoothing has no
+        // volume preservation), proving smoothing actually moves geometry.
+        let (pos, idx) = cube();
+        let (p1, i1, _) = subdivide_faces_indexed(&pos, &idx, &(0..(idx.len() / 3) as u32).collect::<Vec<_>>());
+        let (p2, i2, _) = subdivide_faces_indexed(&p1, &i1, &(0..(i1.len() / 3) as u32).collect::<Vec<_>>());
+        let m = HalfEdgeMesh::build_from_indexed(&p2, &i2).unwrap();
+        let bbox = |ps: &[[f32; 3]]| {
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for p in ps {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2])
+        };
+        let before = bbox(&m.pos);
+        let sm = m.smoothed_positions(40, 0.5);
+        let after = bbox(&sm);
+        assert!(after < before * 0.9, "smoothing must shrink the closed cube ({before} -> {after})");
+    }
+
+    #[test]
     fn smooth_pulls_spike_toward_neighbors() {
         let (mut pos, idx) = cube();
         let m0 = HalfEdgeMesh::build_from_indexed(&pos, &idx).unwrap();
