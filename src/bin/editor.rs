@@ -2229,7 +2229,7 @@ impl EditorApp {
     /// Edit-mode replacement for the details panel: a Blender-style mesh
     /// tools window — element modes, selection commands, topology operators
     /// with parameter drag-fields, undo/redo, and live mesh statistics.
-    fn draw_mesh_edit_panel(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+    fn draw_mesh_edit_panel(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
         use dumpster_fire_engine::render::ui_core::id::path_key;
         use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
 
@@ -2265,6 +2265,7 @@ impl EditorApp {
             smooth: bool,
             poke: bool,
             recalc: bool,
+            apply: bool,
             undo: bool,
             redo: bool,
         }
@@ -2365,6 +2366,9 @@ impl EditorApp {
             a.smooth = ui.button("Smooth Verts");
             a.poke = ui.button("Poke Faces");
 
+            ui.section_header("COMMIT");
+            a.apply = ui.button("Apply to Object");
+
             ui.section_header("HISTORY");
             {
                 let y = ui.cursor[1];
@@ -2455,6 +2459,7 @@ impl EditorApp {
             e.poke_selected();
             log = Some(("LogMesh: poked faces.".into(), [140, 200, 140, 255]));
         }
+        let do_apply = a.apply;
         if a.undo {
             e.undo();
         }
@@ -2464,15 +2469,76 @@ impl EditorApp {
         if let Some((t, c)) = log {
             self.push_log(t, c);
         }
+        if do_apply {
+            self.apply_edit_to_object(ctx, app);
+        }
     }
 
-    fn draw_inspector(&mut self, ctx: &AppCtx<'_>, app: AppHandle) {
+    /// Commit the current edit session's geometry to the selected actor's
+    /// rendered mesh: upload it as a fresh asset and repoint the actor's
+    /// MeshRef. Keeps the edit session open (Blender stays in edit mode).
+    fn apply_edit_to_object(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
+        let (Some(ah), Some((lh, sh))) = (self.world.selection, self.main_stage) else {
+            return;
+        };
+        let Some(e) = self.edit.as_ref() else { return };
+        let (pos, nrm, idx) = e.to_renderable();
+        let handle = match ctx.apply_edited_mesh(app, &pos, &nrm, &idx) {
+            Ok(h) => h,
+            Err(err) => {
+                self.push_log(format!("LogMesh: apply failed: {err:?}"), [230, 120, 120, 255]);
+                return;
+            }
+        };
+        // Repoint the actor's environment sub-entity at the new asset. If the
+        // actor has no Environment sub-entity (it was an empty / light), add
+        // one — applying an edit turns any actor into a real mesh object,
+        // matching Blender's "an edited mesh is the object".
+        let mut attached = false;
+        if let Some(stage) = self
+            .world
+            .levels
+            .get_mut(lh)
+            .and_then(|l| l.stages.get_mut(sh))
+            && let Some(actor) = stage.actors.get_mut(ah)
+        {
+            for se in actor.sub_entities.iter_mut().flatten() {
+                if let ActorType::Environment(env) = &mut se.actor_type {
+                    env.mesh = Some(MeshRef { asset: handle });
+                    env.name = Arc::from("<edited>");
+                    attached = true;
+                }
+            }
+        }
+        if !attached {
+            self.world.spawn_sub_entity(
+                lh,
+                sh,
+                ah,
+                ActorType::Environment(Environment {
+                    id: EnvironmentId::new(ah.idx as i64 + 9000),
+                    name: Arc::from("<edited>"),
+                    visible: true,
+                    physical: false,
+                    mesh: Some(MeshRef { asset: handle }),
+                }),
+                Affine3A::IDENTITY,
+            );
+        }
+        self.push_log(
+            format!("LogMesh: applied to object — {} verts, {} tris.", pos.len(), idx.len() / 3),
+            [140, 200, 140, 255],
+        );
+    }
+
+    fn draw_inspector(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle) {
         use dumpster_fire_engine::resource_manager::ui_manager::{immediate::Ui, layout::Rect};
 
         if self.edit.is_some() {
             self.draw_mesh_edit_panel(ctx, app);
             return;
         }
+        let _ = &ctx;
 
         let (win_w, win_h) = ctx
             .viewport_grid(app)

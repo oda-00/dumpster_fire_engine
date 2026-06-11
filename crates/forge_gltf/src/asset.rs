@@ -90,6 +90,80 @@ pub struct GltfAsset {
 }
 
 impl GltfAsset {
+    /// Build a minimal single-mesh, single-node asset from raw triangle
+    /// geometry — the in-memory path used when the editor commits an edited
+    /// mesh back to a rendered object. Positions/normals/indices map straight
+    /// onto one `Primitive`; the node sits at the origin (the actor carries
+    /// the world transform). Normals must be per-vertex (same length as
+    /// positions); pass an empty slice for none.
+    pub fn single_mesh(
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        indices: &[u32],
+    ) -> Self {
+        use crate::mesh::{Aabb, Mesh, Primitive, PrimitiveTopology, VertexStreams};
+        use crate::scene::{Node, Scene};
+
+        let mut streams = VertexStreams::new();
+        streams.positions = positions.iter().copied().collect();
+        streams.normals = normals.iter().copied().collect();
+        let prim = Primitive {
+            topology: PrimitiveTopology::Triangles,
+            streams,
+            indices: indices.iter().copied().collect(),
+            material: None,
+            morph_targets: ThinVec::new(),
+            bounds: Aabb::from_positions(positions),
+            custom_attrs: ThinVec::new(),
+            variant_mappings: ThinVec::new(),
+        };
+        let mesh = Mesh {
+            name: Some("edited".to_string()),
+            primitives: ThinVec::from(vec![prim]),
+            weights: ThinVec::new(),
+        };
+        let node = Node {
+            name: Some("edited".to_string()),
+            parent: None,
+            children: ThinVec::new(),
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+            local_matrix: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            mesh: Some(0),
+            camera: None,
+            skin: None,
+            light: None,
+            weights: ThinVec::new(),
+            instances: None,
+        };
+        let scene = Scene {
+            name: None,
+            roots: ThinVec::from(vec![0u32]),
+        };
+        Self {
+            asset_metadata: AssetMetadata::default(),
+            extensions_used: ThinVec::new(),
+            extensions_required: ThinVec::new(),
+            material_variants: ThinVec::new(),
+            scenes: ThinVec::from(vec![scene]),
+            default_scene: Some(0),
+            nodes: ThinVec::from(vec![node]),
+            meshes: ThinVec::from(vec![mesh]),
+            materials: ThinVec::new(),
+            textures: ThinVec::new(),
+            images: ThinVec::new(),
+            samplers: ThinVec::new(),
+            skins: ThinVec::new(),
+            animations: ThinVec::new(),
+            cameras: ThinVec::new(),
+            lights: ThinVec::new(),
+            gaussian_splats: ThinVec::new(),
+        }
+    }
+
     pub fn load(path: impl AsRef<Path>) -> GltfResult<Self> {
         // Read the bytes first so we can pre-process KHR_animation_pointer.
         let p = path.as_ref();

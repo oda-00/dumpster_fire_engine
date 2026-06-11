@@ -379,6 +379,14 @@ impl EditSession {
     /// rectangle `[lo, hi]` (screen px). `additive` keeps the current
     /// selection (Shift+drag); otherwise it replaces it. `project` maps a
     /// world-space vertex to screen px, or `None` if behind the camera.
+    /// Indexed (positions, normals, indices) for committing the edited mesh
+    /// back to a rendered GPU asset. Normals are smooth per-vertex.
+    pub fn to_renderable(&self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
+        let (pos, idx) = self.mesh.to_indexed();
+        let normals = self.mesh.vertex_normals();
+        (pos.into_iter().collect(), normals, idx.into_iter().collect())
+    }
+
     pub fn box_select_screen<P: Fn([f32; 3]) -> Option<[f32; 2]>>(
         &mut self,
         lo: [f32; 2],

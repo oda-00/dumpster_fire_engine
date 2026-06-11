@@ -688,6 +688,32 @@ impl<'a> AppCtx<'a> {
         self.gltf_assets.load(path_str, device, material_layout)
     }
 
+    /// Upload edited triangle geometry as a fresh in-memory asset and return
+    /// its handle — the editor's "apply mesh edit to the rendered object"
+    /// path. `positions`/`normals` are per-vertex (normals same length as
+    /// positions, or empty); `indices` is the triangle list.
+    pub fn apply_edited_mesh(
+        &mut self,
+        app: AppHandle,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        indices: &[u32],
+    ) -> ForgeResult<GltfHandle> {
+        let ctx = self.vulkan.ok_or_else(|| {
+            ForgeError::Io(io::Error::other("mesh edit requires the Vulkan backend"))
+        })?;
+        let material_layout = self
+            .windows
+            .get(app)
+            .ok_or_else(|| ForgeError::Io(io::Error::other("window not found")))?
+            .material_layout;
+        // Unique synthetic key per apply so each commit is its own asset.
+        let key: Arc<str> = Arc::from(format!("<edited:{}>", self.next_app_id).as_str());
+        *self.next_app_id += 1;
+        self.gltf_assets
+            .insert_synthetic(key, positions, normals, indices, material_layout, ctx)
+    }
+
     /// Drive background loaders; GPU-upload any that have completed.
     pub fn poll_gltf_loaders(&mut self, _app: AppHandle) -> ForgeResult<()> {
         let Some(ctx) = self.vulkan else {

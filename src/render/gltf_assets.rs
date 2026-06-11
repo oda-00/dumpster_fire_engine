@@ -233,6 +233,44 @@ impl GltfAssetCache {
         Ok(handle)
     }
 
+    /// Insert a synthetic, already-in-memory single-mesh asset (the editor's
+    /// "apply edited geometry" path). Uploads immediately and returns a ready
+    /// handle — no polling needed. `path` is a synthetic key (also used for
+    /// dedupe-free re-inserts; each edit makes a fresh handle).
+    pub fn insert_synthetic(
+        &mut self,
+        path: Arc<str>,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        indices: &[u32],
+        material_layout: vk::DescriptorSetLayout,
+        vulkan: &VulkanContext,
+    ) -> ForgeResult<GltfHandle> {
+        let device = vulkan.device.clone();
+        let material_pool = create_material_pool(&device, 16)?;
+        let skin_set_layout = create_skin_palette_set_layout(&device)?;
+        let skin_pool = create_skin_palette_pool(&device, 8)?;
+        let instance_layout = create_instance_set_layout(&device)?;
+        let instance_pool = create_instance_pool(&device, 16)?;
+        let asset =
+            GltfAsset::single_mesh(positions, normals, indices);
+        let loaded = build_loaded_gltf(
+            asset,
+            path.clone(),
+            device,
+            material_layout,
+            material_pool,
+            instance_layout,
+            instance_pool,
+            skin_set_layout,
+            skin_pool,
+            vulkan,
+        )?;
+        let handle = self.slots.insert(Some(loaded));
+        self.by_path.push((path, handle));
+        Ok(handle)
+    }
+
     /// Drive background loaders; GPU-upload any that have completed.
     pub fn poll(&mut self, vulkan: &VulkanContext) -> ForgeResult<()> {
         let mut i = 0;
@@ -306,16 +344,47 @@ fn finalize_load(
     vulkan: &VulkanContext,
 ) -> ForgeResult<(GltfHandle, LoadedGltf)> {
     eprintln!("gltf_assets: loaded {}", pl.path);
-    let mut cache = GltfCache::new(pl.device.clone());
+    let loaded = build_loaded_gltf(
+        asset,
+        pl.path.clone(),
+        pl.device.clone(),
+        pl.material_layout,
+        pl.material_pool,
+        pl.instance_layout,
+        pl.instance_pool,
+        pl.skin_set_layout,
+        pl.skin_pool,
+        vulkan,
+    )?;
+    Ok((pl.handle, loaded))
+}
+
+/// Asset → fully GPU-resident `LoadedGltf` (meshes uploaded, materials,
+/// rest pose/AABB, BLAS when RT is on). Shared by the async file path and the
+/// editor's synthetic in-memory insert.
+#[allow(clippy::too_many_arguments)]
+fn build_loaded_gltf(
+    asset: GltfAsset,
+    path: Arc<str>,
+    device: ash::Device,
+    material_layout: vk::DescriptorSetLayout,
+    material_pool: vk::DescriptorPool,
+    instance_layout: vk::DescriptorSetLayout,
+    instance_pool: vk::DescriptorPool,
+    skin_set_layout: vk::DescriptorSetLayout,
+    skin_pool: vk::DescriptorPool,
+    vulkan: &VulkanContext,
+) -> ForgeResult<LoadedGltf> {
+    let mut cache = GltfCache::new(device.clone());
     let upload_ctx = GltfUploadCtx {
         device: &vulkan.device,
         memory_properties: &vulkan.memory_properties,
         graphics_queue: vulkan.queue,
         command_pool: vulkan.command_pool,
-        material_set_layout: pl.material_layout,
-        material_pool: pl.material_pool,
-        instance_set_layout: pl.instance_layout,
-        instance_pool: pl.instance_pool,
+        material_set_layout: material_layout,
+        material_pool,
+        instance_set_layout: instance_layout,
+        instance_pool,
     };
     let material_sets = upload_materials_flat(&asset, &upload_ctx, &mut cache);
     let (skin_vbs, skin_vb_offsets) = upload_skin_vbs_flat(vulkan, &asset);
@@ -335,14 +404,14 @@ fn finalize_load(
         skin_vb_offsets,
         cache,
         rest_aabb,
-        material_pool: pl.material_pool,
-        skin_pool: pl.skin_pool,
-        instance_pool: pl.instance_pool,
-        material_layout: pl.material_layout,
-        skin_set_layout: pl.skin_set_layout,
-        instance_layout: pl.instance_layout,
-        path: pl.path,
-        device: pl.device.clone(),
+        material_pool,
+        skin_pool,
+        instance_pool,
+        material_layout,
+        skin_set_layout,
+        instance_layout,
+        path,
+        device,
         blas: ThinVec::new(),
         blas_buffers: ThinVec::new(),
     };
@@ -355,7 +424,7 @@ fn finalize_load(
         eprintln!("BLAS build failed for {}: {e:?}", loaded.path);
     }
 
-    Ok((pl.handle, loaded))
+    Ok(loaded)
 }
 
 /// Build a BLAS for every loaded mesh primitive that has indices.
