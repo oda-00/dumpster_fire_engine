@@ -183,6 +183,9 @@ struct EditorApp {
     quit_requested: bool,
     /// Output log lines: (text, color). Newest appended at the end.
     log: ThinVec<(String, [u8; 4])>,
+    /// Console line buffer + keyboard focus (UE-style ` console in the log).
+    console_input: String,
+    console_focus: bool,
     /// Active inspector drag-field: (key, value at press, cursor x at press).
     insp_drag: Option<(u64, f32, f32)>,
     /// Bottom panel tab: 0 = Output Log, 1 = Content Browser.
@@ -721,6 +724,35 @@ impl AppLogic for EditorApp {
     fn handle_event(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::KeyboardInput { event: ke, .. } if ke.state == ElementState::Pressed => {
+                // Console owns the keyboard while focused — editor hotkeys
+                // and the camera must not fire while typing.
+                if self.console_focus {
+                    match ke.physical_key {
+                        PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                            let cmd = std::mem::take(&mut self.console_input);
+                            if !cmd.trim().is_empty() {
+                                self.execute_console(ctx, app, cmd.trim());
+                            }
+                        }
+                        PhysicalKey::Code(KeyCode::Escape) => {
+                            self.console_focus = false;
+                            self.console_input.clear();
+                        }
+                        PhysicalKey::Code(KeyCode::Backspace) => {
+                            self.console_input.pop();
+                        }
+                        _ => {
+                            if let Some(t) = ke.text.as_ref() {
+                                for c in t.chars() {
+                                    if !c.is_control() && self.console_input.len() < 120 {
+                                        self.console_input.push(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return true;
+                }
                 match ke.physical_key {
                     PhysicalKey::Code(KeyCode::Tab) => {
                         if let Some(grid) = ctx.viewport_grid_mut(app) {
@@ -1655,6 +1687,62 @@ impl EditorApp {
         );
     }
 
+    /// Execute one console line. Commands mirror the menu/toolbar actions so
+    /// everything is scriptable from the keyboard, UE-console style.
+    fn execute_console(&mut self, ctx: &mut AppCtx<'_>, app: AppHandle, cmd: &str) {
+        self.push_log(format!("> {cmd}"), [160, 170, 190, 255]);
+        let tok: ThinVec<&str> = cmd.split_whitespace().collect();
+        match tok[0] {
+            "help" => {
+                self.push_log(
+                    "  save/load [path] | spawn point|spot|dir|empty | grid on|off | sky on|off | rt | stats | tonemap 0..2 | clear | quit",
+                    [150, 160, 180, 255],
+                );
+            }
+            "clear" => self.log.clear(),
+            "save" => self.save_scene(tok.get(1).copied().unwrap_or("scene.dfescene")),
+            "load" => {
+                let path = tok.get(1).copied().unwrap_or("scene.dfescene").to_string();
+                self.load_scene(ctx, app, &path);
+            }
+            "spawn" => match tok.get(1).copied() {
+                Some("point") => self.spawn_light(LightKind::Point),
+                Some("spot") => self.spawn_light(LightKind::Spot {
+                    cone_inner: 0.5,
+                    cone_outer: 0.8,
+                    direction: [0.0, -1.0, 0.0],
+                }),
+                Some("dir") => self.spawn_light(LightKind::Directional {
+                    direction: [0.0, -1.0, 0.0],
+                }),
+                Some(name) => self.spawn_empty(name),
+                None => self.push_log("  usage: spawn point|spot|dir|<name>", [200, 160, 110, 255]),
+            },
+            "grid" => {
+                let on = tok.get(1) != Some(&"off");
+                self.grid_enabled = on;
+                self.world.grid_enabled = on;
+            }
+            "sky" => self.world.sky_enabled = tok.get(1) != Some(&"off"),
+            "rt" => {
+                if let Some(mode) = ctx.toggle_lighting_mode(app) {
+                    self.push_log(format!("  lighting → {mode:?}"), [150, 160, 180, 255]);
+                }
+            }
+            "stats" => self.stats_open = !self.stats_open,
+            "tonemap" => {
+                if let Some(op) = tok.get(1).and_then(|t| t.parse::<u32>().ok()) {
+                    self.world.tonemap_op = op.min(2);
+                }
+            }
+            "quit" => self.quit_requested = true,
+            other => self.push_log(
+                format!("  unknown command '{other}' — try help"),
+                [230, 120, 120, 255],
+            ),
+        }
+    }
+
     fn push_log(&mut self, text: impl Into<String>, color: [u8; 4]) {
         self.log.push((text.into(), color));
         if self.log.len() > 200 {
@@ -2371,7 +2459,7 @@ impl EditorApp {
 
             // Log content — newest lines that fit, tail-anchored.
             let line_y_start = stats_y + 22.0;
-            let avail = ((win_h - 6.0 - line_y_start) / 18.0).max(0.0) as usize;
+            let avail = ((win_h - 30.0 - line_y_start) / 18.0).max(0.0) as usize;
             let skip = self.log.len().saturating_sub(avail);
             for (i, (text, color)) in self.log.iter().skip(skip).enumerate() {
                 let ly = line_y_start + i as f32 * 18.0;
@@ -2393,6 +2481,54 @@ impl EditorApp {
                     }
                     tx += 8.0;
                 }
+            }
+
+            // ── Console input row (click to focus, Enter executes) ────────
+            let row_y = win_h - 26.0;
+            let row_h = 22.0;
+            let in_row = self.ui_cursor[0] >= 4.0
+                && self.ui_cursor[0] < win_w - 4.0
+                && self.ui_cursor[1] >= row_y
+                && self.ui_cursor[1] < row_y + row_h;
+            if self.ui_left_just_pressed {
+                self.console_focus = in_row;
+            }
+            let bg = if self.console_focus {
+                [22, 26, 38, 255]
+            } else {
+                [18, 18, 24, 255]
+            };
+            dl.push_rect(4.0, row_y, win_w - 8.0, row_h, uidraw::SOLID, bg);
+            let bc = if self.console_focus {
+                [110, 150, 220, 255u8]
+            } else {
+                [58, 58, 74, 255]
+            };
+            dl.push_line(4.0, row_y, win_w - 4.0, row_y, 1.0, bc);
+            dl.push_line(4.0, row_y + row_h, win_w - 4.0, row_y + row_h, 1.0, bc);
+            let mut tx = 10.0;
+            let prompt = format!("> {}", self.console_input);
+            for c in prompt.chars() {
+                if tx + 8.0 > win_w - 12.0 {
+                    break;
+                }
+                if c != ' ' {
+                    let uv = font::glyph_rect(c);
+                    if uv != [0f32; 4] {
+                        dl.push_rect(tx, row_y + 3.0, 8.0, 16.0, uv, [210, 215, 228, 255]);
+                    }
+                }
+                tx += 8.0;
+            }
+            if self.console_focus {
+                dl.push_rect(
+                    tx + 1.0,
+                    row_y + 3.0,
+                    2.0,
+                    16.0,
+                    uidraw::SOLID,
+                    [180, 200, 240, 255],
+                );
             }
         } else {
             // Content browser — asset tiles from the scanned model paths.
@@ -3384,6 +3520,8 @@ fn main() -> ForgeResult<()> {
         insp_drag: None,
         bottom_tab: 0,
         saved_layout: None,
+        console_input: String::new(),
+        console_focus: false,
         log: {
             let mut l = ThinVec::new();
             l.push(("LogInit: Engine initialized.".to_string(), [140, 200, 140, 255u8]));
