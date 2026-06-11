@@ -10,6 +10,7 @@ pub mod font;
 pub mod forge;
 pub mod icon;
 pub mod immediate;
+pub mod theme;
 pub mod input;
 pub mod label;
 pub mod layout;

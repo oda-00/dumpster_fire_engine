@@ -51,13 +51,14 @@ use dumpster_fire_engine::resource_manager::{
 
 // ── Layout constants ───────────────────────────────────────────────────────
 
-const MENUBAR_H: f32 = 22.0;
-const TOOLBAR_H: f32 = 50.0; // menu row (0..MENUBAR_H) + icon row
-const TITLEBAR_H: f32 = 22.0;
-const SEP: [u8; 4] = [58, 58, 74, 255];
-const PANEL_BG: [u8; 4] = [22, 22, 28, 240];
-const TITLEBAR_BG: [u8; 4] = [35, 35, 45, 255];
-const TOOLBAR_BG: [u8; 4] = [26, 26, 34, 255];
+use dumpster_fire_engine::resource_manager::ui_manager::theme as th;
+const MENUBAR_H: f32 = 24.0;
+const TOOLBAR_H: f32 = 54.0; // menu row (0..MENUBAR_H) + icon row
+const TITLEBAR_H: f32 = th::TITLEBAR_H;
+const SEP: [u8; 4] = th::COL_SEP;
+const PANEL_BG: [u8; 4] = th::COL_PANEL_BG;
+const TITLEBAR_BG: [u8; 4] = th::COL_HEADER_BG;
+const TOOLBAR_BG: [u8; 4] = th::COL_TOOLBAR_BG;
 
 // ── Editor state ───────────────────────────────────────────────────────────
 
@@ -1212,8 +1213,8 @@ impl EditorApp {
         let (a, tip, menu_toggle) = {
             let dl = &mut self.world.ui.draw_list;
             dl.push_panel_bg(0.0, 0.0, win_w, TOOLBAR_H, TOOLBAR_BG);
-            dl.push_hsep(0.0, MENUBAR_H, win_w, [44, 44, 58, 255]);
-            dl.push_hsep(0.0, TOOLBAR_H, win_w, SEP);
+            dl.push_rect(0.0, MENUBAR_H, win_w, 1.0, uidraw::SOLID, th::COL_BORDER_DARK);
+            dl.push_rect(0.0, TOOLBAR_H - 1.0, win_w, 1.0, uidraw::SOLID, th::COL_BORDER);
 
             // Menu bar row (File / Edit / Window / Help)
             let mut menu_toggle: Option<usize> = None;
@@ -1508,11 +1509,11 @@ impl EditorApp {
             let lx = px.max(ow) + 8.0;
             let ly = py.max(TOOLBAR_H) + 6.0;
             let tw = label.chars().count() as f32 * 8.0 + 10.0;
-            dl.push_rect(lx, ly, tw, 20.0, uidraw::SOLID, [16, 16, 24, 200]);
+            dl.push_rect(lx, ly, tw, 20.0, uidraw::SOLID, th::COL_VIEWPORT_TAG_BG);
             let tc: [u8; 4] = if focused {
-                [170, 200, 245, 230]
+                th::COL_TEXT_ACCENT
             } else {
-                [150, 155, 175, 200]
+                th::COL_TEXT_DIM
             };
             let mut tx = lx + 5.0;
             for c in label.chars() {
@@ -2068,24 +2069,13 @@ impl EditorApp {
         // Now borrow draw_list and render.
         let dl = &mut self.world.ui.draw_list;
         dl.push_panel_bg(x, y, ow, panel_h, PANEL_BG);
-        dl.push_title_bar(x, y, ow, TITLEBAR_H, TITLEBAR_BG, SEP);
-        // Title bar label "OUTLINER"
-        {
-            use dumpster_fire_engine::resource_manager::ui_manager::font;
-            let mut tx = x + 6.0;
-            for c in "OUTLINER".chars() {
-                let uv = font::glyph_rect(c);
-                if uv != [0f32; 4] {
-                    dl.push_rect(tx, y + 3.0, 8.0, 16.0, uv, [200, 210, 230, 255]);
-                }
-                tx += 8.0;
-            }
-        }
+        th::push_panel_header(dl, x, y, ow, "OUTLINER", true);
+        th::push_bevel(dl, x, y, ow, panel_h);
         // Left divider — highlight when hovering or dragging
         let div_col = if self.div_hover == Some(0) || self.div_drag == Some(0) {
-            [120, 160, 220, 255u8]
+            th::COL_DIVIDER_HOVER
         } else {
-            SEP
+            th::COL_SEP_STRONG
         };
         dl.push_vsep(x + ow, y, panel_h + self.bottom_h, div_col);
 
@@ -2103,13 +2093,13 @@ impl EditorApp {
         {
             for (ah, (icon_id, icon_col), is_sel, hovered, _) in &rows {
                 let bg = if *is_sel {
-                    [55, 95, 155, 255]
+                    th::COL_ROW_SELECTED
                 } else if *hovered {
-                    [38, 38, 52, 255]
+                    th::COL_ROW_HOVER
                 } else if (ah.idx & 1) == 0 {
-                    [26, 26, 33, 255]
+                    th::COL_PANEL_BG
                 } else {
-                    [24, 24, 30, 255]
+                    th::COL_PANEL_BG_ALT
                 };
                 dl.push_rect(x, row_y, ow, row_h - 1.0, uidraw::SOLID, bg);
                 dl.push_rect(x + 5.0, row_y + 3.0, 16.0, 16.0, font::icon_rect(*icon_id), *icon_col);
@@ -2284,22 +2274,8 @@ impl EditorApp {
         {
             let dl = &mut self.world.ui.draw_list;
             dl.push_panel_bg(ix, iy, iw, panel_h, PANEL_BG);
-            dl.push_title_bar(ix, iy, iw, TITLEBAR_H, TITLEBAR_BG, SEP);
-            {
-                use dumpster_fire_engine::resource_manager::ui_manager::font;
-                let mut tx = ix + 6.0;
-                for c in "MESH EDIT".chars() {
-                    if c == ' ' {
-                        tx += 8.0;
-                        continue;
-                    }
-                    let uv = font::glyph_rect(c);
-                    if uv != [0f32; 4] {
-                        dl.push_rect(tx, iy + 3.0, 8.0, 16.0, uv, [255, 200, 120, 255]);
-                    }
-                    tx += 8.0;
-                }
-            }
+            th::push_panel_header(dl, ix, iy, iw, "MESH EDIT", true);
+            th::push_bevel(dl, ix, iy, iw, panel_h);
             let div_col = if self.div_hover == Some(1) || self.div_drag == Some(1) {
                 [120, 160, 220, 255u8]
             } else {
@@ -2553,22 +2529,12 @@ impl EditorApp {
                            div_hover: Option<u8>,
                            div_drag: Option<u8>| {
             dl.push_panel_bg(ix, iy, iw, panel_h, PANEL_BG);
-            dl.push_title_bar(ix, iy, iw, TITLEBAR_H, TITLEBAR_BG, SEP);
-            {
-                use dumpster_fire_engine::resource_manager::ui_manager::font;
-                let mut tx = ix + 6.0;
-                for c in "DETAILS".chars() {
-                    let uv = font::glyph_rect(c);
-                    if uv != [0f32; 4] {
-                        dl.push_rect(tx, iy + 3.0, 8.0, 16.0, uv, [200, 210, 230, 255]);
-                    }
-                    tx += 8.0;
-                }
-            }
+            th::push_panel_header(dl, ix, iy, iw, "DETAILS", true);
+            th::push_bevel(dl, ix, iy, iw, panel_h);
             let div_col = if div_hover == Some(1) || div_drag == Some(1) {
-                [120, 160, 220, 255u8]
+                th::COL_DIVIDER_HOVER
             } else {
-                SEP
+                th::COL_SEP_STRONG
             };
             dl.push_vsep(ix, iy, panel_h + self.bottom_h, div_col);
         };
@@ -2858,11 +2824,11 @@ impl EditorApp {
 
         dl.push_panel_bg(0.0, by, win_w, self.bottom_h, PANEL_BG);
         let div_col = if self.div_hover == Some(2) || self.div_drag == Some(2) {
-            [120, 160, 220, 255u8]
+            th::COL_DIVIDER_HOVER
         } else {
-            SEP
+            th::COL_SEP_STRONG
         };
-        dl.push_hsep(0.0, by, win_w, div_col);
+        dl.push_rect(0.0, by, win_w, 1.0, uidraw::SOLID, div_col);
         dl.push_title_bar(0.0, by, win_w, TITLEBAR_H, TITLEBAR_BG, SEP);
 
         // Tab strip: OUTPUT LOG | CONTENT

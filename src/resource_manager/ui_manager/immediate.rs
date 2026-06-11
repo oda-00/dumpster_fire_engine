@@ -2,6 +2,7 @@ use super::button::{ButtonData, ButtonState};
 use super::checkbox::CheckboxData;
 use super::draw::{self, DrawList};
 use super::font;
+use super::theme as th;
 use super::input::UiInputState;
 use super::layout::Rect;
 
@@ -60,7 +61,7 @@ impl<'a> Ui<'a> {
 
     /// Draw text at the current cursor, advancing cursor[1] after.
     pub fn label(&mut self, text: &str) -> &mut Self {
-        self.text_at(self.cursor[0], self.cursor[1], text, [210, 210, 220, 255]);
+        self.text_at(self.cursor[0], self.cursor[1], text, th::COL_TEXT_DIM);
         self.cursor[1] += font::GLYPH_H as f32 + 2.0;
         self
     }
@@ -103,14 +104,15 @@ impl<'a> Ui<'a> {
         let hovered = self.hovered(x, y, w, h);
         let clicked = hovered && self.input.left_just_pressed;
         let color = if clicked {
-            [120, 150, 200, 255]
+            th::COL_CTRL_PRESSED
         } else if hovered {
-            [100, 100, 150, 255]
+            th::COL_CTRL_HOVER
         } else {
-            [70, 70, 105, 255]
+            th::COL_CTRL_BG
         };
         self.draw.push_rect(x, y, w, h, draw::SOLID, color);
-        self.text_at(x + 4.0, y + 4.0, text, [210, 210, 220, 255]);
+        th::push_bevel(self.draw, x, y, w, h);
+        self.text_at(x + 6.0, y + 4.0, text, th::COL_TEXT);
         self.cursor[1] += 26.0;
         clicked
     }
@@ -125,12 +127,13 @@ impl<'a> Ui<'a> {
         let hovered = self.hovered(x, y, w, h);
         let clicked = hovered && self.input.left_just_pressed;
         let color = match data.state {
-            ButtonState::Pressed => [120, 150, 200, 255],
-            ButtonState::Hovered => [100, 100, 155, 255],
-            ButtonState::Idle => [70, 70, 105, 255],
+            ButtonState::Pressed => th::COL_CTRL_PRESSED,
+            ButtonState::Hovered => th::COL_CTRL_HOVER,
+            ButtonState::Idle => th::COL_CTRL_BG,
         };
         self.draw.push_rect(x, y, w, h, draw::SOLID, color);
-        self.text_at(x + 4.0, y + 4.0, text, [210, 210, 220, 255]);
+        th::push_bevel(self.draw, x, y, w, h);
+        self.text_at(x + 6.0, y + 4.0, text, th::COL_TEXT);
         self.cursor[1] += 26.0;
         clicked
     }
@@ -153,12 +156,10 @@ impl<'a> Ui<'a> {
             }
         }
         let t = ((*value - min) / (max - min).max(1e-5)).clamp(0.0, 1.0);
-        self.draw
-            .push_rect(x, y, w, h, draw::SOLID, [50, 50, 60, 255]);
-        self.draw
-            .push_rect(x, y, w * t, h, draw::SOLID, [70, 130, 195, 255]);
+        self.draw.push_rect(x, y, w, h, draw::SOLID, th::COL_INPUT_BG);
+        self.draw.push_rect(x, y, w * t, h, draw::SOLID, th::COL_ACCENT);
         // Label to the right of the track (tiny, 8px glyphs)
-        self.text_at(x + 2.0, y - 9.0, label, [160, 160, 180, 200]);
+        self.text_at(x + 2.0, y - 9.0, label, th::COL_TEXT_DIM);
         self.cursor[1] += 20.0;
         changed
     }
@@ -174,12 +175,12 @@ impl<'a> Ui<'a> {
             *checked = !*checked;
         }
         let color = if *checked {
-            [80, 200, 80, 255]
+            th::COL_CHECK_ON
         } else {
-            [80, 80, 80, 255]
+            th::COL_CHECK_OFF
         };
         self.draw.push_rect(x, y, h, h, draw::SOLID, color);
-        self.text_at(x + h + 4.0, y, label, [190, 190, 200, 255]);
+        self.text_at(x + h + 4.0, y, label, th::COL_TEXT_DIM);
         self.cursor[1] += 20.0;
         clicked
     }
@@ -191,12 +192,12 @@ impl<'a> Ui<'a> {
         let sz = 16.0_f32;
         data.last_rect = Rect { x, y, w: sz, h: sz };
         let color = if data.checked {
-            [80, 200, 80, 255]
+            th::COL_CHECK_ON
         } else {
-            [80, 80, 80, 255]
+            th::COL_CHECK_OFF
         };
         self.draw.push_rect(x, y, sz, sz, draw::SOLID, color);
-        self.text_at(x + sz + 4.0, y, label, [190, 190, 200, 255]);
+        self.text_at(x + sz + 4.0, y, label, th::COL_TEXT_DIM);
         self.cursor[1] += 20.0;
         data.checked
     }
@@ -211,16 +212,10 @@ impl<'a> Ui<'a> {
         let x = self.cursor[0];
         let y = self.cursor[1];
         self.draw
-            .push_rect(x, y, self.width, 18.0, draw::SOLID, [42, 42, 54, 255]);
-        self.draw.push_line(
-            x,
-            y + 18.0,
-            x + self.width,
-            y + 18.0,
-            1.0,
-            [68, 68, 84, 255],
-        );
-        self.text_at(x + 4.0, y + 1.0, text, [180, 180, 210, 255]);
+            .push_rect(x, y, self.width, 18.0, draw::SOLID, th::COL_HEADER_BG);
+        self.draw
+            .push_rect(x, y + 17.0, self.width, 1.0, draw::SOLID, th::COL_ACCENT_DIM);
+        self.text_at(x + 4.0, y + 1.0, text, th::COL_TEXT_HEADER);
         self.cursor[1] += 20.0;
         self
     }
@@ -265,17 +260,17 @@ impl<'a> Ui<'a> {
         let hovered = self.hovered(x, y, w, h);
         let clicked = hovered && self.input.left_just_pressed;
         let color = if clicked {
-            [120, 150, 200, 255]
+            th::COL_CTRL_PRESSED
         } else if hovered {
-            [100, 100, 150, 255]
+            th::COL_CTRL_HOVER
         } else {
-            [60, 60, 85, 255]
+            th::COL_CTRL_BG
         };
         self.draw.push_rect(x, y, w, h, draw::SOLID, color);
         // Center text horizontally in the button
         let text_w = text.chars().count() as f32 * font::GLYPH_W as f32;
         let tx = x + ((w - text_w) * 0.5).max(2.0);
-        self.text_at(tx, y + 2.0, text, [210, 210, 220, 255]);
+        self.text_at(tx, y + 2.0, text, th::COL_TEXT);
         self.cursor[0] += w + 4.0;
         clicked
     }
@@ -291,13 +286,13 @@ impl<'a> Ui<'a> {
             *checked = !*checked;
         }
         let color = if *checked {
-            [80, 200, 80, 255]
+            th::COL_CHECK_ON
         } else {
-            [60, 60, 80, 255]
+            th::COL_CHECK_OFF
         };
         self.draw.push_rect(x, y, sz, sz, draw::SOLID, color);
         // Short label beside the box
-        self.text_at(x + sz + 2.0, y + 2.0, label, [190, 190, 200, 255]);
+        self.text_at(x + sz + 2.0, y + 2.0, label, th::COL_TEXT_DIM);
         let label_w = label.chars().count() as f32 * font::GLYPH_W as f32;
         self.cursor[0] += sz + 2.0 + label_w + 4.0;
         clicked
@@ -323,7 +318,7 @@ impl<'a> Ui<'a> {
             1.0,
             h - 2.0,
             draw::SOLID,
-            [70, 70, 88, 255],
+            th::COL_SEP_STRONG,
         );
         self.cursor[0] += 9.0;
     }
@@ -340,24 +335,24 @@ impl<'a> Ui<'a> {
         let hovered = self.hovered(x, y, sz, sz);
         let clicked = hovered && self.input.left_just_pressed;
         let bg = if active {
-            [36, 98, 176, 255] // selected-tool accent
+            th::COL_ACCENT_DIM // selected-tool accent
         } else if clicked {
-            [110, 140, 200, 255]
+            th::COL_CTRL_PRESSED
         } else if hovered {
-            [72, 72, 96, 255]
+            th::COL_CTRL_HOVER
         } else {
-            [47, 47, 61, 255]
+            th::COL_CTRL_BG
         };
         self.draw.push_rect(x, y, sz, sz, draw::SOLID, bg);
         // Active tools get a bottom accent line, like DCC mode tabs.
         if active {
             self.draw
-                .push_rect(x, y + sz - 2.0, sz, 2.0, draw::SOLID, [120, 190, 255, 255]);
+                .push_rect(x, y + sz - 2.0, sz, 2.0, draw::SOLID, th::COL_ACCENT_HI);
         }
         let tint = if active || hovered {
-            [255, 255, 255, 255]
+            th::COL_TEXT
         } else {
-            [198, 202, 214, 255]
+            th::COL_TEXT_DIM
         };
         let pad = (sz - font::ICON_W as f32) * 0.5;
         self.draw.push_rect(
@@ -404,20 +399,20 @@ impl<'a> Ui<'a> {
         }
 
         // Label (dim, left)
-        self.text_at(x, y + 1.0, label, [150, 155, 175, 255]);
+        self.text_at(x, y + 1.0, label, th::COL_TEXT_DIM);
         // Value box
         let bg = if dragging {
-            [38, 72, 130, 255]
+            th::COL_ACCENT_DIM
         } else if hovered {
-            [52, 52, 70, 255]
+            th::COL_CTRL_HOVER
         } else {
-            [40, 40, 54, 255]
+            th::COL_INPUT_BG
         };
         self.draw.push_rect(bx, y, box_w, h, draw::SOLID, bg);
         let edge: [u8; 4] = if dragging {
-            [110, 170, 240, 255]
+            th::COL_ACCENT_HI
         } else {
-            [62, 62, 80, 255]
+            th::COL_BORDER_LIGHT
         };
         self.draw.push_rect(bx, y + h - 1.0, box_w, 1.0, draw::SOLID, edge);
         // Right-aligned value text
@@ -425,9 +420,9 @@ impl<'a> Ui<'a> {
         let tw = txt.chars().count() as f32 * font::GLYPH_W as f32;
         let tx = (bx + box_w - tw - 6.0).max(bx + 2.0);
         let vc: [u8; 4] = if dragging {
-            [240, 246, 255, 255]
+            th::COL_TEXT
         } else {
-            [205, 210, 224, 255]
+            th::COL_TEXT
         };
         self.text_at(tx, y + 1.0, &txt, vc);
 
@@ -439,8 +434,8 @@ impl<'a> Ui<'a> {
     pub fn draw_tooltip(draw: &mut DrawList, x: f32, y: f32, text: &str) {
         let w = text.chars().count() as f32 * font::GLYPH_W as f32 + 10.0;
         let h = 20.0_f32;
-        draw.push_rect(x, y, w, h, draw::SOLID, [16, 16, 22, 246]);
-        let bc = [96, 96, 128, 255];
+        draw.push_rect(x, y, w, h, draw::SOLID, th::COL_TOOLTIP_BG);
+        let bc = th::COL_BORDER_LIGHT;
         draw.push_rect(x, y, w, 1.0, draw::SOLID, bc);
         draw.push_rect(x, y + h - 1.0, w, 1.0, draw::SOLID, bc);
         draw.push_rect(x, y, 1.0, h, draw::SOLID, bc);
@@ -449,7 +444,7 @@ impl<'a> Ui<'a> {
         for c in text.chars() {
             let uv = font::glyph_rect(c);
             if c != ' ' && uv != [0.0_f32; 4] {
-                draw.push_rect(tx, y + 2.0, 8.0, 16.0, uv, [214, 218, 228, 255]);
+                draw.push_rect(tx, y + 2.0, 8.0, 16.0, uv, th::COL_TEXT);
             }
             tx += font::GLYPH_W as f32;
         }
